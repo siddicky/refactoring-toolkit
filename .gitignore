@@ -1,0 +1,25 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Run artifacts (AC2 metrics renders are run outputs, not source)
+metrics/
+
+# Toolkit-owned worktree leases (git worktrees created at runtime)
+.worktrees/
+.worktree/
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# dex local dev state
+.dex/
+
+# Logs and OS noise
+*.log
+.DS_Store

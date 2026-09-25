@@ -1,0 +1,16 @@
+{
+  "mode": "team",
+  "active": true,
+  "current_phase": "team-exec",
+  "team_name": "porting-toolkit-v1",
+  "agent_count": 4,
+  "agent_types": "executor",
+  "task": "Execute approved consensus plan: durable adversarial porting toolkit (dex + opencode + TypeSafe), phases -1 through 7",
+  "plan_path": ".omc/plans/2026-09-25-porting-toolkit-consensus.md",
+  "spec_path": ".omc/specs/deep-interview-dex-opencode-porting-toolkit.md",
+  "fix_loop_count": 0,
+  "max_fix_loops": 3,
+  "linked_ralph": false,
+  "stage_history": "team-plan:2026-09-25T18:45:00Z (consensus plan pre-approved),team-prd:skipped (ACs explicit in plan),team-exec:2026-09-25T18:46:00Z",
+  "workers": ["worker-1", "worker-2", "worker-3", "worker-4"]
+}

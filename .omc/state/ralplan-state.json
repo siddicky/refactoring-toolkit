@@ -1,0 +1,12 @@
+{
+  "mode": "ralplan",
+  "active": false,
+  "current_phase": "pending_approval",
+  "started_at": "2026-09-25T17:55:00Z",
+  "completed_at": "2026-09-25T18:40:00Z",
+  "plan_path": ".omc/plans/2026-09-25-porting-toolkit-consensus.md",
+  "spec_path": ".omc/specs/deep-interview-dex-opencode-porting-toolkit.md",
+  "iterations": 5,
+  "outcome": "max-iterations: architect SOUND-WITH-CHANGES (rounds 2-5), critic REVISE (rounds 1-5, narrowing); all round-5 feedback folded into final v6; plan marked pending approval; no execution without explicit user approval",
+  "provider_overrides": { "architect": "glm-5.3 (zai)", "critic": "codex" }
+}
