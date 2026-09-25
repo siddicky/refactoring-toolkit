@@ -1,0 +1,22 @@
+# dex server local dev — porting-toolkit v1
+#
+# STATUS (Phase 0, 2026-09-25): superdurable/dex does NOT yet publish an official
+# Docker image for the dex server (checked: docs.superdurable.io quick start,
+# github.com/superdurable/dex). The supported local path is the dexcli binary:
+#
+#     brew install superdurable/tap/dexcli
+#     dexcli dev          # dex gRPC on 127.0.0.1:8801, web on 8802
+#
+# This compose file is kept as the seam for a container-based server once an
+# official image (or a locally built server image from the monorepo `server/`
+# directory) exists. It is intentionally NOT runnable today — do not fake it.
+#
+# Un-comment and adapt when an image is available:
+#
+# services:
+#   dex-server:
+#     image: ghcr.io/superdurable/dex-server:PINNED_TAG
+#     ports:
+#       - "127.0.0.1:8801:8801"
+#     volumes:
+#       - ./.dex/blobs:/data/blobs

@@ -19,6 +19,10 @@ dist/
 
 # dex local dev state
 .dex/
+.dex-cache/
+
+# Chaos-kill evidence sidecars written at run time
+kill-events*.json
 
 # Logs and OS noise
 *.log

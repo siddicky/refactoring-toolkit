@@ -1,0 +1,9 @@
+Reference copy of TSC_SAMPLE_1 in testdata/tsc-fixtures.ts (tests read the TS module to stay dependency-free; keep both in sync).
+
+src/services/user-service.ts(12,3): error TS2304: Cannot find name 'mysqli_query'.
+src/services/user-service.ts(20,10): error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'.
+  Types of parameters 'email' and 'email' are incompatible.
+    Type 'null' is not assignable to type 'string'.
+src/repositories/user-repository.ts(5,1): error TS2304: Cannot find name 'PDO'.
+src/repositories/user-repository.ts(31,9): error TS2551: Property 'fetch_all' does not exist on type 'UserRow[]'. Did you mean 'flatMap'?
+Found 4 errors in 2 files.
