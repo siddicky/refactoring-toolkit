@@ -68,6 +68,54 @@ export interface PromptResult {
   aborted: boolean;
 }
 
+export interface PromptOptions {
+  /**
+   * Per-tool overrides merged into the prompt body (opencode `tools` map).
+   * The harness bridge passes DENY-authoritative maps so reviewer turns run
+   * with every tool disabled SERVER-SIDE, not just in the prompt text.
+   */
+  tools?: Record<string, boolean>;
+  /** opencode agent name; defaults to OPENCODE_AGENT env or server default. */
+  agent?: string;
+}
+
+/** How long prompt() polls for a completed assistant reply (0(g) provenance). */
+const PROMPT_WAIT_MS = Number.parseInt(
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
+    ?.OPENCODE_PROMPT_WAIT_MS ?? "900000",
+  10,
+);
+
+/**
+ * Typed failure for one prompt turn. `retryable` failures (upstream aborts,
+ * empty native-tool replies) should be retried on a FRESH session by the
+ * caller (dex step retry); non-retryable means the reply completed but
+ * carried no usage — a provenance failure for model-calling steps.
+ */
+export class OpencodePromptError extends Error {
+  readonly retryable: boolean;
+  constructor(message: string, retryable: boolean) {
+    super(message);
+    this.name = "OpencodePromptError";
+    this.retryable = retryable;
+  }
+}
+
+/**
+ * Extracts the upstream error of an assistant message, if any.
+ * ODW finding (live-verified): session.prompt RESOLVES (does not throw) with
+ * info.error set when the upstream provider fails — callers must check.
+ */
+function upstreamErrorOf(info: unknown): string | null {
+  if (typeof info !== "object" || info === null) return null;
+  const err = (info as { error?: unknown }).error;
+  if (err === undefined || err === null) return null;
+  const e = err as { name?: unknown; message?: unknown };
+  const name = typeof e.name === "string" ? e.name : "UnknownError";
+  const message = typeof e.message === "string" ? e.message : "";
+  return message.length > 0 ? `${name}: ${message}` : name;
+}
+
 export interface SessionRef {
   id: string;
   title: string;
@@ -81,7 +129,7 @@ export const DEFAULT_OPENCODE_BASE_URL = "http://127.0.0.1:4096";
  */
 export interface AgentSessionClient {
   createSession(label: string): Promise<SessionRef>;
-  prompt(sessionId: string, text: string): Promise<PromptResult>;
+  prompt(sessionId: string, text: string, opts?: PromptOptions): Promise<PromptResult>;
   /** Enumeration fallback orchestration used by ordered recovery. */
   abortSessionsNotTagged(epoch: number): Promise<string[]>;
 }
@@ -89,13 +137,17 @@ export interface AgentSessionClient {
 export class OpencodeHarness {
   readonly #client: OpencodeClient;
   readonly #model: { providerID: string; modelID: string } | undefined;
+  /** Default opencode agent for turns (OPENCODE_AGENT env), if configured. */
+  readonly defaultAgent: string | undefined;
 
   constructor(
     client: OpencodeClient,
     model?: { providerID: string; modelID: string } | undefined,
+    defaultAgent?: string | undefined,
   ) {
     this.#client = client;
     this.#model = model;
+    this.defaultAgent = defaultAgent;
   }
 
   static async connect(
@@ -103,7 +155,8 @@ export class OpencodeHarness {
     model?: { providerID: string; modelID: string } | undefined,
   ): Promise<OpencodeHarness> {
     const client = createOpencodeClient({ baseUrl } as never);
-    return new OpencodeHarness(client, model);
+    const defaultAgent = readEnvVar("OPENCODE_AGENT");
+    return new OpencodeHarness(client, model, defaultAgent);
   }
 
   /** Creates a session with an epoch-tagged label as its title (fencing tag). */
@@ -120,27 +173,102 @@ export class OpencodeHarness {
 
   /**
    * Sends one prompt and waits for the assistant reply. Returns extracted
-   * token usage; `usage === null` means the server did not expose usage and is
+   * token usage; `usage === null` means the server never exposed usage and is
    * a PROVENANCE FAILURE for model-calling steps (never zero).
+   *
+   * Pre-release reality (observed live): session.prompt may resolve while the
+   * model is still working (queued or long-reasoning turns) with a payload
+   * that carries no tokens. To keep provenance honest, poll the session's
+   * messages until the assistant reply completes (or aborts) instead of
+   * returning an immediate null.
    */
-  async prompt(sessionId: string, text: string): Promise<PromptResult> {
+  async prompt(sessionId: string, text: string, opts?: PromptOptions): Promise<PromptResult> {
+    const agent = opts?.agent ?? this.defaultAgent;
     const res = await this.#client.session.prompt({
       path: { id: sessionId },
       body: {
         ...(this.#model !== undefined ? { model: this.#model } : {}),
+        ...(agent !== undefined ? { agent } : {}),
+        ...(opts?.tools !== undefined ? { tools: opts.tools } : {}),
         parts: [{ type: "text", text }],
       },
-    });
+    } as never);
     const data = unwrap(res) as
-      | { info?: { tokens?: unknown; cost?: unknown; error?: unknown }; parts?: unknown }
+      | { info?: unknown; parts?: unknown }
       | undefined;
     if (data === undefined) {
       throw new Error(`opencode prompt returned no message (session=${sessionId})`);
     }
-    const usage = extractTokenUsage(data.info);
-    const aborted = hasAbortedError(data.info);
-    const textOut = extractText(data.parts);
+    // ODW finding 1: prompt RESOLVES with info.error on upstream failure —
+    // bail immediately instead of burning the poll window on a stuck turn.
+    const immediateError = upstreamErrorOf(data.info);
+    if (immediateError !== null) {
+      throw new OpencodePromptError(`upstream failure: ${immediateError}`, true);
+    }
+    let usage = extractTokenUsage(data.info);
+    let aborted = hasAbortedError(data.info);
+    let textOut = extractText(data.parts);
+
+    if (usage === null && !aborted) {
+      const deadline = Date.now() + PROMPT_WAIT_MS;
+      let polls = 0;
+      while (usage === null && !aborted && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5_000));
+        polls++;
+        let last: { info: unknown; parts: unknown } | undefined;
+        try {
+          last = await this.latestAssistantMessage(sessionId);
+        } catch (err) {
+          console.error(`[opencode] poll ${polls} (session=${sessionId}) messages error: ${(err as Error).message}`);
+          continue;
+        }
+        if (polls % 12 === 1) {
+          console.error(
+            `[opencode] poll ${polls} (session=${sessionId}) last=${last === undefined ? "none" : "assistant-present"} usage=${JSON.stringify(usage)} deadline-in=${Math.round((deadline - Date.now()) / 1000)}s`,
+          );
+        }
+        if (last === undefined) continue;
+        const turnError = upstreamErrorOf(last.info);
+        if (turnError !== null) {
+          throw new OpencodePromptError(`upstream failure: ${turnError}`, true);
+        }
+        usage = extractTokenUsage(last.info);
+        aborted = hasAbortedError(last.info);
+        const completed = extractText(last.parts);
+        if (completed.length > 0) textOut = completed;
+      }
+      console.error(
+        `[opencode] poll loop exit (session=${sessionId}) usage=${usage === null ? "null" : "present"} aborted=${aborted} waitedMs=${Date.now() - (deadline - PROMPT_WAIT_MS)}`,
+      );
+      if (usage === null && !aborted) {
+        if (textOut.length === 0) {
+          // ODW finding 2: empty replies from native-tool turns are their own
+          // retryable failure class (distinct from completed-but-unusaged).
+          throw new OpencodePromptError("empty reply without usage (native-tool turn)", true);
+        }
+        // Completed reply, no usage exposed: provenance failure (never zero).
+        return { text: textOut, usage: null, aborted: false };
+      }
+    }
     return { text: textOut, usage, aborted };
+  }
+
+  /** Newest assistant message of a session, or undefined when none exists. */
+  async latestAssistantMessage(sessionId: string): Promise<{ info: unknown; parts: unknown } | undefined> {
+    const res = await this.#client.session.messages({ path: { id: sessionId } } as never);
+    const data = unwrap(res) as unknown;
+    const arr = Array.isArray(data)
+      ? data
+      : (data as { messages?: unknown[] } | undefined)?.messages;
+    if (!Array.isArray(arr)) return undefined;
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const m = arr[i] as { info?: { role?: unknown }; role?: unknown; parts?: unknown };
+      const info = (m.info ?? m) as { role?: unknown };
+      if (info.role === "assistant") {
+        return { info: m.info ?? m, parts: m.parts };
+      }
+    }
+    return undefined;
   }
 
   /** Aborts a session. Returns true when the server accepted the abort. */
@@ -206,6 +334,12 @@ function unwrap<T>(result: unknown): T | undefined {
   if (r === undefined || r === null) return undefined;
   if ("data" in r) return r.data;
   return result as T;
+}
+
+/** Reads one env var (kept tiny so the module stays test-friendly). */
+function readEnvVar(name: string): string | undefined {
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  return proc?.env?.[name];
 }
 
 /** Narrows the assistant message's token fields; null when not exposed. */

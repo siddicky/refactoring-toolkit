@@ -95,3 +95,114 @@ SQLite + blob store under `~/.dex/dev/<n>/`). Health: `dexcli health` → `{"con
 - dex flow evidence: `dexcli flow history long-kill-test`, `…round-src__a.php-1-1-1790365770974`,
   `…round-src__a.php-2-1-1790365979028`
 - Server/worker logs: `/tmp/dex-server*.log`, `/tmp/worker-*.log`
+
+---
+
+# TRIAL GATE — Phase 1+2 (plan §Implementation Steps 2–4)
+
+Completed 2026-09-25 by worker-1b. Seed: **2 files** per FIXTURES.md guidance —
+`src/Money.php` + `src/Pricing/FlatRateDiscount.php` (cost guard respected;
+~6 real model turns per full file cycle). Commit: see git log.
+
+## What landed
+
+**Phase 1 — harness wiring + isolation**
+- `src/harness/runtime.ts` (NEW): the bridge between the data-only agent
+  definitions (harness/agents/*) and the opencode seam — effective-permission
+  merge (deny authoritative), per-turn server-side `tools` overrides,
+  diff parse/render with shared line numbering, JSON + code-fence extraction,
+  verdict intake (validate via verdict-schema, map onto metrics Finding with
+  hunk-resolved evidence spans, citation fallback to naive check).
+- Reviewer effective-permission test: merged reviewer agent has ZERO effective
+  tools (config level) + every turn carries the enforced refusal policy AND a
+  server-side all-false tools map (runtime level).
+- Agent-cannot-commit boundary tests: agent modules import no git tooling /
+  dex step creation; sole-committer entry points imported only by flows/,
+  scripts/, src/git/, tests/ (structural lint over the tree).
+- Quarantine→spare test: differing-content replay on a spare lease commits
+  exactly ONE op-ID commit (dedup identity holds; content-hash recorded as
+  evidence — `commitLeaseChanges` now writes the Content-Hash trailer via
+  `git write-tree`, a real seam gap found and fixed).
+- Two-files-on-separate-leases integration test: both lease branches merge
+  into the one `integration` output branch, conflict-free, idempotent.
+- ODW hardenings folded in (all three): early upstream-error bail
+  (`OpencodePromptError`, retryable vs provenance classes), empty-reply
+  classified as its own retryable failure, reviewer sessions launch on a
+  read-only agent via `OPENCODE_REVIEWER_AGENT` (default unset).
+
+**Phase 2 — core loop (`flows/port-project.ts`, NEW)**
+- Prep consumes `fixtures/stub-prep.md` (source-map table parsed; glob rows
+  ignored), per-file: lease (durable pp-lease store bound to WorktreePool —
+  cap + stale reclaim reused wholesale) → fence mini-step (0(g)) → implement →
+  diff-capture (staged diff stored BY VALUE as dex attribute) → review-A →
+  review-B (independent sessions, verdict attributes) → naive verdict-check
+  (citation check; drops uncited/wontfix) → naive prioritize → fixer → op-ID
+  commit step → integration step → release → dispatch loop → final.
+- Envelope factory everywhere; retry caps (model steps: maximumAttempts 3);
+  round caps durable (pp-config); queue state durable (pp-queue), derived
+  each iteration.
+- New envelope roles `verdict-check` / `prioritize` (code-only, non-model);
+  `EnvelopeStepClass` alias for cycle-safe step typing.
+
+## Trial-gate run (live evidence)
+
+- Flow: `trial-5`, runId `01a0daa4-3170-7213-8886-5480f23a409f`, project repo
+  `/tmp/pk-trial`, epoch 1, maxRounds 1, worker `--flows port --harness auto`.
+- **Observed reviewer-pair + fixer cycle**: BOTH files ran the full pipeline
+  — Money: implement (281s, 68278 tok) → reviewA → reviewB → verdict-check →
+  prioritize → fixer → commit; FlatRate: same, mid-fixer at kill time.
+- **ONE mid-run kill**: `scripts/chaos-kill.ts` SIGKILLed dex server (pid
+  24198) + worker (pid 39936) at 2026-09-25T22:37:28Z with intent-before-kill
+  sidecar `/tmp/kill-events-trial.jsonl` (intent utc 22:37:28.816 → completed
+  22:37:28.871, all targets exited).
+- **Resume**: dex restarted on the SAME SQLite DB
+  (`-sqlite-db-filename ~/.dex/dev/7233/dex.sqlite.db`), worker restarted;
+  the in-flight FlatRate fixer retried post-restart and completed; commit →
+  integrate → release → dispatch. Flow reached `FLOW_STATUS_COMPLETED` at
+  23:02:24Z.
+- **Assertions (all PASS)**:
+  - exactly 2 op-ID commits across all branches (one per file):
+    `1514482` (Money), `34c71ce` (FlatRate) — no duplicates despite kill+retries;
+  - `integration` branch carries both ported TS files (real ported content);
+  - no dirty-worktree deadlock: both leases released, worktrees clean;
+  - envelope stream + dispatch history intact (`dexcli flow history trial-5`).
+
+## Findings & deviations (honest record)
+
+1. **Reviewer turns are sequential durable steps**, not `goToMany` parallel
+   movements — convergence semantics for scheduled branches are undocumented
+   in dex 0.12. Independence preserved via separate sessions/attributes.
+2. **Bridge-mode tool mediation (live leak found and closed)**: writer agents
+   on opencode's `build` agent (server cwd = the toolkit repo, write tools
+   enabled) wrote their "output path" files directly INTO the toolkit repo
+   instead of only replying. Fix: v1 runs EVERY agent turn with the entire
+   server-side tool surface disabled (`toolOverridesAllOff`); the toolkit
+   mediates all writes into the lease worktree and is the sole git operator.
+   Writer "scoped write tools" are therefore toolkit-mediated in v1.
+3. **Reviewer latency**: the user's default opencode agent (max-reasoning
+   variant) took ~25-30 min per review turn and its `session.prompt` resolves
+   before completion — the seam now polls the session to completion
+   (`OPENCODE_PROMPT_WAIT_MS`, default 15 min; trials used 90 min) and
+   reviewers default to `OPENCODE_REVIEWER_AGENT` (trials used `plan`, ~45 s
+   per turn). Three trial attempts (trial-2/3/4) failed on token provenance
+   before these were in place; trial-5 is the clean gate run.
+4. **Envelope event keys collide across step EXECUTIONS** (`${stepId}#
+   ${context.attempt}` — attempt resets per re-entry, so a re-entered
+   dispatch overwrites its earlier event). Harmless for the gate; Phase 5's
+   typed 1:N mapping should key on (stepId, executionId) once exposed.
+5. Worker-side diagnostics (`[opencode] poll …` console.error lines) remain
+   in the seam intentionally — they are the fastest way to see provider-queue
+   stalls during Phase 3+ kill smokes.
+
+## Evidence paths (trial gate)
+
+- Kill sidecar: `/tmp/kill-events-trial.jsonl`
+- Project repo (commits, integration branch, worktrees): `/tmp/pk-trial`
+- Flow evidence: `dexcli flow summary/state/history trial-5`
+- Worker/server logs: `/tmp/worker-trial*.log`, `/tmp/dex-server*.log`
+- Suites: `tests/phase1-isolation.test.ts`, `tests/phase2-flow.test.ts`
+
+## Final verification (fresh)
+
+- `bun run typecheck` → clean (0 errors).
+- `bun test` → 142 pass / 0 fail (17 files; includes worker-5 dashboard suites).

@@ -338,15 +338,19 @@ export async function commitLeaseChanges(
       contentHash: headTree,
     };
   }
+  // Content-hash is EVIDENCE recorded in the commit body (plan: op-ID is the
+  // identity; the hash is recoverable by the branch-scan lookup).
+  const treeHash = (await runner.run(["write-tree"])).trim();
   await runner.run([
     "commit",
     "-m",
     message,
     "-m",
     `${OP_ID_TRAILER} ${opId}`,
+    "-m",
+    `${CONTENT_HASH_TRAILER} ${treeHash}`,
   ]);
   const sha = (await runner.run(["rev-parse", "HEAD"])).trim();
-  const treeHash = (await runner.run(["rev-parse", "HEAD^{tree}"])).trim();
   return { disposition: `committed:${opId}`, sha, contentHash: treeHash };
 }
 

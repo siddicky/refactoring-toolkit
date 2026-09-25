@@ -21,6 +21,7 @@
 
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import {
   dexConfigFromEnv,
   openDexClient,
@@ -50,6 +51,10 @@ import {
   probeFlows,
   type RoundInput,
 } from "./probe-flow.js";
+import {
+  PortProjectFlow,
+  configurePortHarness,
+} from "../flows/port-project.js";
 import type { Flow } from "@superdurable/dex";
 
 // ---------------------------------------------------------------------------
@@ -318,6 +323,94 @@ async function startRound(
 }
 
 // ---------------------------------------------------------------------------
+// Port-project (Phase 2 trial gate)
+// ---------------------------------------------------------------------------
+
+function portFlows(harness: AgentSessionClient): Flow<any>[] {
+  configurePortHarness(harness);
+  return [new PortProjectFlow()];
+}
+
+/**
+ * Robust flow wait: dex's waitForFlow long-poll times out periodically, so
+ * poll until the flow reaches a terminal state or the deadline passes.
+ */
+async function waitForFlowTerminal(
+  runtime: { client: { waitForFlow(flowId: string): Promise<unknown> } },
+  flowId: string,
+  deadlineMs: number,
+): Promise<unknown> {
+  const deadline = Date.now() + deadlineMs;
+  for (;;) {
+    try {
+      return await runtime.client.waitForFlow(flowId);
+    } catch (err) {
+      const e = err as { detail?: string; subStatus?: string; message?: string };
+      const transient =
+        e.subStatus === "longPollTimeout" ||
+        (e.detail ?? "").includes("waiting exceeded the timeout") ||
+        (e.message ?? "").includes("14 UNAVAILABLE");
+      if (!transient || Date.now() > deadline) throw err;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+}
+
+async function startDemo(): Promise<number> {
+  const config = dexConfigFromEnv();
+  const dir = argValue("--dir");
+  if (dir === undefined) throw new Error("demo requires --dir <projectRepoDir>");
+  if (!(await exists(dir))) await makeFixtureRepo(dir);
+  const files = (argValue("--files") ?? "src/Money.php,src/Pricing/FlatRateDiscount.php")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const prepPath = argValue("--prep") ?? join(process.cwd(), "fixtures/stub-prep.md");
+  const sourceRoot = argValue("--source-root") ?? join(process.cwd(), "fixtures/php-sample");
+  const epoch = Number.parseInt(argValue("--epoch", "1") as string, 10);
+  const maxRounds = Number.parseInt(argValue("--max-rounds", "1") as string, 10);
+  const waitMinutes = Number.parseInt(argValue("--wait-minutes", "30") as string, 10);
+
+  const flows: Flow<any>[] = [new PortProjectFlow()];
+  const runtime = await openDexClient(flows, config);
+  try {
+    const flow = flows[0];
+    if (flow === undefined) throw new Error("PortProjectFlow not registered");
+    const flowId = argValue("--flow-id", `demo-${Date.now()}`) as string;
+    const input = {
+      repoRoot: dir,
+      worktreeRoot: join(dir, ".worktrees"),
+      integrationWorktreePath: join(dir, ".worktrees", "integration"),
+      epoch,
+      sourceRoot,
+      prepPath,
+      files,
+      maxRounds,
+    };
+    const runId = await runtime.client.startFlow(flow, flowId, input);
+    console.log(`[demo] started flowId=${flowId} runId=${runId} files=${files.join(",")} epoch=${epoch}`);
+    // Optional live-dashboard hook (worker-5, plan v6.1): launch the read-only
+    // status server next to the run when present; never fatal if absent.
+    const serveStatus = join(import.meta.dir, "serve-status.ts");
+    if (await exists(serveStatus)) {
+      const child = spawn(process.execPath, [serveStatus], {
+        env: { ...process.env, STATUS_REPO_ROOT: dir },
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      console.log(`[demo] dashboard: http://127.0.0.1:${process.env.PORT ?? "4646"} (pid ${child.pid})`);
+    }
+    if (process.argv.includes("--start-only")) return 0;
+    const result = await waitForFlowTerminal(runtime, flowId, waitMinutes * 60_000);
+    console.log(`[demo] completed: ${JSON.stringify(result)}`);
+    return 0;
+  } finally {
+    await runtime.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -343,9 +436,10 @@ async function main(): Promise<number> {
   switch (cmd) {
     case "worker": {
       const harness = await pickHarness(argValue("--harness"));
+      const flows = argValue("--flows") === "port" ? portFlows(harness) : probeFlows();
       configureProbe(harness, fault);
-      const handle = await startDexWorker(probeFlows(), config);
-      console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${argValue("--harness") ?? "auto"}`);
+      const handle = await startDexWorker(flows, config);
+      console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${argValue("--harness") ?? "auto"} flows=${argValue("--flows") ?? "probe"}`);
       await new Promise(() => {}); // run until killed
       return 0;
     }
@@ -386,9 +480,10 @@ async function main(): Promise<number> {
     case "wait-flow": {
       const flowId = argValue("--id");
       if (flowId === undefined) throw new Error("wait-flow requires --id");
+      const waitMinutes = Number.parseInt(argValue("--wait-minutes", "30") as string, 10);
       const runtime = await openDexClient(probeFlows(), config);
       try {
-        const result = await runtime.client.waitForFlow(flowId);
+        const result = await waitForFlowTerminal(runtime, flowId, waitMinutes * 60_000);
         console.log(`[wait-flow] flowId=${flowId} result=${JSON.stringify(result)}`);
         return 0;
       } finally {
@@ -431,8 +526,10 @@ async function main(): Promise<number> {
     }
     case "git-selftest":
       return await gitSelftest();
+    case "demo":
+      return await startDemo();
     default:
-      console.error("usage: run-demo.ts <worker|hello|long-step|wait-flow|round|recover|agent-roundtrip|git-selftest> [flags]");
+      console.error("usage: run-demo.ts <worker|hello|long-step|wait-flow|round|recover|agent-roundtrip|git-selftest|demo> [flags]");
       return 2;
   }
 }

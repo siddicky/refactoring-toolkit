@@ -28,8 +28,19 @@ import {
   gracefulComplete,
   goTo,
 } from "@superdurable/dex";
-import type { AsyncContext, Context, Step, StepDecision, StepOptions, Flow, StepClass } from "@superdurable/dex";
-import { sessionFenceMap, type SessionFence } from "../../src/harness/opencode.js";
+import type {
+  AsyncContext,
+  Context,
+  Step,
+  StepDecision,
+  StepOptions,
+  Flow,
+  StepClass,
+} from "@superdurable/dex";
+import {
+  sessionFenceMap,
+  type SessionFence,
+} from "../../src/harness/opencode.js";
 
 // ---------------------------------------------------------------------------
 // Envelope event contract
@@ -39,13 +50,16 @@ export type EnvelopeRole =
   | "agent"
   | "review"
   | "judgment"
+  | "verdict-check"
+  | "prioritize"
   | "commit"
   | "integration"
   | "queue"
   | "diff-capture"
   | "record";
 
-export type EnvelopeOutcome = "skipped" | "redone" | "interrupted" | "completed";
+export type EnvelopeOutcome =
+  "skipped" | "redone" | "interrupted" | "completed";
 
 export interface EnvelopeEvent {
   stepId: string;
@@ -71,11 +85,23 @@ export const envelopeEvents = new AttributeMap<EnvelopeEvent>(
 );
 
 /** Roles whose steps call a model: tokens are REQUIRED, never null. */
-const MODEL_CALLING_ROLES: readonly EnvelopeRole[] = ["agent", "review", "judgment"];
+const MODEL_CALLING_ROLES: readonly EnvelopeRole[] = [
+  "agent",
+  "review",
+  "judgment",
+];
 
 export function requiresTokens(role: EnvelopeRole): boolean {
   return MODEL_CALLING_ROLES.includes(role);
 }
+
+/**
+ * Roles that sit at TypeSafe integration points but are CODE-ONLY in Phase 2
+ * (naive verdict-check / naive prioritize): they call no model, so their
+ * tokens are null-as-not-applicable. When Phase 3 swaps in Jev these steps
+ * move to the model-calling `judgment` role and tokens become required.
+ */
+export const NAIVE_JUDGMENT_ROLES: readonly EnvelopeRole[] = ["verdict-check", "prioritize"];
 
 /**
  * Persistence schema fragment that every flow must return from
@@ -109,7 +135,10 @@ export interface EnvelopeSpec<I, O> {
    * Inner handler. Returns the step output plus the token count observed by
    * the model call (null for non-model work). Throwing triggers dex retry.
    */
-  inner: (context: Context, input: I) => Promise<{ output: O; tokens: number | null; outcome?: EnvelopeOutcome }>;
+  inner: (
+    context: Context,
+    input: I,
+  ) => Promise<{ output: O; tokens: number | null; outcome?: EnvelopeOutcome }>;
   /**
    * Optional routing decision after a successful inner run. Defaults to
    * gracefulComplete(output). Chain with goTo(nextClass, input) for linear
@@ -127,13 +156,22 @@ export interface EnvelopeSpec<I, O> {
  */
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
-function heartbeatLoop(context: AsyncContext, eventKey: string): { stop(): void } {
+function heartbeatLoop(
+  context: AsyncContext,
+  eventKey: string,
+): { stop(): void } {
   const record = context.recordHeartbeat?.bind(context);
   if (typeof record !== "function") return { stop(): void {} };
   const timer = setInterval(() => {
-    void Promise.resolve(record({ envelope: eventKey, atUtc: new Date().toISOString() })).catch(
-      () => {},
-    );
+    try {
+      void Promise.resolve(
+        record({ envelope: eventKey, atUtc: new Date().toISOString() }),
+      ).catch(() => {});
+    } catch {
+      // dex's recordHeartbeat throws synchronously (not via rejection) once
+      // the invocation is dead — this catch is the crash guard.
+      clearInterval(timer);
+    }
   }, HEARTBEAT_INTERVAL_MS);
   // A pending heartbeat timer must never keep the worker process alive.
   (timer as unknown as { unref?: () => void }).unref?.();
@@ -221,7 +259,17 @@ export function envelopeStep<I, O>(spec: EnvelopeSpec<I, O>): Step<I> {
  * with `goTo(NextStepClass, input)`. The returned constructor is concrete so
  * flows can instantiate it; it remains assignable to dex's StepClass.
  */
-export function envelopeStepClass<I, O>(spec: EnvelopeSpec<I, O>): (new () => Step<I>) & StepClass<I> {
+/**
+ * Annotated type for class-form envelope steps. Flows with routing CYCLES
+ * (the per-file loop in flows/port-project.ts) must annotate their step
+ * constants with this type — circular implicit inference through route
+ * closures otherwise fails under noImplicitAny.
+ */
+export type EnvelopeStepClass<I> = (new () => Step<I>) & StepClass<I>;
+
+export function envelopeStepClass<I, O>(
+  spec: EnvelopeSpec<I, O>,
+): EnvelopeStepClass<I> {
   return class EnvelopeStepClass implements Step<I> {
     getStepType(): string {
       return spec.stepType;
@@ -330,7 +378,10 @@ export function recordStepClass(spec: {
 }
 
 /** Convenience for chaining: startStep + otherSteps in registration order. */
-export function stepListOf<I>(start: Step<I>, ...others: ReadonlyArray<Step<any>>): StepList<I> {
+export function stepListOf<I>(
+  start: Step<I>,
+  ...others: ReadonlyArray<Step<any>>
+): StepList<I> {
   return StepList.startStep(start).otherSteps(...others);
 }
 
