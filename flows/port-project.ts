@@ -1768,6 +1768,17 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
       const e = err as { stdout?: string; stderr?: string };
       tscOut = `${e.stdout ?? ""}\n${e.stderr ?? ""}`;
     }
+    // Deterministic kill-smoke fault (Phase 4 exit): iteration 1 only — inject
+    // one synthetic, self-labeled tsc error for the first done file so the fix
+    // round ACTUALLY runs and the queue/fix-round kill window exists. Never
+    // active without PORTING_KIT_FAULT; the injected line names itself.
+    if (faultMatches("queue-verify:inject-error", "seed") && iteration === 1) {
+      const firstDone = queue.done[0];
+      const injectPath = firstDone !== undefined ? prep?.sourceMap[firstDone.file]?.outPath : undefined;
+      if (firstDone !== undefined && injectPath !== undefined) {
+        tscOut += `\n${injectPath.replace(/^\.\//, "")}(1,1): error TS9999: injected fault queue-verify:inject-error:seed (synthetic — fix-round durability smoke, not a real port error)\n`;
+      }
+    }
     const tscState = buildTscQueueState(parseTscOutput(tscOut), iteration);
 
     // vitest queue: runs only when the integrated checkout carries its own
