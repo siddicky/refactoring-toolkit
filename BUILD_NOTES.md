@@ -553,3 +553,95 @@ parallel`; `sequential` keeps the Phase 2 loop for A/B):
     recorded as a worker-3 follow-up, not a prompt issue.
 - Suites after the fix: `bun run typecheck` clean; `bun test` 188 pass / 0
   fail (20 files).
+
+---
+
+# WAVE-4 — final report (worker-1c; STOPPED per lead hard rule 2026-09-26 ~16:40 UTC)
+
+Lead rule in force at stop: cx-4 failing ⇒ stop entirely, no cx-5, no further
+retries; next strategy (provider swap / probe widening / proceed-with-
+documented-failure) is decided with this evidence.
+
+## What landed (all committed; 196 tests pass, tsc clean at stop)
+
+| Commit | Content |
+|---|---|
+| `911b300` | checkpoint A: Phase 3/4 evidence record + CreatorPay fixture |
+| `3a5e2a7` | Jev selection prompt fix — spot-check 86.1% → **91.7%** (v2, n=36, live; target ≥90% PASS) |
+| `7c7e9ec` | Phase 5 reconciliation: anchor learns live `:start` self-envelopes; prep model steps carry the marker join identity; `render-metrics.ts` driver |
+| `de4bf4d` | deterministic fault `queue-verify:inject-error:seed` (fix-round kill window; unused — see smoke status) |
+| `4973fcc` | **v1.1 parallel dispatch** (per-file `port.File` SubFlow children + `Wait.allOf` wave join; serial parent integration; child store seeding; anchor+driver topology; tests) |
+| `f731250` | harness hard ceiling on one SDK `session.prompt` call (20 min, retryable) — hang-proofing |
+| `0ecde78`/`30b7b1d`/`7f7519e` | creatorex prep-stub + BUILD_NOTES (infra finding, Phase 4 status, v1.1 design) |
+
+## Infra
+
+ALL infra was down at wave start (app restart). Recovered exactly per
+BUILD_NOTES: dex on the EXISTING 7233 DB (history survived), worker
+(`run-demo.ts worker --flows port --harness auto`), `opencode serve :4096`,
+dashboard `:4646` (later STATUS_REPO_ROOT=/tmp/pk-p4). Worker log confirmed
+`Jev: REAL client` on every restart.
+
+## Phase 4 — GREEN on the clean path (the wave's solid result)
+
+p4-7 (runId `01a0dd01-…`, epoch 6, project `/tmp/pk-p4`, reviewer
+`Sisyphus - ultraworker`): COMPLETED 10:42:51Z — full pipeline (prep loop →
+both seed files → keyed commits `84b3fad` + `334ed4c` → integrated output)
+with QueueVerify tsc 0 / vitest 0 → termination rule → Final. **AC2 on this
+real run: provenance_ok=true, 0 failures, 73/73 envelopes dispatch-anchored,
+10 verdict records, 1,107,958 model tokens reconciled**
+(`/tmp/metrics-p47/report.{md,json}` — first fully-green AC2 render on live
+data; validates the marker-identity fix, the `:start` self-envelope anchor,
+and multi-run history merge). Evidence: `dexcli flow history p4-7`,
+`/tmp/pk-p4`, `/tmp/metrics-p47/`.
+
+## The blocker — provider-side degenerate reviewer turns
+
+Signature (unchanged all wave): assistant message "completes" with 0–16
+output tokens, NO text part, ~32k reasoning → verdict-JSON parse fails → dex
+burns 3 attempts → FLOW_FAILED. See "Infra finding" section above for the
+full characterization (cache amplification, window behavior, probe-validity
+note, what worked). Healthy windows exist but last 30–90 min; a full run
+needs ~75+ min of mostly-healthy provider with ~10–14 review turns.
+
+## Per-flow failure narrative (chronological)
+
+| Flow | Config | Outcome | Signature / evidence |
+|---|---|---|---|
+| p4-7 | plan-agent → **Sisyphus** reviewer, maxRounds 2 | **COMPLETED** | the green run above |
+| p4-8 | + fault `queue-verify:inject-error:seed` | FAILED 11:27 | prep review-B 3/3 degenerate (out 3/0/3); never reached queue phase. `dexcli flow history p4-8` |
+| p4-9 | same, after 1-probe health gate | FAILED 12:45 | absorbed 2 degenerates (retry-note successes), died at prep review-A attempt 3 (out 3) |
+| p4-10 | + 3-probe window gate (autonomous script) | FAILED 14:11 | died at prep review-B: attempts out 3 / 885-unparseable / 1. Gate script log: `/tmp/window-dispatch.log` |
+| cx-1 | creatorex 5-file PARALLEL run | FAILED in 1s | PpPrep requires source-map rows for every input file; `stub-prep.md` only covers the 2 seed files (config gap → fixed by `0ecde78`) |
+| cx-2 | + prep-stub | FAILED in 1s | missing `--source-root` (defaulted to php-sample) |
+| cx-3 | + source-root | FAILED 15:47 | review-B degenerates + a NEW failure mode: opencode held `session.prompt` open ~20+ min past server-side completion (hang; heartbeats kept the attempt alive) → fixed by `f731250` |
+| cx-4 | + prompt-call timeout | FAILED 16:28 | prep review-A 3/3 degenerate (out 6/4/16), 16:06–16:27. Kill watcher never fired (pre-window). `dexcli flow history cx-4`, `/tmp/watch-ac1-parallel.log` |
+
+Kill smokes: **never fired** — every post-p4-7 dispatch died in PREP, before
+any commit or queue phase. The fix-round kill smoke (bound: 2 attempts) and
+the parallel AC1 kill are therefore BLOCKED-BY-PROVIDER, not passed.
+
+## Parallel wiring status
+
+Committed and unit-tested (`tests/port-parallel.test.ts`: wave planning,
+anchor registration, both flow registrations), typecheck clean — **NOT
+live-proven** (cx-4 never reached wave dispatch). First live exercise will
+surface dex SubFlow runtime semantics (getFlowId/getConditionResults/reuse
+policy) that types cannot prove. Design + deviations: "v1.1" section above.
+
+## State hand-off (for the next decision)
+
+- Repo: HEAD with all commits above; 196/196 tests, tsc clean. Untracked
+  `.omc/research/*` + `demo/` + `.playwright-mcp/` are not wave-4 artifacts.
+- Infra at stop: dex (7233 DB) + worker (Sisyphus reviewer env) + opencode +
+  dashboard :4646 (STATUS_REPO_ROOT=/tmp/pk-p4) ALL RUNNING; no flows active
+  (p4-7..10, cx-1..4 all terminal). Watchers/probe loops stopped.
+- Evidence paths: `/tmp/pk-p4` (p4-7 repo), `/tmp/pk-creatorex` (cx repo),
+  `/tmp/metrics-p47/`, `/tmp/kill-events-{p3,p4,cx}.jsonl`,
+  `/tmp/window-dispatch.log`, `/tmp/provider-health.log`,
+  `/tmp/worker-1c.log`, `/tmp/watch-ac1-parallel.log`, dex flows
+  p4-7..p4-10, cx-1..cx-4.
+- Token cost note for the go/no-go: every failed run still burned real
+  implementer/reviewer input tokens (~60–90k per review attempt, mostly
+  cache-read); ~15 full/partial runs this wave. Degenerate turns themselves
+  produce no output tokens — the cost is inputs + wall clock.
