@@ -48,27 +48,31 @@
       "id": "US-003",
       "subject": "Stage 1b: Tier-1 evidence-only turn-health + fixture set + tests",
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "acceptanceCriteria": [
         "src/typesafe/turn-health.ts: Jev nouls fire ONLY on shape-ambiguous turns and discarded verdicts; healthy/shape-trivial turns make zero Jev calls; diagnosis re-recorded by successor attempt on Tier-0 retry (no intra-throwing-step write)",
         "tests/fixtures/turn-health/ contains ten degenerate + >=3 healthy negatives in raw SDK message shapes, each with expected outcome (incl. NON-Tier-0 for 885-token and persona cases) in the fixture header",
         "tests/turn-health.test.ts: AC-B1 (all retry-class fixtures -> retryable, >=1 demoted, zero Jev on shape-trivial), AC-B2 (routing = f(shape, attempt), no Tier-1 input), AC-B3 (gate fail-open on missing/stale/query-failure, <=5s)",
         "Import-boundary assertion: control-flow modules import no judgment modules; Tier-1 unread-by-control-flow verified",
         "LIVE: Tier-1 diagnosis record observed on the stream/envelope for at least one ambiguous-shape event in a real run"
-      ]
+      ],
+      "verifiedAt": "2026-09-26T23:05:00Z",
+      "evidence": "squashed commit on main; 220/0 tests; tsc clean; import-boundary + fixture-dir agreement tests green"
     },
     {
       "id": "US-004",
       "subject": "Stage 2a: vitest triage as declared Lane-B gate",
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "acceptanceCriteria": [
         "QueueVerifyStep persists parsed failure records into the durable vitest queue attribute (beyond totals)",
         "classifyMany at queue-build writes {failureClass, attributedFile, reason} per record; unknown attribution -> port-caused (documented); Jev usage via recordJevUsage pattern; FailureClassification extended with attributedFile",
         "Fix-round feed = existing per-file fix loop reading queue state; consumer test asserts classified records reach the feed and route to attributedFile",
         "Jev unavailability -> naive classifier fallback (fail-open test); consumer registered in src/judgment-registry.ts with threshold + provenance",
         "AC-T manifest at tests/fixtures/vitest-triage/manifest.json (id/evidence-path/label/adjudication-note); promotion only if >=20 cases AND >=5/class AND >=90% overall AND >=80% per class, else stays non-default with shortfall recorded"
-      ]
+      ],
+      "verifiedAt": "2026-09-26T23:20:00Z",
+      "evidence": "commit 8c835ea (7 files, +795/-14); fresh 236/0 tests + tsc clean; registry has vitest-triage + citation-check; AC-T shortfall honestly recorded (0 adjudicated cases, classifier stays non-default)"
     },
     {
       "id": "US-005",

@@ -128,6 +128,8 @@ async function main(): Promise<number> {
     );
   }
   const score = correct / rows.length;
+  // US-005 (AC-S): uncertain-band and strong-fail rates, reported separately.
+  // A band hit = any escalation noul p in [0.30, 0.70]; strong-fail = p < 0.8.
   const summary = {
     generatedAt: new Date().toISOString(),
     model: "typesafe-system-one",
@@ -136,6 +138,12 @@ async function main(): Promise<number> {
     accuracy: Number(score.toFixed(4)),
     target: 0.9,
     pass: score >= 0.9,
+    escalation_rate: rows.filter((r) => r.flagged).length / rows.length,
+    escalations_by_check: rows.reduce<Record<string, number>>((acc, r) => {
+      const names = (r.escalations as string[] | undefined) ?? [];
+      for (const c of names) acc[c] = (acc[c] ?? 0) + 1;
+      return acc;
+    }, {}),
   };
   const outPath = process.argv.includes("--out")
     ? process.argv[process.argv.indexOf("--out") + 1] ?? "/tmp/jev-spot-check.json"

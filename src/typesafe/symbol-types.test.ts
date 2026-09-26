@@ -138,10 +138,14 @@ describe("selectSymbolType (Choice over candidates + SDE-cascade nouls)", () => 
 
     expect(decision.selected).toBe("string");
     expect(decision.flagged).toBe(true);
-    expect(decision.escalations.length).toBe(1);
+    // US-005: TWO escalations — the 0.3 strong-fail noul AND the 0.6 choice
+    // confidence below the 0.9 floor (uncertain_band confidence escalation).
+    expect(decision.escalations.length).toBe(2);
     expect(decision.escalations[0]?.check).toBe("unreasonable");
     expect(decision.escalations[0]?.p).toBeCloseTo(0.3, 5);
     expect(decision.escalations[0]?.threshold).toBe(DEFAULT_ESCALATION_THRESHOLD);
+    expect(decision.escalations[1]?.check).toBe("uncertain_band");
+    expect(decision.escalations[1]?.p).toBeCloseTo(0.6, 5);
     // absence_wrong exactly AT the threshold is not flagged (strictly below only)
     expect(decision.checks.find((c) => c.check === "absence_wrong")?.flagged).toBe(false);
   });

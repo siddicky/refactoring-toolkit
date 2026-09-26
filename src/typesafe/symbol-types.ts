@@ -216,7 +216,11 @@ export const VERIFICATION_CHECKS: readonly VerificationCheck[] = [
   "absence_wrong",
 ];
 
-export type EscalationCheck = VerificationCheck | "recall_empty" | "none_selected";
+export type EscalationCheck =
+  | VerificationCheck
+  | "uncertain_band"
+  | "recall_empty"
+  | "none_selected";
 
 /** Default threshold: a verification noul scoring below this flags the symbol. */
 export const DEFAULT_ESCALATION_THRESHOLD = 0.8;
@@ -376,6 +380,10 @@ export async function selectSymbolType(
     const answer = cascade.answers[check];
     return { check, p: answer.noul, flagged: answer.noul < threshold };
   });
+  // US-005 (Stage 2b): the uncertain band [0.30, 0.70] is a REPORTING overlay —
+  // band hits are derivable anywhere from checks[].p and are surfaced by the
+  // spot-check script / metrics report as a separate rate from strong-fail
+  // (< 0.8) escalations (AC-S).
   const escalations: EscalationRecord[] = checks
     .filter((c) => c.flagged)
     .map((c) => ({
@@ -386,6 +394,20 @@ export async function selectSymbolType(
       threshold,
       reason: `verification noul ${c.check} scored ${c.p.toFixed(3)} below threshold ${threshold}`,
     }));
+  // US-005: low CHOICE CONFIDENCE (< 0.9) escalates even when a selection was
+  // made — converts shaky selections into structured escalations instead of
+  // silent weak answers. Calibrated from /tmp/jev-spot-check-after.json.
+  const CHOICE_CONFIDENCE_FLOOR = 0.9;
+  if (picked.confidence < CHOICE_CONFIDENCE_FLOOR) {
+    escalations.push({
+      file: symbol.file,
+      symbol: symbol.name,
+      check: "uncertain_band",
+      p: picked.confidence,
+      threshold: CHOICE_CONFIDENCE_FLOOR,
+      reason: `choice confidence ${picked.confidence.toFixed(3)} below floor ${CHOICE_CONFIDENCE_FLOOR} (selection: ${selectedType})`,
+    });
+  }
 
   return {
     ...base,

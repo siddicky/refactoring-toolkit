@@ -35,3 +35,8 @@
 - commit 68b1577: degenerateReply guard both exits, f(attempt) demotion via modelOverride param, scripts/dispatch-gate.ts (history-only, stale>10min, 5s, fail-open w/ gate:degraded surfacing), envelope WriteStream publish (swallow-wrapped).
 - Fresh: 216/0 tests (12 new), tsc clean. LIVE tails superseded to US-009 (amendment recorded).
 - Learnings: dispatch-gate reuses DexHistoryWire parser from src/dashboard/queries.ts as planned; probe-flow.ts updated for the new seam shape.
+
+## Iteration 3 — US-003 COMPLETE 2026-09-26T23:05:00Z
+- Worker quota-failed mid-story; lead completed directly. Squashed 3 snapshot commits into one (local history).
+- Fixed: local EnvelopeEvent missing turn_diagnosis; dead __never__ narrowing; abort_path is an SDK error path not a reply shape (manifest documents).
+- Next: US-004 (vitest triage Lane-B) dispatched.
