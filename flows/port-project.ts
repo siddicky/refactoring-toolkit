@@ -1976,6 +1976,8 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
   stepType: "PpQueueFix",
   stepId: "pp-queue-fix",
   role: "agent",
+  // cx-5e: identity-keyed envelope (see ChildLeaseStep note).
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   stepOptions: {
     ...MODEL_STEP_OPTIONS,
     executeLoadAttributeMaps: [ppVerify, ppOut, ppPrep],
@@ -2271,6 +2273,11 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
   stepType: "PpChildLease",
   stepId: "pp-child-lease",
   role: "record",
+  // Live finding cx-5e: without identityOf the lease envelope keys flow-level
+  // while its dispatch entry carries file#round — the AC2 anchor then reports
+  // it (and the queue-fix steps below) as unanchored. Per-file steps MUST key
+  // their envelopes by the sanitized file#round identity.
+  identityOf: (_ctx, input) => markerKeyOf(input.file, input.round),
   stepOptions: {
     // ppLease is READ through bindLeaseStore (lease reclaim/put); live
     // finding cx-5c: the child's first step failed 3 attempts with
@@ -2355,6 +2362,8 @@ const ChildQueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<F
   stepType: "PpQueueFix",
   stepId: "pp-queue-fix",
   role: "agent",
+  // cx-5e: identity-keyed envelope (see ChildLeaseStep note).
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   stepOptions: {
     ...MODEL_STEP_OPTIONS,
     executeLoadAttributeMaps: [ppVerify, ppOut, ppPrep],
