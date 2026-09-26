@@ -234,14 +234,14 @@ async function main(): Promise<number> {
   const flowCompleted = state.flowStatus === "FLOW_STATUS_COMPLETED";
 
   // Parallel topology (v1.1): child flows are published by the parent under
-  // `pp-wave/children` — but that attribute is OVERWRITTEN on every wave, so
+  // `pp-wave-children/children` — but that attribute is OVERWRITTEN on every wave, so
   // the final state only names the LAST wave's children (live finding cx-5e:
   // 10 children across 6 waves, 1 in final state). Walk the parent's durable
   // HISTORY for every pp-wave-children upsert, then merge the final state's
   // copy; every child's envelope/verdict/burn-down evidence joins the report.
   const childIds: Set<string> = new Set();
   for (const a of attrs) {
-    if (!a.key.startsWith("pp-wave/children")) continue;
+    if (!a.key.startsWith("pp-wave-children")) continue;
     const v = a.value as { children?: Array<{ flowId?: string }> } | null;
     for (const c of v?.children ?? []) {
       if (typeof c?.flowId === "string" && c.flowId.length > 0) childIds.add(c.flowId);
@@ -262,7 +262,7 @@ async function main(): Promise<number> {
   const parentHistory = runDexcli(["flow", "history", flowId, "-all"]) as HistoryChildrenWire;
   for (const event of parentHistory.events ?? []) {
     for (const up of event.payload?.output?.upsertAttributes ?? []) {
-      if (up?.key === undefined || !up.key.startsWith("pp-wave/children")) continue;
+      if (up?.key === undefined || !up.key.startsWith("pp-wave-children")) continue;
       for (const c of up.value?.children ?? []) {
         if (typeof c?.flowId === "string" && c.flowId.length > 0) childIds.add(c.flowId);
       }
