@@ -1,0 +1,18 @@
+{
+  "envelopes": [
+    {"stepId": "pp-implement", "role": "agent", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T11:00:00.000Z", "ended_at": "2026-09-25T11:01:00.000Z", "outcome": "completed", "tokens": 450, "wall_clock_ms": 60000, "identity": "src__Http__Request.php#1"},
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T11:01:00.000Z", "ended_at": "2026-09-25T11:02:00.000Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 60000, "identity": "src__Http__Request.php#1"},
+    {"stepId": "pp-review-b", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T11:01:00.000Z", "ended_at": "2026-09-25T11:02:00.000Z", "outcome": "completed", "tokens": 100, "wall_clock_ms": 60000, "identity": "src__Http__Request.php#1"},
+    {"stepId": "pp-commit", "role": "commit", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T11:03:00.000Z", "ended_at": "2026-09-25T11:03:00.100Z", "outcome": "completed", "tokens": {"input_tokens": 10, "output_tokens": 5}, "wall_clock_ms": 100, "identity": "src__Http__Request.php#1"},
+    {"stepId": "pp-capture-diff", "role": "diff-capture", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T11:05:00.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Http__Response.php#1"},
+    {"stepId": "pp-fixer", "role": "agent", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T11:06:00.000Z", "ended_at": null, "outcome": "interrupted", "tokens": 500, "wall_clock_ms": null, "identity": "src__Http__Request.php#1"},
+    {"stepId": "pp-commit", "role": "verdict-check", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T11:07:00.000Z", "ended_at": "2026-09-25T11:07:00.005Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 5, "identity": "src__Http__Request.php#1"},
+    {"stepId": "pp-unknown-step", "role": "record", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T11:08:00.000Z", "ended_at": "2026-09-25T11:08:00.001Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 1, "identity": null}
+  ],
+  "verdicts": [
+    {"file": "src/Http/Request.php", "reviewer": "reviewer-A", "round": 1, "diff_id": "diff-src__Http__Request.php-r1", "findings": [], "citation_check": []}
+  ],
+  "burn_down": [
+    {"queue": "tsc", "file": "src/Http/Request.php", "iteration": 1, "error_count": 4, "recorded_at": "2026-09-25T11:09:00.000Z"}
+  ]
+}

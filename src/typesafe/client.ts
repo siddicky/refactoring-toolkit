@@ -13,7 +13,6 @@
  * - `createJevClient()` is the env-aware factory: TYPESAFE_OFFLINE=1 forces
  *   the in-memory double so real network calls are skippable in tests/CI.
  */
-/// <reference path="./ambient.d.ts" />
 
 // ---- seam types (structural mirrors of @typesafe-ai/sdk 0.6.0) ---------------
 
@@ -130,9 +129,18 @@ export function score<const T extends ScoreCriteria>(
 
 // ---- the seam ------------------------------------------------------------------
 
-/** Vendor-neutral judgment client. The ONLY TypeSafe surface other modules see. */
+/**
+ * Vendor-neutral judgment client. The ONLY TypeSafe surface other modules see.
+ * `inputTokens`/`outputTokens` are OPTIONAL cumulative diagnostics over this
+ * client's own calls (delegating wrappers omit them — the wrapped client
+ * carries the totals). The canonical implementations — the in-memory double
+ * and the real SDK adapter — always provide them so judgment-role envelopes
+ * keep token provenance offline.
+ */
 export interface JudgmentClient {
   readonly kind: "real" | "in-memory";
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
   systemOne<const Q extends Questions>(request: SystemOneRequest<Q>): Promise<SystemOneResult<Q>>;
 }
 
@@ -258,10 +266,20 @@ export async function createRealJevClient(config?: {
     apiKey,
     ...(config?.baseURL === undefined ? {} : { baseURL: config.baseURL }),
   });
+  let inputTokens = 0;
+  let outputTokens = 0;
   const adapter: JudgmentClient = {
     kind: "real",
+    get inputTokens() {
+      return inputTokens;
+    },
+    get outputTokens() {
+      return outputTokens;
+    },
     async systemOne<const Q extends Questions>(request: SystemOneRequest<Q>) {
       const result = await client.systemOne(request);
+      inputTokens += result.usage.input_tokens;
+      outputTokens += result.usage.output_tokens;
       return {
         model: result.model,
         answers: result.answers,

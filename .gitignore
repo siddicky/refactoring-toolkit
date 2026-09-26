@@ -3,8 +3,9 @@
 .env.*
 !.env.example
 
-# Run artifacts (AC2 metrics renders are run outputs, not source)
-metrics/
+# Run artifacts (AC2 metrics renders are run outputs, not source).
+# Anchored to the repo root so the src/metrics/ TOOLKIT SOURCE stays tracked.
+/metrics/
 
 # Toolkit-owned worktree leases (git worktrees created at runtime)
 .worktrees/

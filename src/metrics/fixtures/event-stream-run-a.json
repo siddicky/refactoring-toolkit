@@ -1,0 +1,97 @@
+{
+  "envelopes": [
+    {"stepId": "pp-prep", "role": "record", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:00:00.000Z", "ended_at": "2026-09-25T10:00:00.005Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 5, "identity": null},
+    {"stepId": "pp-dispatch", "role": "record", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:00:00.010Z", "ended_at": "2026-09-25T10:00:00.018Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 8, "identity": null},
+
+    {"stepId": "pp-implement", "role": "agent", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:00:10.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-implement", "role": "agent", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:00:10.010Z", "ended_at": "2026-09-25T10:02:10.010Z", "outcome": "completed", "tokens": 2000, "wall_clock_ms": 120000, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-capture-diff", "role": "diff-capture", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:02:10.020Z", "ended_at": "2026-09-25T10:02:10.024Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 4, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:02:15.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:02:15.010Z", "ended_at": "2026-09-25T10:03:00.010Z", "outcome": "completed", "tokens": 1100, "wall_clock_ms": 45000, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-review-b", "role": "review", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:03:01.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-review-b", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:03:01.010Z", "ended_at": "2026-09-25T10:03:48.010Z", "outcome": "completed", "tokens": 1170, "wall_clock_ms": 47000, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-verdict-check", "role": "verdict-check", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:03:49.000Z", "ended_at": "2026-09-25T10:03:49.900Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 900, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-fixer", "role": "agent", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:03:50.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-fixer", "role": "agent", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:03:50.010Z", "ended_at": "2026-09-25T10:04:50.010Z", "outcome": "completed", "tokens": 1050, "wall_clock_ms": 60000, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-fixer", "role": "agent", "file": null, "round": null, "attempt": 2, "started_at": "2026-09-25T10:04:51.000Z", "ended_at": "2026-09-25T10:05:46.000Z", "outcome": "completed", "tokens": 1000, "wall_clock_ms": 55000, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-commit", "role": "commit", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:06:00.000Z", "ended_at": "2026-09-25T10:06:00.120Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 120, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-integrate", "role": "integration", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:06:01.000Z", "ended_at": "2026-09-25T10:06:01.800Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 800, "identity": "src__Auth__LdapAuth.php#1"},
+    {"stepId": "pp-release", "role": "record", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:06:02.000Z", "ended_at": "2026-09-25T10:06:02.006Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 6, "identity": "src__Auth__LdapAuth.php#1"},
+
+    {"stepId": "pp-implement", "role": "agent", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:07:00.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-implement", "role": "agent", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:07:00.010Z", "ended_at": "2026-09-25T10:08:30.010Z", "outcome": "completed", "tokens": 1800, "wall_clock_ms": 90000, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-capture-diff", "role": "diff-capture", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:08:30.020Z", "ended_at": "2026-09-25T10:08:30.024Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 4, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:08:31.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:08:31.010Z", "ended_at": "2026-09-25T10:09:41.010Z", "outcome": "completed", "tokens": 900, "wall_clock_ms": 70000, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-review-b", "role": "review", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:09:42.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-review-b", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:09:42.010Z", "ended_at": "2026-09-25T10:11:02.010Z", "outcome": "completed", "tokens": 910, "wall_clock_ms": 80000, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-verdict-check", "role": "verdict-check", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:11:03.000Z", "ended_at": "2026-09-25T10:11:03.800Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 800, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-fixer", "role": "agent", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:11:04.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-fixer", "role": "agent", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:11:04.010Z", "ended_at": "2026-09-25T10:11:44.010Z", "outcome": "completed", "tokens": 800, "wall_clock_ms": 40000, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-commit", "role": "commit", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:12:00.000Z", "ended_at": "2026-09-25T10:12:00.100Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 100, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-integrate", "role": "integration", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:12:01.000Z", "ended_at": "2026-09-25T10:12:01.800Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 800, "identity": "src__Util__RateLimiter.php#1"},
+    {"stepId": "pp-release", "role": "record", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:12:02.000Z", "ended_at": "2026-09-25T10:12:02.006Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 6, "identity": "src__Util__RateLimiter.php#1"},
+
+    {"stepId": "pp-implement", "role": "agent", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:13:00.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__Csv.php#1"},
+    {"stepId": "pp-implement", "role": "agent", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:13:00.010Z", "ended_at": "2026-09-25T10:14:28.010Z", "outcome": "completed", "tokens": 1500, "wall_clock_ms": 88000, "identity": "src__Util__Csv.php#1"},
+    {"stepId": "pp-capture-diff", "role": "diff-capture", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:14:28.020Z", "ended_at": "2026-09-25T10:14:28.024Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 4, "identity": "src__Util__Csv.php#1"},
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:14:29.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__Csv.php#1"},
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:14:29.010Z", "ended_at": "2026-09-25T10:15:29.010Z", "outcome": "completed", "tokens": 500, "wall_clock_ms": 60000, "identity": "src__Util__Csv.php#1"},
+    {"stepId": "pp-review-b", "role": "review", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:15:30.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__Csv.php#1"},
+    {"stepId": "pp-review-b", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:15:30.010Z", "ended_at": "2026-09-25T10:16:35.010Z", "outcome": "completed", "tokens": 505, "wall_clock_ms": 65000, "identity": "src__Util__Csv.php#1"},
+    {"stepId": "pp-verdict-check", "role": "verdict-check", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:16:36.000Z", "ended_at": "2026-09-25T10:16:36.700Z", "outcome": "skipped", "tokens": null, "wall_clock_ms": 700, "identity": "src__Util__Csv.php#1"},
+    {"stepId": "pp-commit", "role": "commit", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:16:37.000Z", "ended_at": "2026-09-25T10:16:37.110Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 110, "identity": "src__Util__Csv.php#1"},
+    {"stepId": "pp-integrate", "role": "integration", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:16:38.000Z", "ended_at": "2026-09-25T10:16:38.800Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 800, "identity": "src__Util__Csv.php#1"},
+    {"stepId": "pp-release", "role": "record", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:16:39.000Z", "ended_at": "2026-09-25T10:16:39.006Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 6, "identity": "src__Util__Csv.php#1"},
+
+    {"stepId": "pp-implement", "role": "agent", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:17:00.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__SizeFormatter.php#1"},
+    {"stepId": "pp-implement", "role": "agent", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:17:00.010Z", "ended_at": "2026-09-25T10:18:28.010Z", "outcome": "completed", "tokens": 1500, "wall_clock_ms": 88000, "identity": "src__Util__SizeFormatter.php#1"},
+    {"stepId": "pp-capture-diff", "role": "diff-capture", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:18:28.020Z", "ended_at": "2026-09-25T10:18:28.024Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 4, "identity": "src__Util__SizeFormatter.php#1"},
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:18:29.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__SizeFormatter.php#1"},
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:18:29.010Z", "ended_at": "2026-09-25T10:19:29.010Z", "outcome": "completed", "tokens": 450, "wall_clock_ms": 60000, "identity": "src__Util__SizeFormatter.php#1"},
+    {"stepId": "pp-review-b", "role": "review", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:19:30.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__SizeFormatter.php#1"},
+    {"stepId": "pp-review-b", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:19:30.010Z", "ended_at": "2026-09-25T10:20:35.010Z", "outcome": "completed", "tokens": 455, "wall_clock_ms": 65000, "identity": "src__Util__SizeFormatter.php#1"},
+    {"stepId": "pp-verdict-check", "role": "verdict-check", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:20:36.000Z", "ended_at": "2026-09-25T10:20:36.700Z", "outcome": "skipped", "tokens": null, "wall_clock_ms": 700, "identity": "src__Util__SizeFormatter.php#1"},
+    {"stepId": "pp-commit", "role": "commit", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:20:37.000Z", "ended_at": "2026-09-25T10:20:37.110Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 110, "identity": "src__Util__SizeFormatter.php#1"},
+    {"stepId": "pp-integrate", "role": "integration", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:20:38.000Z", "ended_at": "2026-09-25T10:20:38.800Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 800, "identity": "src__Util__SizeFormatter.php#1"},
+    {"stepId": "pp-release", "role": "record", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:20:39.000Z", "ended_at": "2026-09-25T10:20:39.006Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 6, "identity": "src__Util__SizeFormatter.php#1"},
+
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 0, "started_at": "2026-09-25T10:29:45.000Z", "ended_at": null, "outcome": "interrupted", "tokens": null, "wall_clock_ms": null, "identity": "src__Util__RateLimiter.php#2"},
+    {"stepId": "pp-review-a", "role": "review", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:29:50.000Z", "ended_at": "2026-09-25T10:30:00.200Z", "outcome": "interrupted", "tokens": null, "wall_clock_ms": 10200, "identity": "src__Util__RateLimiter.php#2"},
+
+    {"stepId": "pp-final", "role": "record", "file": null, "round": null, "attempt": 1, "started_at": "2026-09-25T10:40:00.000Z", "ended_at": "2026-09-25T10:40:00.003Z", "outcome": "completed", "tokens": null, "wall_clock_ms": 3, "identity": null}
+  ],
+  "verdicts": [
+    {"file": "src/Auth/LdapAuth.php", "reviewer": "reviewer-A", "round": 1, "diff_id": "diff-src__Auth__LdapAuth.php-r1", "findings": [
+      {"finding_id": "F1", "severity": "blocker", "summary": "credentials compared with ==", "evidence": {"hunk_id": "h2", "start_line": 10, "end_line": 14, "quote": "if ($password == $storedPassword) {"}},
+      {"finding_id": "F2", "severity": "minor", "summary": "unused import", "evidence": {"hunk_id": "h1", "start_line": 3, "end_line": 3, "quote": "use App\\Legacy\\Logger;"}}
+    ], "citation_check": [{"finding_id": "F1", "p_cited": 1}, {"finding_id": "F2", "p_cited": 1}]},
+    {"file": "src/Auth/LdapAuth.php", "reviewer": "reviewer-B", "round": 1, "diff_id": "diff-src__Auth__LdapAuth.php-r1", "findings": [
+      {"finding_id": "F1", "severity": "major", "summary": "loose comparison of credentials", "evidence": {"hunk_id": "h2", "start_line": 11, "end_line": 13, "quote": "if ($password == $storedPassword) {"}},
+      {"finding_id": "F2", "severity": "minor", "summary": "unused import", "evidence": {"hunk_id": "h1", "start_line": 3, "end_line": 3, "quote": "use App\\Legacy\\Logger;"}}
+    ], "citation_check": [{"finding_id": "F1", "p_cited": 1}, {"finding_id": "F2", "p_cited": 1}]},
+    {"file": "src/Util/RateLimiter.php", "reviewer": "reviewer-A", "round": 1, "diff_id": "diff-src__Util__RateLimiter.php-r1", "findings": [
+      {"finding_id": "F3", "severity": "major", "summary": "missing null check on bucket lookup", "evidence": {"hunk_id": "hb1", "start_line": 2, "end_line": 6, "quote": "$bucket = $this->buckets[$key];"}}
+    ], "citation_check": [{"finding_id": "F3", "p_cited": 1}]},
+    {"file": "src/Util/RateLimiter.php", "reviewer": "reviewer-B", "round": 1, "diff_id": "diff-src__Util__RateLimiter.php-r1", "findings": [
+      {"finding_id": "F3", "severity": "major", "summary": "missing null check on bucket lookup", "evidence": {"hunk_id": "hb1", "start_line": 3, "end_line": 5, "quote": "$bucket = $this->buckets[$key];"}}
+    ], "citation_check": [{"finding_id": "F3", "p_cited": 1}]},
+    {"file": "src/Util/Csv.php", "reviewer": "reviewer-A", "round": 1, "diff_id": "diff-src__Util__Csv.php-r1", "findings": [], "citation_check": []},
+    {"file": "src/Util/Csv.php", "reviewer": "reviewer-B", "round": 1, "diff_id": "diff-src__Util__Csv.php-r1", "findings": [], "citation_check": []},
+    {"file": "src/Util/SizeFormatter.php", "reviewer": "reviewer-A", "round": 1, "diff_id": "diff-src__Util__SizeFormatter.php-r1", "findings": [
+      {"finding_id": "F5", "severity": "nit", "summary": "unclear function name", "evidence": {"hunk_id": "hs1", "start_line": 1, "end_line": 2, "quote": "function fmtSize($bytes) {"}}
+    ], "citation_check": [{"finding_id": "F5", "p_cited": 0.4}]},
+    {"file": "src/Util/SizeFormatter.php", "reviewer": "reviewer-B", "round": 1, "diff_id": "diff-src__Util__SizeFormatter.php-r1", "findings": [], "citation_check": []}
+  ],
+  "burn_down": [
+    {"queue": "tsc", "file": "src/Auth/LdapAuth.php", "iteration": 1, "error_count": 3, "recorded_at": "2026-09-25T10:07:10.000Z"},
+    {"queue": "tsc", "file": "src/Util/RateLimiter.php", "iteration": 1, "error_count": 2, "recorded_at": "2026-09-25T10:12:11.000Z"},
+    {"queue": "tsc", "file": "src/Util/Csv.php", "iteration": 1, "error_count": 1, "recorded_at": "2026-09-25T10:17:12.000Z"},
+    {"queue": "tsc", "file": "src/Auth/LdapAuth.php", "iteration": 2, "error_count": 1, "recorded_at": "2026-09-25T10:22:00.000Z"},
+    {"queue": "tsc", "file": "src/Util/RateLimiter.php", "iteration": 2, "error_count": 0, "recorded_at": "2026-09-25T10:22:01.000Z"},
+    {"queue": "tsc", "file": "src/Util/Csv.php", "iteration": 2, "error_count": 0, "recorded_at": "2026-09-25T10:22:02.000Z"},
+    {"queue": "tsc", "file": "src/Auth/LdapAuth.php", "iteration": 3, "error_count": 0, "recorded_at": "2026-09-25T10:28:00.000Z"},
+    {"queue": "vitest", "file": "src/Auth/LdapAuth.php", "iteration": 1, "error_count": 1, "recorded_at": "2026-09-25T10:07:30.000Z"},
+    {"queue": "vitest", "file": "src/Auth/LdapAuth.php", "iteration": 2, "error_count": 0, "recorded_at": "2026-09-25T10:22:30.000Z"}
+  ]
+}

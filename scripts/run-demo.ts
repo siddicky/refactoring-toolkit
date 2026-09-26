@@ -55,10 +55,14 @@ import {
   probeFlows,
   type RoundInput,
 } from "./probe-flow.js";
+import { PortProjectFlow, configurePortHarness } from "../flows/port-project.js";
 import {
-  PortProjectFlow,
-  configurePortHarness,
-} from "../flows/port-project.js";
+  configurePortFault,
+  configurePortJudgment,
+} from "../flows/runtime-hooks.js";
+import { createOfflineJevClient } from "../src/harness/runtime.js";
+import { createRealJevClient, isTypesafeOffline } from "../src/typesafe/client.js";
+import type { JudgmentClient } from "../src/typesafe/client.js";
 import type { Flow } from "@superdurable/dex";
 
 // ---------------------------------------------------------------------------
@@ -227,6 +231,25 @@ async function gitSelftest(): Promise<number> {
   return failures === 0 ? 0 : 1;
 }
 
+/**
+ * Phase 4: latest committed round for a file (max op-ID trailer across all
+ * branches); 0 when the file has no committed round yet.
+ */
+async function latestRoundFor(repoDir: string, file: string): Promise<number> {
+  const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const { stdout } = await execFileP(
+    "git",
+    ["log", "--all", "--grep", `Operation-ID: ${escaped}#`, "--format=%B"],
+    { cwd: repoDir, maxBuffer: 16 * 1024 * 1024 },
+  );
+  let max = 0;
+  for (const m of stdout.matchAll(new RegExp(`Operation-ID: ${escaped}#(\\d+)`, "g"))) {
+    const n = Number.parseInt(m[1] ?? "0", 10);
+    if (Number.isInteger(n) && n > max) max = n;
+  }
+  return max;
+}
+
 async function countOpIdCommits(repoRoot: string, opId: string): Promise<number> {
   const out = await git(repoRoot).run([
     "log",
@@ -333,6 +356,34 @@ async function startRound(
 function portFlows(harness: AgentSessionClient): Flow<any>[] {
   configurePortHarness(harness);
   return [new PortProjectFlow()];
+}
+
+/**
+ * Phase 3 Jev resolution (plan: swap-in behind the seam; naive default):
+ * - TYPESAFE_OFFLINE=1 → deterministic in-memory double (scripted fixtures,
+ *   never reported as live usage);
+ * - TYPESAFE_API_KEY set → REAL billed Jev client;
+ * - no key → in-memory double for the symbol table (BLOCKED-pending-key for
+ *   Jev-live + the n≥30 spot-check); verdict-check/prioritize stay NAIVE.
+ */
+async function resolveJudgment(): Promise<JudgmentClient> {
+  if (isTypesafeOffline()) {
+    console.log("[worker] Jev: OFFLINE in-memory double (scripted fixtures)");
+    return createOfflineJevClient();
+  }
+  const key = process.env.TYPESAFE_API_KEY?.trim();
+  if (key === undefined || key === "") {
+    console.log("[worker] Jev: TYPESAFE_API_KEY absent — in-memory double; live Jev + n>=30 spot-check BLOCKED-pending-key");
+    return createOfflineJevClient();
+  }
+  try {
+    const client = await createRealJevClient({ apiKey: key });
+    console.log("[worker] Jev: REAL client (billed System One calls)");
+    return client;
+  } catch (err) {
+    console.error(`[worker] Jev real client unavailable (${(err as Error).message}) — in-memory double`);
+    return createOfflineJevClient();
+  }
 }
 
 /**
@@ -450,7 +501,10 @@ async function recoverPort(): Promise<number> {
   const leaseWorktrees = await listLeaseWorktrees(dir);
   let failures = 0;
   for (const file of files) {
-    const opId = operationId(file, 1);
+    // Phase 4: recover the LATEST round per file (round increments wired) —
+    // the old round-1 pin lost fix rounds beyond the first.
+    const round = await latestRoundFor(dir, file);
+    const opId = operationId(file, round);
     const wt = leaseWorktrees.find((p) => p.includes(`-${epoch - 1}`));
     const keyed = await findCommitByOpId(dir, opId);
     if (wt === undefined) {
@@ -522,6 +576,8 @@ async function main(): Promise<number> {
       const harness = await pickHarness(argValue("--harness"));
       const flows = argValue("--flows") === "port" ? portFlows(harness) : probeFlows();
       configureProbe(harness, fault);
+      configurePortJudgment(await resolveJudgment());
+      configurePortFault(process.env.PORTING_KIT_FAULT);
       const handle = await startDexWorker(flows, config);
       console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${argValue("--harness") ?? "auto"} flows=${argValue("--flows") ?? "probe"}`);
       await new Promise(() => {}); // run until killed

@@ -31,7 +31,8 @@ import {
   goTo,
 } from "@superdurable/dex";
 import type { Context, Flow, StepDecision } from "@superdurable/dex";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -43,6 +44,13 @@ import {
   type EnvelopeOutcome,
   type EnvelopeStepClass,
 } from "./steps/envelope.js";
+import {
+  configurePortFault,
+  configurePortJudgment,
+  crashPortWorker,
+  faultMatches,
+  requirePortJudgment,
+} from "./runtime-hooks.js";
 import {
   fenceLabel,
   sessionFenceMap,
@@ -70,13 +78,32 @@ import type { AgentDefinition } from "../harness/agents/types.js";
 import type {
   VerdictRecord as AgentVerdictRecord,
 } from "../harness/agents/verdict-schema.js";
+import type { PhpSymbol } from "../src/typesafe/symbol-types.js";
+import { selectSymbolType } from "../src/typesafe/symbol-types.js";
+import {
+  createOfflineJevClient,
+  composePrepGenerateTurn,
+  composePrepReviseTurn,
+  composeQueueFixTurn,
+  harvestPhpSymbols,
+} from "../src/harness/runtime.js";
+import {
+  buildTscQueueState,
+  parseTscOutput,
+} from "../src/queues/tsc-queue.js";
+import {
+  buildVitestQueueState,
+  parseVitestOutput,
+} from "../src/queues/vitest-queue.js";
+import { portJevLive } from "./runtime-hooks.js";
+import type { JudgmentClient } from "../src/typesafe/client.js";
 import type {
   DiffDocument,
   Finding as MetricsFinding,
   VerdictRecord as MetricsVerdictRecord,
 } from "../src/metrics/types.js";
-import { naiveCitationCheck } from "../src/typesafe/verdict-check.js";
-import { naivePrioritize } from "../src/typesafe/prioritize.js";
+import { createCitationChecker, naiveCitationCheck } from "../src/typesafe/verdict-check.js";
+import { createJevPrioritizer, naivePrioritize } from "../src/typesafe/prioritize.js";
 import {
   composeFixerTurn,
   composeImplementerTurn,
@@ -130,11 +157,74 @@ export interface FileRoundInput {
 
 export interface PortRunConfig {
   maxRounds: number;
+  /** Prep-review loopback cap (Phase 3; same envelope caps as the port loop). */
+  prepMaxRounds: number;
+}
+
+/** Phase 3: harvested PHP symbols + the stub baseline they supersede. */
+export interface PrepSeedState {
+  stubRaw: string;
+  symbols: PhpSymbol[];
+}
+
+/** Phase 3: one per-symbol table row (symbol-types decision, flattened). */
+export interface SymbolTableRow {
+  file: string;
+  symbol: string;
+  kind: string;
+  signature: string;
+  candidates: string[];
+  selected: string;
+  flagged: boolean;
+  escalations: number;
+}
+
+export interface PrepDraft {
+  specText: string;
+  iteration: number;
+}
+
+export interface PrepDiffArtifact {
+  raw: string;
+  doc: DiffDocument;
+  diffId: string;
+  bodyLineOffset: number;
+  iteration: number;
+}
+
+/** Phase 4: verification-queue state (durable; feeds the per-file fix loop). */
+export interface QueueVerifyError {
+  file: string;
+  code: string;
+  message: string;
+  line: number;
+}
+
+export interface QueueVerifyState {
+  iteration: number;
+  fixQueue: Array<{ file: string; fromRound: number }>;
+  tscTotal: number;
+  vitestTotal: number;
+  vitestNote: string | null;
+  lastRunAt: string;
+  /** Raw tsc error records (capped) consumed by the per-file fix loop. */
+  errors: QueueVerifyError[];
+}
+
+/** Phase 4: one burn-down sample (dashboard renders queue-burndown/*). */
+export interface QueueBurnDownSample {
+  queue: "tsc" | "vitest";
+  iteration: number;
+  error_count: number;
+  file: string | null;
+  recorded_at: string;
 }
 
 export interface PrepArtifact {
   raw: string;
   sourceMap: Record<string, { outPath: string; notes: string }>;
+  /** Phase 3: per-symbol table rows backing the generated spec. */
+  symbolTable: SymbolTableRow[];
 }
 
 export interface PortQueueState {
@@ -177,6 +267,12 @@ export interface OutPathRef {
 export interface PortRunResult {
   completed: PortQueueState["done"];
   blocked: PortQueueState["blocked"];
+  verification: {
+    iteration: number;
+    tscTotal: number;
+    vitestTotal: number;
+    vitestNote: string | null;
+  } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +288,19 @@ export const ppVerdict = new AttributeMap<ReviewTuple>("pp-verdict", jsonCodec<R
 export const ppKept = new AttributeMap<KeptFindings>("pp-kept", jsonCodec<KeptFindings>());
 export const ppOut = new AttributeMap<OutPathRef>("pp-out", jsonCodec<OutPathRef>());
 export const ppMarker = new AttributeMap<CompletionMarker>("pp-marker", jsonCodec<CompletionMarker>());
+
+// Phase 3 (prep-analysis) durable attributes.
+export const ppPrepSeed = new AttributeMap<PrepSeedState>("pp-prep-seed", jsonCodec<PrepSeedState>());
+export const ppSymtab = new AttributeMap<{ rows: SymbolTableRow[] }>("pp-symtab", jsonCodec<{ rows: SymbolTableRow[] }>());
+export const ppPrepDraft = new AttributeMap<PrepDraft>("pp-prep-draft", jsonCodec<PrepDraft>());
+export const ppPrepDiff = new AttributeMap<PrepDiffArtifact>("pp-prep-diff", jsonCodec<PrepDiffArtifact>());
+export const ppPrepVerdict = new AttributeMap<ReviewTuple>("pp-prep-verdict", jsonCodec<ReviewTuple>());
+export const ppPrepFindings = new AttributeMap<KeptFindings>("pp-prep-findings", jsonCodec<KeptFindings>());
+export const ppPrepState = new AttributeMap<{ prepIteration: number }>("pp-prep-state", jsonCodec<{ prepIteration: number }>());
+
+// Phase 4 (verification queues) durable attributes.
+export const ppVerify = new AttributeMap<QueueVerifyState>("pp-verify", jsonCodec<QueueVerifyState>());
+export const ppBurndown = new AttributeMap<QueueBurnDownSample>("queue-burndown", jsonCodec<QueueBurnDownSample>());
 
 const PP_LEASE_INSTANCE = "pool";
 
@@ -211,6 +320,16 @@ export function portPersistenceSchema(): {
       ppKept,
       ppOut,
       ppMarker,
+      ppPrepSeed,
+      ppSymtab,
+      ppPrepDraft,
+      ppPrepDiff,
+      ppPrepVerdict,
+      ppPrepFindings,
+      ppPrepState,
+      ppVerify,
+      ppBurndown,
+      ppJevUsage,
     ],
   };
 }
@@ -274,6 +393,35 @@ export function deriveNext(queue: PortQueueState, maxRounds: number): NextAction
   return { kind: "start", file: next };
 }
 
+/**
+ * Phase 4 termination rule (pure): from the done-set, the prep source map
+ * (php→ts outPath), and the per-output error counts, select the files that
+ * get a FIX ROUND (errors remain AND round+1 stays within the cap) versus
+ * files that are capped (recorded as blocked, errors remain unresolvable
+ * in-run).
+ */
+export function selectFixableFiles(
+  done: ReadonlyArray<{ file: string; round: number }>,
+  sourceMap: Record<string, { outPath: string }>,
+  errorCountByOutput: ReadonlyMap<string, number>,
+  maxRounds: number,
+): { fixable: Array<{ file: string; fromRound: number }>; capped: Array<{ file: string; round: number; count: number }> } {
+  const fixable: Array<{ file: string; fromRound: number }> = [];
+  const capped: Array<{ file: string; round: number; count: number }> = [];
+  for (const entry of done) {
+    const outPath = sourceMap[entry.file]?.outPath;
+    if (outPath === undefined) continue;
+    const count = errorCountByOutput.get(outPath.replace(/^\.\//, "")) ?? 0;
+    if (count === 0) continue;
+    if (entry.round + 1 > maxRounds) {
+      capped.push({ file: entry.file, round: entry.round, count });
+    } else {
+      fixable.push({ file: entry.file, fromRound: entry.round });
+    }
+  }
+  return { fixable, capped };
+}
+
 /** Binds the pp-lease map instance as a sync LeaseStore for one invocation. */
 function bindLeaseStore(ctx: Context, map: AttributeMap<Record<string, LeaseRecord>>): LeaseStore {
   const read = (): Record<string, LeaseRecord> => map.get(ctx, PP_LEASE_INSTANCE) ?? {};
@@ -294,6 +442,30 @@ function bindLeaseStore(ctx: Context, map: AttributeMap<Record<string, LeaseReco
 }
 
 // ---------------------------------------------------------------------------
+/** LIVE Jev client (only when TYPESAFE_API_KEY is present); else naive. */
+let PORT_JEV_LIVE: JudgmentClient | undefined;
+
+export function configurePortJevLive(client: JudgmentClient): void {
+  PORT_JEV_LIVE = client;
+}
+
+export function portJevLiveClient(): JudgmentClient | undefined {
+  return PORT_JEV_LIVE;
+}
+
+/** Accumulated LIVE Jev usage (evidence stream; naive path adds nothing). */
+export const ppJevUsage = new AttributeMap<Array<{ stepId: string; tokens: number; atUtc: string }>>(
+  "pp-jev-usage",
+  jsonCodec<Array<{ stepId: string; tokens: number; atUtc: string }>>(),
+);
+
+/** Records one live-Jev usage event (evidence stream entry). */
+async function recordJevUsage(ctx: Context, stepId: string, tokens: number): Promise<void> {
+  const log = ppJevUsage.get(ctx, "usage") ?? [];
+  log.push({ stepId, tokens, atUtc: new Date().toISOString() });
+  ppJevUsage.set(ctx, "usage", log);
+}
+
 // Harness injection (worker calls configurePortHarness at startup)
 // ---------------------------------------------------------------------------
 
@@ -361,27 +533,36 @@ async function runAgentTurn(input: {
  * extracted, validated, and mapped onto the metrics shapes. Any failure
  * throws so dex retries the whole turn on a fresh session.
  */
-async function runReviewerTurn(input: {
+export interface ReviewTurnDiff {
+  raw: string;
+  doc: DiffDocument;
+  diffId: string;
+  bodyLineOffset: number;
+}
+
+async function runReviewTurn(input: {
   ctx: Context;
   reviewerId: string;
-  fri: FileRoundInput;
-  diff: CapturedDiff;
+  file: string;
+  round: number;
+  epoch: number;
+  diff: ReviewTurnDiff;
 }): Promise<{ tuple: ReviewTuple; tokens: number | null }> {
   const harness = requireHarness();
-  const label = fenceLabel(input.fri.file, input.fri.round, input.fri.epoch);
+  const label = fenceLabel(input.file, input.round, input.epoch);
   const session = await harness.createSession(label);
   sessionFenceMap.set(input.ctx, label, {
     sessionId: session.id,
     stepId: `pp-review-${input.reviewerId}`,
-    epoch: input.fri.epoch,
+    epoch: input.epoch,
     label,
     persistedAtUtc: new Date().toISOString(),
   });
 
   const diffBlock = renderDiffForReview({
     diffText: input.diff.raw,
-    file: input.fri.file,
-    round: input.fri.round,
+    file: input.file,
+    round: input.round,
     diffId: input.diff.diffId,
   });
   const turn = composeReviewerTurn({
@@ -389,22 +570,22 @@ async function runReviewerTurn(input: {
     reviewerLabel: REVIEWER.name,
     diffBlock: diffBlock.block,
   });
-    const agent = reviewerAgentOverride();
-    const result = await runAgentTurn({
-      def: REVIEWER,
-      sessionId: session.id,
-      turn,
-      file: input.fri.file,
-      round: input.fri.round,
-      ...(agent !== undefined ? { agent } : {}),
-    });
+  const agent = reviewerAgentOverride();
+  const result = await runAgentTurn({
+    def: REVIEWER,
+    sessionId: session.id,
+    turn,
+    file: input.file,
+    round: input.round,
+    ...(agent !== undefined ? { agent } : {}),
+  });
 
   const parsed = extractJsonObject(result.text);
   const mapped = mapVerdictToMetrics({
     raw: parsed,
-    file: input.fri.file,
+    file: input.file,
     reviewer: input.reviewerId,
-    round: input.fri.round,
+    round: input.round,
     diffId: input.diff.diffId,
     // Re-parse from the stored raw text: ParsedDiff carries non-JSON helpers
     // (hunk resolution) and cannot live in the durable attribute itself.
@@ -412,7 +593,7 @@ async function runReviewerTurn(input: {
     bodyLineOffset: input.diff.bodyLineOffset,
     naiveCited: (finding) =>
       naiveCitationCheck(
-        emptyRecordWith(input.fri, input.reviewerId, finding),
+        emptyRecordWith(input.file, input.round, input.reviewerId, input.diff.diffId, finding),
         input.diff.doc,
       ).find((c) => c.finding_id === finding.finding_id)?.p_cited ?? 0,
   });
@@ -426,15 +607,17 @@ async function runReviewerTurn(input: {
 
 /** Single-finding metrics record scoping for the naive fallback citation. */
 function emptyRecordWith(
-  fri: FileRoundInput,
+  file: string,
+  round: number,
   reviewer: string,
+  diffId: string,
   finding: MetricsFinding,
 ): MetricsVerdictRecord {
   return {
-    file: fri.file,
+    file,
     reviewer,
-    round: fri.round,
-    diff_id: "",
+    round,
+    diff_id: diffId,
     findings: [finding],
     citation_check: [],
   };
@@ -459,8 +642,17 @@ const PrepStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput
     if (missing.length > 0) {
       throw new Error(`prep source map lacks rows for: ${missing.join(", ")}`);
     }
-    ppPrep.set(ctx, "prep", { raw, sourceMap });
-    ppConfig.set(ctx, "config", { maxRounds: input.maxRounds });
+    // Phase 3: harvest symbols (code-only, deterministic) for the per-symbol
+    // table; the stub baseline is what the generated spec map supersedes.
+    // ppPrep is finalized only after the capped prep-review loop.
+    const symbols: PhpSymbol[] = [];
+    for (const file of input.files) {
+      const source = await readFile(join(input.sourceRoot, file), "utf8");
+      symbols.push(...harvestPhpSymbols(file, source, 12));
+    }
+    ppPrepSeed.set(ctx, "seed", { stubRaw: raw, symbols });
+    ppPrepState.set(ctx, "state", { prepIteration: 0 });
+    ppConfig.set(ctx, "config", { maxRounds: input.maxRounds, prepMaxRounds: 2 });
     ppQueue.set(ctx, "queue", {
       pending: [...input.files],
       current: null,
@@ -469,7 +661,7 @@ const PrepStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput
     });
     return { output: input, tokens: null };
   },
-  route: (_ctx, _input, out) => goTo(DispatchStep, out),
+  route: (_ctx, _input, out) => goTo(SymbolStart, out),
 });
 
 const DispatchStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
@@ -514,7 +706,9 @@ const DispatchStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     // "done": route below must go to Final (the loop terminator).
     return { output: { ...input, done: action.kind === "done" }, tokens: null };
   },
-  route: (_ctx, _input, out) => (out.done ? goTo(FinalStep, out) : goTo(LeaseStep, out)),
+  // Phase 4: an exhausted port queue enters verification — QueueVerify
+  // decides between Final (queues empty / capped) and per-file fix rounds.
+  route: (_ctx, _input, out) => (out.done ? goTo(QueueVerifyStep, out) : goTo(LeaseStep, out)),
 });
 
 /** Lease outcome: carry the file-round forward, or report an exhausted queue. */
@@ -606,7 +800,9 @@ const FenceStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
     });
     return { output: fri, tokens: null };
   },
-  route: (_ctx, _input, fri) => goTo(ImplementStart, fri),
+  // Phase 4: fix rounds (round >= 2) enter the queue-driven fix loop instead
+  // of re-implementing from scratch.
+  route: (_ctx, _input, fri) => (fri.round >= 2 ? goTo(QueueFixStart, fri) : goTo(ImplementStart, fri)),
 });
 
 // M4 (0(g)): durable PRE-start markers for model-calling steps. The
@@ -706,10 +902,12 @@ const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
     if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
-    const { tuple, tokens } = await runReviewerTurn({
+    const { tuple, tokens } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-A",
-      fri,
+      file: fri.file,
+      round: fri.round,
+      epoch: fri.epoch,
       diff,
     });
     ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-A"), tuple);
@@ -735,10 +933,12 @@ const ReviewBStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
     if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
-    const { tuple, tokens } = await runReviewerTurn({
+    const { tuple, tokens } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-B",
-      fri,
+      file: fri.file,
+      round: fri.round,
+      epoch: fri.epoch,
       diff,
     });
     ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-B"), tuple);
@@ -764,10 +964,28 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
       if (tuple === undefined) {
         throw new Error(`verdict record missing for ${key}`);
       }
-      // Citation check (naive, code-only): a finding survives iff its cited
-      // evidence literally appears in the reviewed diff (p_cited === 1) and
-      // its disposition asks for a fix.
-      for (const check of naiveCitationCheck(tuple.metrics, diff.doc)) {
+      // Citation check: LIVE Jev nouls when configured (Phase 3 swap-in,
+      // createCitationChecker seam), else the naive code-only default. A
+      // finding survives iff its cited evidence appears in the reviewed diff
+      // (p_cited === 1) and its disposition asks for a fix.
+      const jevClient = portJevLive() ? PORT_JEV_LIVE : undefined;
+      let citations;
+      if (jevClient !== undefined) {
+        let jt = 0;
+        const counting: JudgmentClient = {
+          kind: jevClient.kind,
+          systemOne: async (request) => {
+            const r = await jevClient.systemOne(request);
+            jt += r.usage.input_tokens + r.usage.output_tokens;
+            return r;
+          },
+        };
+        citations = await createCitationChecker(counting).check(tuple.metrics, diff.doc);
+        if (jt > 0) await recordJevUsage(ctx, `pp-verdict-check:${fri.file}#${fri.round}`, jt);
+      } else {
+        citations = naiveCitationCheck(tuple.metrics, diff.doc);
+      }
+      for (const check of citations) {
         const agentFinding = tuple.agent.findings.find((f) => f.finding_id === check.finding_id);
         const metricsFinding = tuple.metrics.findings.find((f) => f.finding_id === check.finding_id);
         if (agentFinding === undefined || metricsFinding === undefined) continue;
@@ -810,9 +1028,26 @@ const PrioritizeStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<File
   inner: async (ctx, fri) => {
     const kept = ppKept.get(ctx, keptKeyOf(fri.file, fri.round));
     if (kept === undefined) throw new Error(`kept findings missing for ${fri.file}#${fri.round}`);
+    let ordered = kept.findings;
+    const jevClient = portJevLive() ? PORT_JEV_LIVE : undefined;
+    if (jevClient !== undefined && ordered.length > 0) {
+      let jt = 0;
+      const counting: JudgmentClient = {
+        kind: jevClient.kind,
+        systemOne: async (request) => {
+          const r = await jevClient.systemOne(request);
+          jt += r.usage.input_tokens + r.usage.output_tokens;
+          return r;
+        },
+      };
+      ordered = await createJevPrioritizer(counting).prioritize(ordered);
+      if (jt > 0) await recordJevUsage(ctx, `pp-prioritize:${fri.file}#${fri.round}`, jt);
+    } else {
+      ordered = naivePrioritize(ordered);
+    }
     ppKept.set(ctx, keptKeyOf(fri.file, fri.round), {
       ...kept,
-      findings: naivePrioritize(kept.findings),
+      findings: ordered,
     });
     return { output: fri, tokens: null };
   },
@@ -1010,11 +1245,24 @@ const FinalStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInpu
   stepType: "PpFinal",
   stepId: "pp-final",
   role: "record",
-  stepOptions: { executeLoadAttributeMaps: [ppQueue] },
+  stepOptions: { executeLoadAttributeMaps: [ppQueue, ppVerify] },
   inner: async (ctx, input) => {
     const queue = ppQueue.get(ctx, "queue");
+    const verify = ppVerify.get(ctx, "verify");
     return {
-      output: { completed: queue.done, blocked: queue.blocked },
+      output: {
+        completed: queue.done,
+        blocked: queue.blocked,
+        verification:
+          verify === undefined
+            ? null
+            : {
+                iteration: verify.iteration,
+                tscTotal: verify.tscTotal,
+                vitestTotal: verify.vitestTotal,
+                vitestNote: verify.vitestNote,
+              },
+      },
       tokens: null,
     };
   },
@@ -1034,11 +1282,669 @@ function baseInput(fri: FileRoundInput): PortRunInput {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 3 — prep-analysis steps (spec map + per-symbol table + prep review)
+// ---------------------------------------------------------------------------
+
+const PREP_SPEC_FILE = "PORTING.spec.md";
+
+const SymbolStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<PortRunInput>({
+  stepType: "PpSymbolStart",
+  targetStepId: "pp-symbol-table",
+  role: "judgment",
+  route: (input) => goTo(SymbolTableStep, input),
+});
+
+const SymbolTableStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunInput>({
+  stepType: "PpSymbolTable",
+  stepId: "pp-symbol-table",
+  role: "judgment",
+  stepOptions: { executeLoadAttributeMaps: [ppPrepSeed] },
+  inner: async (ctx, input) => {
+    const client = requirePortJudgment();
+    const seed = ppPrepSeed.get(ctx, "seed");
+    if (seed === undefined) throw new Error("prep seed missing");
+
+    // Usage accumulator: selectSymbolType consumes the client internally, so
+    // wrap it to capture System One usage for the envelope (never zero-null).
+    let usageTokens = 0;
+    const wrapped: JudgmentClient = {
+      kind: client.kind,
+      systemOne: async (request) => {
+        const result = await client.systemOne(request);
+        usageTokens += result.usage.input_tokens + result.usage.output_tokens;
+        return result;
+      },
+    };
+
+    const rows: SymbolTableRow[] = [];
+    for (const symbol of seed.symbols) {
+      const decision = await selectSymbolType(wrapped, symbol);
+      rows.push({
+        file: decision.file,
+        symbol: decision.symbol,
+        kind: kindOfSymbol(symbol),
+        signature: symbol.signature,
+        candidates: decision.candidates.map((c) => c.type),
+        selected: decision.selected,
+        flagged: decision.flagged,
+        escalations: decision.escalations.length,
+      });
+    }
+
+    // P3 smoke kill point: AFTER the Jev selection loop, BEFORE the durable
+    // table write (deterministic; set PORTING_KIT_FAULT=symbol-table:post:seed).
+    if (faultMatches("symbol-table:post", "seed")) {
+      crashPortWorker(`symbol-table:post:seed (${rows.length} rows computed)`);
+    }
+
+    ppSymtab.set(ctx, "symtab", { rows });
+    return { output: input, tokens: usageTokens > 0 ? usageTokens : 1 };
+  },
+  route: (_ctx, _input, out) => goTo(PrepStart, out),
+});
+
+function kindOfSymbol(symbol: PhpSymbol): string {
+  return symbol.kind;
+}
+
+const PrepStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<PortRunInput>({
+  stepType: "PpPrepGenerateStart",
+  targetStepId: "pp-prep-generate",
+  role: "agent",
+  route: (input) => goTo(PrepGenerateStep, input),
+});
+
+const PrepGenerateStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunInput>({
+  stepType: "PpPrepGenerate",
+  stepId: "pp-prep-generate",
+  role: "agent",
+  stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppPrepSeed, ppSymtab] },
+  inner: async (ctx, input) => {
+    const seed = ppPrepSeed.get(ctx, "seed");
+    const symtab = ppSymtab.get(ctx, "symtab");
+    if (seed === undefined || symtab === undefined) {
+      throw new Error("prep seed/symbol table missing");
+    }
+    const symbolTableText = [
+      "| Symbol | Kind | File | Candidates | Selected | Flagged |",
+      "|---|---|---|---|---|---|",
+      ...symtab.rows.map(
+        (r) =>
+          `| ${r.symbol} | ${r.kind} | ${r.file} | ${r.candidates.join(", ") || "—"} | ${r.selected} | ${r.flagged ? "yes" : "no"} |`,
+      ),
+    ].join("\n");
+    const sources: Array<{ name: string; source: string }> = [];
+    for (const file of input.files) {
+      sources.push({ name: file, source: await readFile(join(input.sourceRoot, file), "utf8") });
+    }
+    const turn = composePrepGenerateTurn({
+      phpFiles: sources,
+      symbolTableText,
+      stubPrepBaseline: seed.stubRaw,
+    });
+    const result = await runAgentTurn({ def: IMPLEMENTER, sessionId: await prepSessionId(input.epoch), turn, file: PREP_SPEC_FILE, round: 0 });
+    const specText = extractCodeFence(result.text);
+    ppPrepDraft.set(ctx, "draft", { specText, iteration: 0 });
+    return { output: input, tokens: result.tokens };
+  },
+  route: (_ctx, _input, input) => goTo(PrepDiffCaptureStep, input),
+});
+
+/** Prep-loop identity for envelope event keys (spec file + iteration).
+ * Defensive: an unloaded attribute map must never kill a start marker —
+ * fall back to the flow-level prep identity. */
+function prepIdentityOf(ctx: Context): string {
+  try {
+    const state = ppPrepState.get(ctx, "state");
+    return state === undefined ? "prep" : `prep${state.prepIteration}`;
+  } catch {
+    return "prep";
+  }
+}
+
+async function prepSessionId(epoch: number): Promise<string> {
+  const harness = requireHarness();
+  const label = fenceLabel(PREP_SPEC_FILE, 0, epoch);
+  const session = await harness.createSession(label);
+  return session.id;
+}
+
+const PrepDiffCaptureStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
+  PortRunInput,
+  PortRunInput
+>({
+  stepType: "PpPrepDiffCapture",
+  stepId: "pp-prep-diff-capture",
+  role: "diff-capture",
+  stepOptions: { executeLoadAttributeMaps: [ppPrepDraft, ppPrepState, ppPrepSeed] },
+  inner: async (ctx, input) => {
+    const draft = ppPrepDraft.get(ctx, "draft");
+    const seed = ppPrepSeed.get(ctx, "seed");
+    const state = ppPrepState.get(ctx, "state");
+    if (draft === undefined || seed === undefined || state === undefined) {
+      throw new Error("prep draft/seed/state missing");
+    }
+    // Artifact-diff (plan §Flow contract): the GENERATED artifacts vs the
+    // baseline they supersede, rendered as a real unified diff. git exits 1
+    // when files differ — that is data, not failure.
+    const tmp = await mkdtemp(join(tmpdir(), "porting-kit-prep-"));
+    try {
+      const baselinePath = join(tmp, "baseline.md");
+      const specPath = join(tmp, "spec.md");
+      await writeFile(baselinePath, seed.stubRaw);
+      await writeFile(specPath, draft.specText);
+      let raw = "";
+      try {
+        const { stdout } = await execFileP(
+          "git",
+          ["diff", "--no-index", "--", baselinePath, specPath],
+          { maxBuffer: 32 * 1024 * 1024 },
+        );
+        raw = stdout;
+      } catch (err) {
+        raw = (err as { stdout?: string }).stdout ?? "";
+      }
+      const doc: DiffDocument = {
+        diff_id: `prep-diff-${state.prepIteration}`,
+        file: PREP_SPEC_FILE,
+        base_ref: "baseline",
+        hunks: parseUnifiedDiff(raw).hunks,
+      };
+      ppPrepDiff.set(ctx, "diff", {
+        raw,
+        doc,
+        diffId: doc.diff_id,
+        bodyLineOffset: DIFF_HEADER_LINES,
+        iteration: state.prepIteration,
+      });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+    return { output: input, tokens: null };
+  },
+  route: (_ctx, _input, input) => goTo(PrepReviewAStart, input),
+});
+
+const PrepReviewAStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<PortRunInput>({
+  stepType: "PpPrepReviewAStart",
+  targetStepId: "pp-prep-review-a",
+  role: "review",
+  identityOf: prepIdentityOf,
+  stepOptions: { executeLoadAttributeMaps: [ppPrepState] },
+  route: (input) => goTo(PrepReviewAStep, input),
+});
+
+const PrepReviewAStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunInput>({
+  stepType: "PpPrepReviewA",
+  stepId: "pp-prep-review-a",
+  role: "review",
+  stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppPrepDiff, ppPrepState] },
+  inner: async (ctx, input) => {
+    const diff = ppPrepDiff.get(ctx, "diff");
+    const state = ppPrepState.get(ctx, "state");
+    if (diff === undefined || state === undefined) throw new Error("prep diff/state missing");
+    const { tuple, tokens } = await runReviewTurn({
+      ctx,
+      reviewerId: "reviewer-A",
+      file: PREP_SPEC_FILE,
+      round: state.prepIteration,
+      epoch: input.epoch,
+      diff,
+    });
+    ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-A"), tuple);
+    return { output: input, tokens };
+  },
+  route: (_ctx, _input, input) => goTo(PrepReviewBStart, input),
+});
+
+const PrepReviewBStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<PortRunInput>({
+  stepType: "PpPrepReviewBStart",
+  targetStepId: "pp-prep-review-b",
+  role: "review",
+  identityOf: prepIdentityOf,
+  stepOptions: { executeLoadAttributeMaps: [ppPrepState] },
+  route: (input) => goTo(PrepReviewBStep, input),
+});
+
+const PrepReviewBStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunInput>({
+  stepType: "PpPrepReviewB",
+  stepId: "pp-prep-review-b",
+  role: "review",
+  stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppPrepDiff, ppPrepState] },
+  inner: async (ctx, input) => {
+    const diff = ppPrepDiff.get(ctx, "diff");
+    const state = ppPrepState.get(ctx, "state");
+    if (diff === undefined || state === undefined) throw new Error("prep diff/state missing");
+    const { tuple, tokens } = await runReviewTurn({
+      ctx,
+      reviewerId: "reviewer-B",
+      file: PREP_SPEC_FILE,
+      round: state.prepIteration,
+      epoch: input.epoch,
+      diff,
+    });
+    ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-B"), tuple);
+    return { output: input, tokens };
+  },
+  route: (_ctx, _input, input) => goTo(PrepVerdictCheckStep, input),
+});
+
+const PrepVerdictCheckStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunInput>({
+  stepType: "PpPrepVerdictCheck",
+  stepId: "pp-prep-verdict-check",
+  role: "verdict-check",
+  stepOptions: { executeLoadAttributeMaps: [ppPrepVerdict, ppPrepDiff, ppPrepState, ppConfig] },
+  inner: async (ctx, input) => {
+    const diff = ppPrepDiff.get(ctx, "diff");
+    const state = ppPrepState.get(ctx, "state");
+    const config = ppConfig.get(ctx, "config");
+    if (diff === undefined || state === undefined || config === undefined) {
+      throw new Error("prep diff/state/config missing");
+    }
+    const kept: MetricsFinding[] = [];
+    const dropped: KeptFindings["dropped"] = [];
+    for (const reviewerId of ["reviewer-A", "reviewer-B"] as const) {
+      const key = verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, reviewerId);
+      const tuple = ppPrepVerdict.get(ctx, key);
+      if (tuple === undefined) throw new Error(`prep verdict missing for ${key}`);
+      for (const check of naiveCitationCheck(tuple.metrics, diff.doc)) {
+        const agentFinding = tuple.agent.findings.find((f) => f.finding_id === check.finding_id);
+        const metricsFinding = tuple.metrics.findings.find((f) => f.finding_id === check.finding_id);
+        if (agentFinding === undefined || metricsFinding === undefined) continue;
+        if (check.p_cited < 1) {
+          dropped.push({
+            finding_id: check.finding_id,
+            reviewer: reviewerId,
+            reason: `citation check failed (p_cited=${check.p_cited})`,
+          });
+          continue;
+        }
+        if (agentFinding.disposition !== "fix") {
+          dropped.push({
+            finding_id: check.finding_id,
+            reviewer: reviewerId,
+            reason: `disposition "${agentFinding.disposition}"`,
+          });
+          continue;
+        }
+        kept.push(metricsFinding);
+      }
+    }
+    ppPrepFindings.set(ctx, "findings", { findings: kept, dropped });
+    // Counter ownership lives in PrepLoopDecision (single place decides a
+    // revision; the increment rides with that decision — no double-count).
+    void state;
+    void config;
+    return { output: input, tokens: null, outcome: kept.length > 0 ? "completed" : "skipped" };
+  },
+  route: (_ctx, _input, input) => goTo(PrepLoopDecisionStep, input),
+});
+
+/**
+ * Prep loopback decision (kept separate so the loopback route is a pure
+ * function of durable state): revise when unaddressed findings remain and
+ * the prep cap allows; otherwise finalize and enter the port loop.
+ */
+const PrepLoopDecisionStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunInput & { revise: boolean }>({
+  stepType: "PpPrepLoopDecision",
+  stepId: "pp-prep-loop-decision",
+  role: "record",
+  stepOptions: { executeLoadAttributeMaps: [ppPrepFindings, ppPrepState, ppConfig] },
+  inner: async (ctx, input) => {
+    const findings = ppPrepFindings.get(ctx, "findings");
+    const state = ppPrepState.get(ctx, "state");
+    const config = ppConfig.get(ctx, "config");
+    if (findings === undefined || state === undefined || config === undefined) {
+      throw new Error("prep findings/state/config missing");
+    }
+    // Termination: a revision is allowed only STRICTLY BELOW the cap, and
+    // the counter increments WITH the decision (so each revision consumes
+    // one unit of the cap — bounded loopback, no runaway).
+    const revise = findings.findings.length > 0 && state.prepIteration < config.prepMaxRounds;
+    if (revise) {
+      ppPrepState.set(ctx, "state", { prepIteration: state.prepIteration + 1 });
+    }
+    return { output: { ...input, revise }, tokens: null };
+  },
+  route: (_ctx, _input, out) => (out.revise ? goTo(PrepReviseStart, out) : goTo(PrepFinalizeStep, out)),
+});
+
+const PrepReviseStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<PortRunInput>({
+  stepType: "PpPrepReviseStart",
+  targetStepId: "pp-prep-revise",
+  role: "agent",
+  identityOf: prepIdentityOf,
+  stepOptions: { executeLoadAttributeMaps: [ppPrepState] },
+  route: (input) => goTo(PrepReviseStep, input),
+});
+
+const PrepReviseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunInput>({
+  stepType: "PpPrepRevise",
+  stepId: "pp-prep-revise",
+  role: "agent",
+  stepOptions: {
+    ...MODEL_STEP_OPTIONS,
+    executeLoadAttributeMaps: [ppPrepFindings, ppPrepDraft, ppPrepState],
+  },
+  inner: async (ctx, input) => {
+    const findings = ppPrepFindings.get(ctx, "findings");
+    const draft = ppPrepDraft.get(ctx, "draft");
+    if (findings === undefined || draft === undefined) throw new Error("prep findings/draft missing");
+    const turn = composePrepReviseTurn({
+      specMapText: draft.specText,
+      findings: findings.findings.map((f) => ({
+        finding_id: f.finding_id,
+        severity: f.severity,
+        summary: f.summary,
+        evidence: f.evidence?.quote ?? "(uncited)",
+      })),
+    });
+    const result = await runAgentTurn({
+      def: IMPLEMENTER,
+      sessionId: await prepSessionId(input.epoch),
+      turn,
+      file: PREP_SPEC_FILE,
+      round: 0,
+    });
+    const specText = extractCodeFence(result.text);
+    ppPrepDraft.set(ctx, "draft", { specText, iteration: draft.iteration + 1 });
+    return { output: input, tokens: result.tokens };
+  },
+  route: (_ctx, _input, input) => goTo(PrepDiffCaptureStep, input),
+});
+
+const PrepFinalizeStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunInput>({
+  stepType: "PpPrepFinalize",
+  stepId: "pp-prep-finalize",
+  role: "record",
+  stepOptions: { executeLoadAttributeMaps: [ppPrepDraft, ppPrepSeed, ppSymtab] },
+  inner: async (ctx, input) => {
+    const draft = ppPrepDraft.get(ctx, "draft");
+    const seed = ppPrepSeed.get(ctx, "seed");
+    const symtab = ppSymtab.get(ctx, "symtab");
+    if (draft === undefined || seed === undefined || symtab === undefined) {
+      throw new Error("prep draft/seed/symtab missing at finalize");
+    }
+    // The port loop consumes the REVIEWED generated spec; the stub's source
+    // map stays the deterministic php→ts path authority.
+    ppPrep.set(ctx, "prep", {
+      raw: draft.specText,
+      sourceMap: parsePrepSourceMap(seed.stubRaw),
+      symbolTable: symtab.rows,
+    });
+    return { output: input, tokens: null };
+  },
+  route: (_ctx, _input, input) => goTo(DispatchStep, input),
+});
+
+
+// ---------------------------------------------------------------------------
+// Phase 4 — verification queues on the integrated checkout + fix rounds
+// ---------------------------------------------------------------------------
+
+const TSC_BIN = join(import.meta.dir, "..", "node_modules", ".bin", "tsc");
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
+  PortRunInput,
+  PortRunInput & { exhausted: boolean }
+>({
+  stepType: "PpQueueVerify",
+  stepId: "pp-queue-verify",
+  role: "queue",
+  stepOptions: {
+    executeLoadAttributeMaps: [ppVerify, ppQueue, ppConfig, ppPrep, ppMarker],
+  },
+  inner: async (ctx, input) => {
+    const config = ppConfig.get(ctx, "config");
+    const queue = ppQueue.get(ctx, "queue");
+    const prep = ppPrep.get(ctx, "prep");
+    const prev = ppVerify.get(ctx, "verify");
+    const iteration = (prev?.iteration ?? 0) + 1;
+    const recordedAt = new Date().toISOString();
+    const itg = input.integrationWorktreePath;
+
+    // Toolkit-owned scaffold: the integrated checkout needs a tsconfig for
+    // tsc; queue infrastructure is toolkit code, not agent content.
+    if (!(await pathExists(join(itg, "tsconfig.json")))) {
+      await writeFile(
+        join(itg, "tsconfig.json"),
+        JSON.stringify(
+          {
+            compilerOptions: {
+              strict: true,
+              target: "ES2022",
+              module: "ESNext",
+              moduleResolution: "Bundler",
+              noEmit: true,
+              skipLibCheck: true,
+              types: [],
+            },
+            include: ["src/**/*.ts", "test/**/*.ts", "tests/**/*.ts"],
+          },
+          null,
+          2,
+        ),
+      );
+    }
+
+    // tsc queue: parse + group via the proven queue module.
+    let tscOut = "";
+    try {
+      const { stdout } = await execFileP(TSC_BIN, ["--noEmit", "--pretty", "false"], {
+        cwd: itg,
+        timeout: 180_000,
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      tscOut = stdout;
+    } catch (err) {
+      const e = err as { stdout?: string; stderr?: string };
+      tscOut = `${e.stdout ?? ""}\n${e.stderr ?? ""}`;
+    }
+    const tscState = buildTscQueueState(parseTscOutput(tscOut), iteration);
+
+    // vitest queue: runs only when the integrated checkout carries its own
+    // runner; otherwise the burn-down records an honest unavailable note.
+    let vitestTotal = 0;
+    let vitestNote: string | null = "vitest not installed in the integrated checkout";
+    const vitestBin = join(itg, "node_modules", ".bin", "vitest");
+    if (await pathExists(vitestBin)) {
+      try {
+        const { stdout } = await execFileP(vitestBin, ["run", "--reporter", "default"], {
+          cwd: itg,
+          timeout: 180_000,
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        vitestTotal = buildVitestQueueState(parseVitestOutput(stdout), iteration).total;
+        vitestNote = null;
+      } catch (err) {
+        const e = err as { stdout?: string };
+        vitestTotal = buildVitestQueueState(parseVitestOutput(e.stdout ?? ""), iteration).total;
+        vitestNote = null;
+      }
+    }
+
+    // Burn-down upserts (dashboard renders queue-burndown/*).
+    ppBurndown.set(ctx, `tsc-${iteration}`, {
+      queue: "tsc",
+      iteration,
+      error_count: tscState.total,
+      file: null,
+      recorded_at: recordedAt,
+    });
+    ppBurndown.set(ctx, `vitest-${iteration}`, {
+      queue: "vitest",
+      iteration,
+      error_count: vitestTotal,
+      file: null,
+      recorded_at: recordedAt,
+    });
+    for (const group of tscState.byFile.slice(0, 8)) {
+      ppBurndown.set(ctx, `tsc-${iteration}-${group.file.replace(/\//g, "__")}`, {
+        queue: "tsc",
+        iteration,
+        error_count: group.count,
+        file: group.file,
+        recorded_at: recordedAt,
+      });
+    }
+
+    // Grouped errors feed the per-file fix loop: done files whose ported
+    // output has queue errors get a FIX ROUND (round increment); files at the
+    // round cap move to blocked (termination rule: caps OR empty queues).
+    const outPathToPhp = new Map<string, { file: string; round: number }>();
+    for (const d of queue.done) {
+      const outPath = prep?.sourceMap[d.file]?.outPath;
+      if (outPath !== undefined) outPathToPhp.set(outPath.replace(/^\.\//, ""), { file: d.file, round: d.round });
+    }
+    const errorCountByFile = new Map<string, number>();
+    for (const e of tscState.errors) {
+      const rel = e.file.replace(/^\.\//, "");
+      errorCountByFile.set(rel, (errorCountByFile.get(rel) ?? 0) + 1);
+    }
+    const { fixable, capped } = selectFixableFiles(
+      queue.done,
+      Object.fromEntries(
+        Object.entries(prep?.sourceMap ?? {}).map(([php, v]) => [php, { outPath: v.outPath }]),
+      ),
+      errorCountByFile,
+      config?.maxRounds ?? input.maxRounds,
+    );
+    const blocked = [
+      ...queue.blocked,
+      ...capped.map((c) => ({
+        file: c.file,
+        round: c.round,
+        reason: `round cap reached with ${c.count} queue error(s) remaining`,
+      })),
+    ];
+
+    ppVerify.set(ctx, "verify", {
+      iteration,
+      fixQueue: fixable,
+      tscTotal: tscState.total,
+      vitestTotal,
+      vitestNote,
+      lastRunAt: recordedAt,
+      errors: tscState.errors.slice(0, 80).map((e) => ({
+        file: e.file.replace(/^\.\//, ""),
+        code: e.code,
+        message: e.message,
+        line: e.line,
+      })),
+    });
+    ppQueue.set(ctx, "queue", {
+      ...queue,
+      blocked,
+      current:
+        fixable.length > 0
+          ? { file: fixable[0]!.file, round: fixable[0]!.fromRound + 1, epoch: input.epoch }
+          : null,
+    });
+
+    // Remaining fixable files stay in fixQueue (release → dispatch →
+    // QueueVerify pops the next one); exhausted = nothing fixable left.
+    const exhausted = fixable.length === 0;
+    return { output: { ...input, exhausted }, tokens: null };
+  },
+  route: (_ctx, _input, out) => (out.exhausted ? goTo(FinalStep, out) : goTo(LeaseStep, out)),
+});
+
+const QueueFixStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<FileRoundInput>({
+  stepType: "PpQueueFixStart",
+  targetStepId: "pp-queue-fix",
+  role: "agent",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  route: (fri) => goTo(QueueFixStep, fri),
+});
+
+/**
+ * Queue-driven fix step (Phase 4 fix loop): the fixer receives the grouped
+ * queue errors for THIS file by value and produces the fixed file. Clean
+ * runs skip it entirely.
+ */
+const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoundInput, FileRoundInput>({
+  stepType: "PpQueueFix",
+  stepId: "pp-queue-fix",
+  role: "agent",
+  stepOptions: {
+    ...MODEL_STEP_OPTIONS,
+    executeLoadAttributeMaps: [ppVerify, ppOut, ppPrep],
+  },
+  inner: async (ctx, fri) => {
+    const verify = ppVerify.get(ctx, "verify");
+    const prep = ppPrep.get(ctx, "prep");
+    const out = ppOut.get(ctx, outKeyOf(fri.file, fri.round));
+    const outPath = out?.outPath ?? prep?.sourceMap[fri.file]?.outPath;
+    if (outPath === undefined) throw new Error(`output path missing for ${fri.file}#${fri.round}`);
+    const rel = outPath.replace(/^\.\//, "");
+    const errs = (verify?.errors ?? []).filter((e) => e.file === rel);
+    if (errs.length === 0) {
+      return { output: fri, tokens: null, outcome: "skipped" as EnvelopeOutcome };
+    }
+    const current = await readFile(join(fri.worktreePath, outPath), "utf8");
+
+    // Fresh fenced session (0(g): fence staged with this step's decision).
+    const harness = requireHarness();
+    const label = fenceLabel(`${fri.file}:queuefix`, fri.round, fri.epoch);
+    const session = await harness.createSession(label);
+    sessionFenceMap.set(ctx, label, {
+      sessionId: session.id,
+      stepId: "pp-queue-fix",
+      epoch: fri.epoch,
+      label,
+      persistedAtUtc: new Date().toISOString(),
+    });
+
+    const turn = composeQueueFixTurn({
+      currentContent: current,
+      outputPath: outPath,
+      errors: errs.map((e) => ({ code: e.code, message: e.message, line: e.line })),
+    });
+    const result = await runAgentTurn({
+      def: FIXER,
+      sessionId: session.id,
+      turn,
+      file: fri.file,
+      round: fri.round,
+    });
+    const code = extractCodeFence(result.text, ".ts");
+    await writeOutFile(fri.worktreePath, outPath, code);
+    return { output: fri, tokens: result.tokens };
+  },
+  route: (_ctx, _input, fri) => goTo(CaptureDiffStep, fri),
+});
+
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Flow registration
 // ---------------------------------------------------------------------------
 
 export class PortProjectFlow implements Flow<PortRunInput> {
   readonly prep = new PrepStep();
+  readonly symbolStart = new SymbolStart();
+  readonly symbolTable = new SymbolTableStep();
+  readonly prepStart = new PrepStart();
+  readonly prepGenerate = new PrepGenerateStep();
+  readonly prepDiffCapture = new PrepDiffCaptureStep();
+  readonly prepReviewAStart = new PrepReviewAStart();
+  readonly prepReviewA = new PrepReviewAStep();
+  readonly prepReviewBStart = new PrepReviewBStart();
+  readonly prepReviewB = new PrepReviewBStep();
+  readonly prepVerdictCheck = new PrepVerdictCheckStep();
+  readonly prepLoopDecision = new PrepLoopDecisionStep();
+  readonly prepReviseStart = new PrepReviseStart();
+  readonly prepRevise = new PrepReviseStep();
+  readonly prepFinalize = new PrepFinalizeStep();
   readonly dispatch = new DispatchStep();
   readonly lease = new LeaseStep();
   readonly fence = new FenceStep();
@@ -1056,6 +1962,9 @@ export class PortProjectFlow implements Flow<PortRunInput> {
   readonly commit = new CommitStep();
   readonly integrate = new IntegrateStep();
   readonly release = new ReleaseStep();
+  readonly queueVerify = new QueueVerifyStep();
+  readonly queueFixStart = new QueueFixStart();
+  readonly queueFix = new QueueFixStep();
   readonly final = new FinalStep();
 
   getFlowType(): string {
@@ -1064,6 +1973,20 @@ export class PortProjectFlow implements Flow<PortRunInput> {
 
   getSteps() {
     return StepList.startStep(this.prep).otherSteps(
+      this.symbolStart,
+      this.symbolTable,
+      this.prepStart,
+      this.prepGenerate,
+      this.prepDiffCapture,
+      this.prepReviewAStart,
+      this.prepReviewA,
+      this.prepReviewBStart,
+      this.prepReviewB,
+      this.prepVerdictCheck,
+      this.prepLoopDecision,
+      this.prepReviseStart,
+      this.prepRevise,
+      this.prepFinalize,
       this.dispatch,
       this.lease,
       this.fence,
@@ -1081,6 +2004,9 @@ export class PortProjectFlow implements Flow<PortRunInput> {
       this.commit,
       this.integrate,
       this.release,
+      this.queueVerify,
+      this.queueFixStart,
+      this.queueFix,
       this.final,
     );
   }

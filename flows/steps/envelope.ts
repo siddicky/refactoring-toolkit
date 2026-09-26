@@ -423,6 +423,12 @@ export interface StartMarkerSpec<I> {
   /** The target step's role (recorded on the marker for joining). */
   role: EnvelopeRole;
   identityOf?: (context: Context, input: I) => string;
+  /**
+   * Static step options — REQUIRED when identityOf reads durable attributes
+   * (declare the loads; dex freezes step options at startFlow, so an
+   * identityOf that needs a map MUST declare it from the start).
+   */
+  stepOptions?: StepOptions | undefined;
   route: (input: I) => StepDecision;
 }
 
@@ -432,6 +438,7 @@ export function envelopeStartMarker<I>(spec: StartMarkerSpec<I>): EnvelopeStepCl
     stepId: `${spec.targetStepId}:start`,
     role: "record",
     ...(spec.identityOf !== undefined ? { identityOf: spec.identityOf } : {}),
+    ...(spec.stepOptions !== undefined ? { stepOptions: spec.stepOptions } : {}),
     inner: async (ctx, input) => {
       const identity = spec.identityOf?.(ctx, input) ?? null;
       const startedAt = new Date().toISOString();

@@ -30,7 +30,14 @@ import {
   validateVerdictRecord,
   type VerdictRecord as AgentVerdictRecord,
 } from "../../harness/agents/verdict-schema.js";
-import type { DiffDocument, EvidenceSpan as MetricsEvidenceSpan, Finding as MetricsFinding, VerdictRecord as MetricsVerdictRecord } from "../metrics/types.js";
+import type {
+  DiffDocument,
+  EvidenceSpan as MetricsEvidenceSpan,
+  Finding as MetricsFinding,
+  VerdictRecord as MetricsVerdictRecord,
+} from "../metrics/types.js";
+import type { PhpSymbol } from "../typesafe/symbol-types.js";
+import { createInMemoryJevClient, type InMemoryResponder, type JudgmentClient } from "../typesafe/client.js";
 
 // ---------------------------------------------------------------------------
 // Effective permissions (config + plugin merge, deny authoritative)
@@ -468,5 +475,228 @@ export function composeFixerTurn(input: {
     "## Reply format (the ONLY thing you emit)",
     "One fenced ```typescript block containing the COMPLETE fixed file, then one short line:",
     "SUMMARY: <what you changed per finding>.",
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — prep-analysis: symbol harvesting + offline Jev resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministic, code-only harvest of PHP symbols from one source file
+ * (read-only input for the per-symbol table). Zero model calls. Captures
+ * named functions, class methods, and typed properties, each with its
+ * immediately preceding docblock when present.
+ *
+ * @param cap maximum symbols returned (seed-scale cost guard); default 12.
+ */
+export function harvestPhpSymbols(fileName: string, phpSource: string, cap = 12): PhpSymbol[] {
+  const lines = phpSource.split("\n");
+  const symbols: PhpSymbol[] = [];
+  const seen = new Set<string>();
+
+  const docblockBefore = (index: number): string | null => {
+    // Walk upward from `index` (line of the signature), skipping blanks and
+    // attribute/visibility lines, collecting a contiguous /** ... */ block.
+    let i = index - 1;
+    while (i >= 0 && lines[i]?.trim() === "") i--;
+    if (i >= 0 && (lines[i]?.includes("*/") ?? false)) {
+      const block: string[] = [];
+      while (i >= 0) {
+        const line = lines[i] ?? "";
+        block.unshift(line);
+        if (line.includes("/**")) break;
+        i--;
+      }
+      const joined = block.join("\n");
+      return joined.includes("/**") ? joined.replace(/\/\*\*|\*\/|^\s*\*\s?/gm, "").trim() : null;
+    }
+    return null;
+  };
+
+  const push = (
+    kind: PhpSymbol["kind"],
+    name: string,
+    signature: string,
+    index: number,
+    docblockOverride?: string,
+  ): void => {
+    const key = `${kind}:${name}`;
+    if (seen.has(key) || symbols.length >= cap) return;
+    seen.add(key);
+    symbols.push({
+      name,
+      kind,
+      file: fileName,
+      signature,
+      docblock: docblockOverride ?? docblockBefore(index),
+      literal_usages: [],
+    });
+  };
+
+  // One-line `/** @var T */ private $name;` property pairs (Money fixture style).
+  for (const m of phpSource.matchAll(
+    /\/\*\*\s*@var\s+([\w\\[\|]+)\s*\*\/\s*\n\s*(?:public|protected|private)\s+\$(\w+)/g,
+  )) {
+    const type = m[1];
+    const name = m[2];
+    if (type !== undefined && name !== undefined) {
+      push("property", name, `$${name} — @var ${type}`, -1, `@var ${type}`);
+    }
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    // Typed properties with a @var docblock are harvested via their docblock
+    // annotation (handled below); functions and methods via signatures.
+    const fn = /(?:public|protected|private)?\s*(?:static\s+)?function\s+(\w+)\s*\(([^)]*)\)/.exec(line);
+    if (fn !== null) {
+      const name = fn[1] ?? "";
+      push(name === "__construct" ? "method" : "method", name, line.trim(), i);
+      continue;
+    }
+    const prop = /@(?:var)\s+([\w\\\[\|]+)\s*\n/.exec(line) ?? null;
+    void prop;
+    const typedProp = /^(?:public|protected|private)\s+(?:readonly\s+)?\??[\w\\]+\s+\$(\w+)/.exec(line.trim());
+    if (typedProp !== null) {
+      push("property", typedProp[1] ?? "", line.trim(), i);
+      continue;
+    }
+    // @var-annotated properties: the @var line itself names the symbol.
+    const varAnnot = /@var\s+([\w\\\[\|]+)\s*$/.exec(line.trim());
+    if (varAnnot !== null) {
+      const next = lines[i + 1] ?? "";
+      const propDecl = /(?:public|protected|private)\s+\$(\w+)/.exec(next);
+      if (propDecl !== null) {
+        push("property", propDecl[1] ?? "", `${next.trim()} — @var ${varAnnot[1]}`, i + 1);
+      }
+    }
+  }
+  return symbols;
+}
+
+/**
+ * Deterministic offline responder for the in-memory Jev double (Phase 3
+ * default when TYPESAFE_API_KEY is absent): Choice picks the first
+ * non-NONE candidate at 0.9; nouls answer 0.95 (above the 0.8 escalation
+ * threshold). These are SCRIPTED FIXTURES — never reported as live Jev
+ * usage (BUILD_NOTES: Jev-live is BLOCKED-pending-key).
+ */
+export const offlineJevResponder: InMemoryResponder = (request) => {
+  const answers: Record<string, unknown> = {};
+  for (const [name, question] of Object.entries(request.questions)) {
+    if (question.type === "choice") {
+      const labels = Object.keys(question.criteria);
+      const pick = labels.find((l) => l !== "NONE") ?? labels[0] ?? "NONE";
+      const probabilities: Record<string, number> = {};
+      for (const l of labels) probabilities[l] = l === pick ? 0.9 : 0.05;
+      answers[name] = { type: "choice", choice: pick, confidence: 0.9, probabilities };
+    } else {
+      answers[name] = { type: "noul", noul: 0.95 };
+    }
+  }
+  return answers;
+};
+
+/** In-memory Jev double over the deterministic offline responder. */
+export function createOfflineJevClient(): JudgmentClient {
+  return createInMemoryJevClient(offlineJevResponder);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3/4 — prep-generation, prep-revision, queue-fix turn composition
+// ---------------------------------------------------------------------------
+
+export function composePrepGenerateTurn(input: {
+  phpFiles: ReadonlyArray<{ name: string; source: string }>;
+  symbolTableText: string;
+  stubPrepBaseline: string;
+}): string {
+  const sources = input.phpFiles
+    .map((f) => `### ${f.name}\n\`\`\`php\n${f.source}\n\`\`\``)
+    .join("\n\n");
+  return [
+    "Generate the PORTING SPEC MAP for the PHP files below.",
+    "",
+    "## PHP sources (read-only, by value)",
+    sources,
+    "",
+    "## Per-symbol table (pre-computed; treat as binding input)",
+    input.symbolTableText,
+    "",
+    "## Prior stub baseline (supersede it; keep its section structure)",
+    "```markdown",
+    input.stubPrepBaseline,
+    "```",
+    "",
+    "## Reply format (the ONLY thing you emit)",
+    "One fenced ```markdown block containing the COMPLETE revised spec map",
+    "(source map: php file → ts target; mapping conventions; per-symbol table;",
+    "known traps), then one line: SUMMARY: <key decisions>.",
+  ].join("\n");
+}
+
+export function composePrepReviseTurn(input: {
+  specMapText: string;
+  findings: ReadonlyArray<{ finding_id: string; severity: string; summary: string; evidence: string }>;
+}): string {
+  const findingsText =
+    input.findings.length === 0
+      ? "(none)"
+      : input.findings
+          .map(
+            (f, i) =>
+              `${i + 1}. [${f.severity}] ${f.finding_id}: ${f.summary} — evidence: ${f.evidence}`,
+          )
+          .join("\n");
+  return [
+    "Revise the porting spec map below according to the validated review findings.",
+    "",
+    "## Current spec map (by value)",
+    "```markdown",
+    input.specMapText,
+    "```",
+    "",
+    "## Validated findings (apply all; they were citation-checked)",
+    findingsText,
+    "",
+    "## Reply format (the ONLY thing you emit)",
+    "One fenced ```markdown block containing the COMPLETE revised spec map, then one line:",
+    "SUMMARY: <what changed per finding>.",
+  ].join("\n");
+}
+
+export function composeQueueFixTurn(input: {
+  currentContent: string;
+  outputPath: string;
+  errors: ReadonlyArray<{ code: string; message: string; line?: number }>;
+  testFailures?: ReadonlyArray<{ name: string; message: string }>;
+}): string {
+  const errors = input.errors
+    .map((e, i) => `${i + 1}. [${e.code}]${e.line !== undefined ? ` line ${e.line}:` : ""} ${e.message}`)
+    .join("\n");
+  const tests = (input.testFailures ?? [])
+    .map((t, i) => `${i + 1}. ${t.name}: ${t.message}`)
+    .join("\n");
+  return [
+    "Fix the ported TypeScript file below so the verification queues pass.",
+    "",
+    "## Output path",
+    input.outputPath,
+    "",
+    "## Current file content (by value)",
+    "```typescript",
+    input.currentContent,
+    "```",
+    "",
+    "## Compiler errors to resolve (all of them)",
+    errors,
+    input.testFailures !== undefined && input.testFailures.length > 0
+      ? `\n## Failing tests\n${tests}`
+      : "",
+    "",
+    "## Reply format (the ONLY thing you emit)",
+    "One fenced ```typescript block containing the COMPLETE fixed file, then one line:",
+    "SUMMARY: <what you changed>.",
   ].join("\n");
 }

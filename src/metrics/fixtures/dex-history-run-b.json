@@ -1,0 +1,14 @@
+{
+  "flowId": "run-b-2026-09-25",
+  "runId": "run-b-2026-09-25",
+  "events": [
+    {"eventId": "hb-001", "eventTime": "2026-09-25T11:00:00.000Z", "type": "StepStarted", "payload": {"context": {"stepExecutionId": "exec-b-impl", "stepType": "PpImplement", "finalAttempt": 1}, "input": {"stepInput": {"file": "src/Http/Request.php", "round": 1}}}},
+    {"eventId": "hb-002", "eventTime": "2026-09-25T11:01:00.000Z", "type": "StepStarted", "payload": {"context": {"stepExecutionId": "exec-b-ra", "stepType": "PpReviewA", "finalAttempt": 3}, "input": {"stepInput": {"file": "src/Http/Request.php", "round": 1}}}},
+    {"eventId": "hb-003", "eventTime": "2026-09-25T11:03:00.100Z", "type": "StepStarted", "payload": {"context": {"stepExecutionId": "exec-b-commit", "stepType": "PpCommit", "finalAttempt": 1}, "input": {"stepInput": {"file": "src/Http/Request.php", "round": 1}}}},
+    {"eventId": "hb-004", "eventTime": "2026-09-25T11:05:00.000Z", "type": "StepStarted", "payload": {"context": {"stepExecutionId": "exec-b-capture", "stepType": "PpCaptureDiff", "finalAttempt": 1}, "input": {"stepInput": {"file": "src/Http/Response.php", "round": 1}}}},
+    {"eventId": "hb-005", "eventTime": "2026-09-25T11:06:00.000Z", "type": "StepStarted", "payload": {"context": {"stepExecutionId": "exec-b-fix-start", "stepType": "PpFixerStart", "finalAttempt": 1}, "input": {"stepInput": {"file": "src/Http/Request.php", "round": 1}}}},
+    {"eventId": "hb-006", "eventTime": "2026-09-25T11:07:00.000Z", "type": "StepStarted", "payload": {"context": {"stepExecutionId": "exec-b-evil", "stepType": "PpEvil", "finalAttempt": 2}}},
+    {"eventId": "hb-007", "eventTime": "2026-09-25T11:08:00.000Z", "type": "TimerFired", "payload": {"context": {"stepExecutionId": "exec-b-timer", "stepType": "timer", "finalAttempt": 1}}}
+  ],
+  "nextPageToken": null
+}
