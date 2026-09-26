@@ -55,7 +55,7 @@ import {
   probeFlows,
   type RoundInput,
 } from "./probe-flow.js";
-import { PortProjectFlow, configurePortHarness } from "../flows/port-project.js";
+import { PortProjectFlow, PortFileFlow, configurePortHarness } from "../flows/port-project.js";
 import {
   configurePortFault,
   configurePortJudgment,
@@ -355,7 +355,9 @@ async function startRound(
 
 function portFlows(harness: AgentSessionClient): Flow<any>[] {
   configurePortHarness(harness);
-  return [new PortProjectFlow()];
+  // v1.1: the per-file child flow MUST be registered on every worker that
+  // serves port.Project — the parallel wave join starts port.File SubFlows.
+  return [new PortProjectFlow(), new PortFileFlow()];
 }
 
 /**
@@ -441,6 +443,8 @@ async function startDemo(): Promise<number> {
       prepPath,
       files,
       maxRounds,
+      // v1.1 default: parallel per-file waves (SubFlows over the 2 slots).
+      dispatchMode: (argValue("--dispatch", "parallel") as string) === "sequential" ? "sequential" : "parallel",
     };
     const runId = await runtime.client.startFlow(flow, flowId, input);
     console.log(`[demo] started flowId=${flowId} runId=${runId} files=${files.join(",")} epoch=${epoch}`);

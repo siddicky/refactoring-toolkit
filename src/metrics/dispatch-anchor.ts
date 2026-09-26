@@ -197,6 +197,15 @@ export const PORT_FLOW_STEPS: readonly PortStepSpec[] = [
   { stepType: "PpQueueFixStart", stepId: "pp-queue-fix", role: "agent", kind: "marker", selfStepId: "pp-queue-fix:start" },
   { stepType: "PpQueueFix", stepId: "pp-queue-fix", role: "agent", kind: "model" },
   { stepType: "PpFinal", stepId: "pp-final", role: "record", kind: "support" },
+  // v1.1 parallel dispatch (worker-1c): the parent runs waves of per-file
+  // SubFlow children (port.File). The child reuses the SAME step types
+  // (PpLease→…→PpCommit→PpChildRelease) inside its OWN flow, so per-flow
+  // anchoring works unchanged; only the wave orchestration + child bookkeeping
+  // steps are new.
+  { stepType: "PpWaveDispatch", stepId: "pp-wave-dispatch", role: "record", kind: "support" },
+  { stepType: "PpWaveJoin", stepId: "pp-wave-join", role: "record", kind: "support" },
+  { stepType: "PpChildLease", stepId: "pp-child-lease", role: "record", kind: "support" },
+  { stepType: "PpChildRelease", stepId: "pp-child-release", role: "record", kind: "support" },
 ];
 
 /**

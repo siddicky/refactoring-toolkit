@@ -36,6 +36,7 @@ import type {
   StepOptions,
   Flow,
   StepClass,
+  Wait as DexWait,
 } from "@superdurable/dex";
 import {
   sessionFenceMap,
@@ -165,6 +166,13 @@ export interface EnvelopeSpec<I, O> {
    * event (before inner) and the completion event with the same value.
    */
   identityOf?: (context: Context, input: I) => string;
+  /**
+   * Optional durable readiness conditions evaluated BEFORE execute (dex
+   * `waitFor` handler) — e.g. `Wait.allOf(...SubFlow.run(child))` for the
+   * v1.1 parallel wave join. Passed through unchanged; heartbeats apply to
+   * inner work only.
+   */
+  waitFor?: (context: Context, input: I) => DexWait | Promise<DexWait>;
 }
 
 /**
@@ -299,8 +307,10 @@ export function envelopeStepClass<I, O>(
     getStepOptions(): StepOptions | undefined {
       return spec.stepOptions;
     }
-    waitFor(): Wait {
-      return Wait.skipImmediately();
+    waitFor(context: Context, input: I): Wait | Promise<Wait> {
+      return spec.waitFor !== undefined
+        ? spec.waitFor(context, input)
+        : Wait.skipImmediately();
     }
     execute(context: Context, input: I): Promise<StepDecision> {
       return executeEnvelope(spec, context as AsyncContext, input);

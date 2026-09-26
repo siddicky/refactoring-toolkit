@@ -29,6 +29,8 @@ import {
   jsonCodec,
   StepList,
   goTo,
+  Wait,
+  SubFlow,
 } from "@superdurable/dex";
 import type { Context, Flow, StepDecision } from "@superdurable/dex";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -140,6 +142,13 @@ export interface PortRunInput {
   files: readonly string[];
   /** Per-file round cap (durable in pp-config; enforced by dispatch). */
   maxRounds: number;
+  /**
+   * v1.1: "parallel" (default) dispatches per-file waves as dex SubFlows —
+   * up to 2 children on the 2 lease slots concurrently, joined durably by
+   * Wait.allOf; the parent integrates serially after each wave. "sequential"
+   * keeps the Phase 2 loop shape.
+   */
+  dispatchMode?: "sequential" | "parallel";
 }
 
 /** Identity of one file-round carried between the per-file steps. */
@@ -153,6 +162,10 @@ export interface FileRoundInput {
   round: number;
   worktreePath: string;
   branch: string;
+  /** v1.1: true inside a per-file SubFlow child (routes to child release). */
+  childFlow?: boolean;
+  /** v1.1: grouped queue errors for this file (fix rounds in child flows). */
+  queueFixErrors?: ReadonlyArray<QueueVerifyError>;
 }
 
 export interface PortRunConfig {
@@ -302,6 +315,23 @@ export const ppPrepState = new AttributeMap<{ prepIteration: number }>("pp-prep-
 export const ppVerify = new AttributeMap<QueueVerifyState>("pp-verify", jsonCodec<QueueVerifyState>());
 export const ppBurndown = new AttributeMap<QueueBurnDownSample>("queue-burndown", jsonCodec<QueueBurnDownSample>());
 
+// v1.1 parallel dispatch durable attributes.
+export interface WaveEntry {
+  file: string;
+  errors: ReadonlyArray<QueueVerifyError>;
+}
+export interface WaveDispatchRecord {
+  entries: WaveEntry[];
+  round: number;
+  mode: "port" | "fix";
+  dispatchedAtUtc: string;
+}
+export interface WaveChildrenRecord {
+  children: Array<{ file: string; round: number; flowId: string }>;
+}
+export const ppWave = new AttributeMap<WaveDispatchRecord>("pp-wave", jsonCodec<WaveDispatchRecord>());
+export const ppWaveChildren = new AttributeMap<WaveChildrenRecord>("pp-wave-children", jsonCodec<WaveChildrenRecord>());
+
 const PP_LEASE_INSTANCE = "pool";
 
 /** Persistence schema fragment for getPersistenceSchema(). */
@@ -329,6 +359,8 @@ export function portPersistenceSchema(): {
       ppPrepState,
       ppVerify,
       ppBurndown,
+      ppWave,
+      ppWaveChildren,
       ppJevUsage,
     ],
   };
@@ -688,6 +720,13 @@ const DispatchStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
   inner: async (ctx, input) => {
     const queue = ppQueue.get(ctx, "queue");
     const config = ppConfig.get(ctx, "config");
+    if ((input.dispatchMode ?? "parallel") === "parallel") {
+      // Parallel mode: pending is consumed by the WAVE JOIN after children
+      // commit — dispatch only reports whether the port queue is exhausted
+      // (deriveNext's current/popping is sequential-loop machinery).
+      const nothingPending = queue.pending.length === 0;
+      return { output: { ...input, done: nothingPending }, tokens: null };
+    }
     const action = deriveNext(queue, config?.maxRounds ?? input.maxRounds);
     if (action.kind === "blocked") {
       const blocked: PortQueueState = {
@@ -713,9 +752,12 @@ const DispatchStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     // "done": route below must go to Final (the loop terminator).
     return { output: { ...input, done: action.kind === "done" }, tokens: null };
   },
-  // Phase 4: an exhausted port queue enters verification — QueueVerify
-  // decides between Final (queues empty / capped) and per-file fix rounds.
-  route: (_ctx, _input, out) => (out.done ? goTo(QueueVerifyStep, out) : goTo(LeaseStep, out)),
+  route: (_ctx, _input, out) => {
+    if (out.done) return goTo(QueueVerifyStep, out);
+    if ((out.dispatchMode ?? "parallel") !== "parallel") return goTo(LeaseStep, out);
+    const portWave: WaveDispatchOutput = { ...out, mode: "port" };
+    return goTo(WaveDispatchStep, portWave);
+  },
 });
 
 /** Lease outcome: carry the file-round forward, or report an exhausted queue. */
@@ -808,8 +850,12 @@ const FenceStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
     return { output: fri, tokens: null };
   },
   // Phase 4: fix rounds (round >= 2) enter the queue-driven fix loop instead
-  // of re-implementing from scratch.
-  route: (_ctx, _input, fri) => (fri.round >= 2 ? goTo(QueueFixStart, fri) : goTo(ImplementStart, fri)),
+  // of re-implementing from scratch. Child flows route to their own fix step
+  // (queue errors arrive by SubFlow input, not the parent's pp-verify store).
+  route: (_ctx, _input, fri) =>
+    fri.round >= 2
+      ? goTo(fri.childFlow === true ? ChildQueueFixStart : QueueFixStart, fri)
+      : goTo(ImplementStart, fri),
 });
 
 // M4 (0(g)): durable PRE-start markers for model-calling steps. The
@@ -1170,7 +1216,8 @@ const CommitStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoun
       outcome: (res.disposition === "no-op-empty-diff" ? "skipped" : "completed") as EnvelopeOutcome,
     };
   },
-  route: (_ctx, _input, fri) => goTo(IntegrateStep, fri),
+  route: (_ctx, _input, fri) =>
+    fri.childFlow === true ? goTo(ChildReleaseStep, fri) : goTo(IntegrateStep, fri),
 });
 
 const IntegrateStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoundInput, FileRoundInput>({
@@ -1885,7 +1932,12 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     const exhausted = fixable.length === 0;
     return { output: { ...input, exhausted }, tokens: null };
   },
-  route: (_ctx, _input, out) => (out.exhausted ? goTo(FinalStep, out) : goTo(LeaseStep, out)),
+  route: (_ctx, input, out) => {
+    if (out.exhausted) return goTo(FinalStep, out);
+    if ((input.dispatchMode ?? "parallel") !== "parallel") return goTo(LeaseStep, out);
+    const fixWave: WaveDispatchOutput = { ...input, mode: "fix" };
+    return goTo(WaveDispatchStep, fixWave);
+  },
 });
 
 const QueueFixStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<FileRoundInput>({
@@ -1956,6 +2008,463 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// v1.1 — parallel per-file dispatch (dex SubFlows; default mode)
+//
+// WaveDispatch plans the next ≤2-file wave from the durable queue (fresh or
+// fix rounds). WaveJoin declares `Wait.allOf(...SubFlow.run(PortFileFlow, …))`
+// so both lease slots fill CONCURRENTLY; dex's RESTART_IF_PREVIOUS_EXITS_
+// ABNORMALLY SubFlow reuse policy restarts a dead child on resume, making the
+// join kill-safe. Children run the FULL per-file pipeline (lease → fence →
+// implement/fix → reviews → commit) against their OWN attribute stores; the
+// parent integrates serially after the join (the shared integration worktree
+// never races) and appends git-derived done entries. Caps: one lease per
+// child, wave width ≤ PARALLEL_SLOTS (= the WorktreePool cap) — concurrency
+// is bounded at the wave planner, never widened.
+// ---------------------------------------------------------------------------
+
+/** Input of one per-file child flow (PortFileFlow). */
+export interface PortFileInput {
+  repoRoot: string;
+  worktreeRoot: string;
+  integrationWorktreePath: string;
+  sourceRoot: string;
+  epoch: number;
+  file: string;
+  round: number;
+  maxRounds: number;
+  /** The parent's reviewed prep artifact (children own a copy in their store). */
+  prep: PrepArtifact;
+  /** Grouped queue errors for fix rounds (round ≥ 2); empty for round 1. */
+  queueFixErrors: ReadonlyArray<QueueVerifyError>;
+}
+
+const CHILD_SLOT_CAP = 2;
+
+function childInputOf(
+  base: PortRunInput,
+  prep: PrepArtifact,
+  file: string,
+  round: number,
+  errors: ReadonlyArray<QueueVerifyError>,
+): PortFileInput {
+  return {
+    repoRoot: base.repoRoot,
+    worktreeRoot: base.worktreeRoot,
+    integrationWorktreePath: base.integrationWorktreePath,
+    sourceRoot: base.sourceRoot,
+    epoch: base.epoch,
+    file,
+    round,
+    maxRounds: base.maxRounds,
+    prep,
+    queueFixErrors: errors,
+  };
+}
+
+export type WaveMode = "port" | "fix";
+export interface WaveDispatchOutput extends PortRunInput {
+  mode: WaveMode;
+}
+
+const WaveDispatchStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
+  WaveDispatchOutput,
+  WaveDispatchOutput
+>({
+  stepType: "PpWaveDispatch",
+  stepId: "pp-wave-dispatch",
+  role: "record",
+  stepOptions: { executeLoadAttributeMaps: [ppQueue, ppVerify, ppConfig, ppPrep, ppWave] },
+  inner: async (ctx, input) => {
+    const queue = ppQueue.get(ctx, "queue");
+    const verify = ppVerify.get(ctx, "verify");
+    const prep = ppPrep.get(ctx, "prep");
+    if (queue === undefined || prep === undefined) {
+      throw new Error("wave dispatch requires durable queue + prep state");
+    }
+    let entries: WaveEntry[];
+    let round: number;
+    if (input.mode === "fix") {
+      const fixable = (verify?.fixQueue ?? []).slice(0, CHILD_SLOT_CAP);
+      if (fixable.length === 0) throw new Error("fix wave dispatched with empty fix queue");
+      round = (fixable[0]?.fromRound ?? 1) + 1;
+      const outPathOf = (file: string): string =>
+        (prep.sourceMap[file]?.outPath ?? "").replace(/^\.\//, "");
+      entries = fixable.map((f) => ({
+        file: f.file,
+        errors: (verify?.errors ?? []).filter((e) => e.file === outPathOf(f.file)),
+      }));
+    } else {
+      const files = queue.pending.slice(0, CHILD_SLOT_CAP);
+      if (files.length === 0) throw new Error("port wave dispatched with empty pending queue");
+      entries = files.map((file) => ({ file, errors: [] }));
+      round = 1;
+    }
+    ppWave.set(ctx, "wave", {
+      entries,
+      round,
+      mode: input.mode,
+      dispatchedAtUtc: new Date().toISOString(),
+    });
+    return { output: { ...input, mode: input.mode }, tokens: null };
+  },
+  route: (_ctx, _input, out) => goTo(WaveJoinStep, out),
+});
+
+const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
+  WaveDispatchOutput,
+  WaveDispatchOutput
+>({
+  stepType: "PpWaveJoin",
+  stepId: "pp-wave-join",
+  role: "record",
+  stepOptions: {
+    executeLoadAttributeMaps: [ppQueue, ppVerify, ppPrep, ppWave],
+    executeRetry: { maximumAttempts: 3 },
+    // The wait spans two full per-file pipelines; generous method timeout.
+    waitForMethodTimeoutMs: 4 * 60 * 60_000,
+  },
+  waitFor: (ctx, input) => {
+    const prep = ppPrep.get(ctx, "prep");
+    if (prep === undefined) throw new Error("wave join requires durable prep state");
+    const wave = ppWave.get(ctx, "wave");
+    if (wave === undefined) throw new Error("wave join requires a durable wave record");
+    const conditions = wave.entries.map((entry, i) =>
+      SubFlow.run(
+        PortFileFlowInstance,
+        childInputOf(input, prep, entry.file, wave.round, entry.errors),
+        { conditionId: `wave-${wave.mode}-${wave.round}-${i}` },
+      ),
+    );
+    return Wait.allOf(...conditions);
+  },
+  inner: async (ctx, input) => {
+    const wave = ppWave.get(ctx, "wave");
+    const queue = ppQueue.get(ctx, "queue");
+    if (wave === undefined || queue === undefined) {
+      throw new Error("wave join requires durable wave + queue state");
+    }
+    // Publish child flow ids (metrics/dashboard fan-out surface).
+    ppWaveChildren.set(ctx, "children", {
+      children: wave.entries.map((entry, i) => ({
+        file: entry.file,
+        round: wave.round,
+        flowId: SubFlow.getFlowId(ctx, i),
+      })),
+    });
+
+    // Serial integration of each child's keyed commit (git-durable; the
+    // children released their leases, so this is the proven quarantine
+    // geometry — branch merge from the shared object store). A child that
+    // ended no-op-empty-diff has NO keyed commit: its receipt (terminal
+    // SubFlow output) is the evidence, and the round-1 integrated content
+    // must already exist (plan's no-op reconcile row).
+    const prep = ppPrep.get(ctx, "prep");
+    const done = [...queue.done];
+    for (let i = 0; i < wave.entries.length; i++) {
+      const entry = wave.entries[i]!;
+      const result = SubFlow.getConditionResults(ctx, i);
+      if (!result.isTerminal || result.errorType !== undefined) {
+        throw new Error(`wave join: child ${entry.file}#${wave.round} not successfully terminal (${result.status})`);
+      }
+      const receipt = result.singleOutput<ChildFileResult>();
+      const opId = operationId(entry.file, wave.round);
+      const keyed = await findCommitByOpId(input.repoRoot, opId);
+      if (keyed !== undefined) {
+        await mergeLeaseIntoIntegration(
+          input.repoRoot,
+          input.integrationWorktreePath,
+          keyed.branch,
+          "integration",
+        );
+        if (!(await keyedCommitIntegrated(input.integrationWorktreePath, keyed))) {
+          throw new Error(`C1: keyed commit ${keyed.sha} (${opId}) not reachable from integration`);
+        }
+        done.push({
+          file: entry.file,
+          round: wave.round,
+          commitSha: keyed.sha,
+          treeHash: keyed.contentHash ?? null,
+        });
+      } else {
+        const outPath = prep?.sourceMap[entry.file]?.outPath;
+        if (
+          outPath === undefined ||
+          !(await integratedContentExists(input.integrationWorktreePath, outPath))
+        ) {
+          throw new Error(
+            `wave join: no-op round for ${entry.file} (output ${outPath ?? "unknown"}) but integrated output lacks the file`,
+          );
+        }
+        done.push({
+          file: entry.file,
+          round: wave.round,
+          commitSha: receipt.commitSha ?? null,
+          treeHash: receipt.treeHash ?? null,
+        });
+      }
+    }
+
+    const next: PortQueueState = {
+      ...queue,
+      done,
+      current: null,
+      pending:
+        input.mode === "fix"
+          ? queue.pending
+          : queue.pending.filter((f) => !wave.entries.some((e) => e.file === f)),
+    };
+    if (input.mode === "fix") {
+      // Drop consumed fix-queue entries so re-verification is honest.
+      const verify = ppVerify.get(ctx, "verify");
+      if (verify !== undefined) {
+        ppVerify.set(ctx, "verify", {
+          ...verify,
+          fixQueue: verify.fixQueue.filter(
+            (f) => !wave.entries.some((e) => e.file === f.file),
+          ),
+        });
+      }
+    }
+    ppQueue.set(ctx, "queue", next);
+    return { output: input, tokens: null };
+  },
+  route: (_ctx, _input, out) =>
+    out.mode === "fix" ? goTo(QueueVerifyStep, baseInputOf(out)) : goTo(DispatchStep, baseInputOf(out)),
+});
+
+function baseInputOf(out: WaveDispatchOutput): PortRunInput {
+  const { mode: _mode, ...rest } = out;
+  void _mode;
+  return rest;
+}
+
+// ---------------------------------------------------------------------------
+// PortFileFlow — one file's full pipeline as an independent, kill-safe flow
+// ---------------------------------------------------------------------------
+
+const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortFileInput, FileRoundInput>({
+  stepType: "PpChildLease",
+  stepId: "pp-child-lease",
+  role: "record",
+  stepOptions: {
+    executeLoadAttributeMaps: [ppPrep, ppVerify],
+    executeRetry: { maximumAttempts: 3 },
+  },
+  inner: async (ctx, input) => {
+    // Seed the child's OWN stores with the parent-provided prep + queue
+    // errors: every downstream per-file step is store-local (ctx-bound), so
+    // the child pipeline reads its copies exactly like the sequential path.
+    ppPrep.set(ctx, "prep", input.prep);
+    ppVerify.set(ctx, "verify", {
+      iteration: input.round,
+      fixQueue: [],
+      tscTotal: input.queueFixErrors.length,
+      vitestTotal: 0,
+      vitestNote: "child flow (errors by value)",
+      lastRunAt: new Date().toISOString(),
+      errors: [...input.queueFixErrors].slice(0, 80).map((e) => ({ ...e })),
+    });
+    const pool = new WorktreePool(
+      input.repoRoot,
+      input.worktreeRoot,
+      bindLeaseStore(ctx, ppLease),
+      2,
+    );
+    const existing = pool.store().get(input.file);
+    if (existing !== undefined && !pool.isStale(existing, input.epoch)) {
+      return {
+        output: {
+          repoRoot: input.repoRoot,
+          worktreeRoot: input.worktreeRoot,
+          integrationWorktreePath: input.integrationWorktreePath,
+          sourceRoot: input.sourceRoot,
+          epoch: input.epoch,
+          file: input.file,
+          round: input.round,
+          worktreePath: existing.worktreePath,
+          branch: existing.branch,
+          childFlow: true,
+          queueFixErrors: input.queueFixErrors,
+        },
+        tokens: null,
+      };
+    }
+    const acquired = await pool.acquire(input.file, input.epoch, `pp-child-${input.epoch}`);
+    if (!acquired.acquired) {
+      // Slot contention (wave width ≤ cap makes this rare): retryable.
+      throw new Error(`child lease failed for ${input.file}: ${acquired.reason}`);
+    }
+    return {
+      output: {
+        repoRoot: input.repoRoot,
+        worktreeRoot: input.worktreeRoot,
+        integrationWorktreePath: input.integrationWorktreePath,
+        sourceRoot: input.sourceRoot,
+        epoch: input.epoch,
+        file: input.file,
+        round: input.round,
+        worktreePath: acquired.lease.worktreePath,
+        branch: acquired.lease.branch,
+        childFlow: true,
+        queueFixErrors: input.queueFixErrors,
+      },
+      tokens: null,
+    };
+  },
+  route: (_ctx, _input, fri) => goTo(FenceStep, fri),
+});
+
+const ChildQueueFixStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<FileRoundInput>({
+  stepType: "PpQueueFixStart",
+  targetStepId: "pp-queue-fix",
+  role: "agent",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  route: (fri) => goTo(ChildQueueFixStep, fri),
+});
+
+/** Child fix step: grouped errors arrive by SubFlow input (child pp-verify). */
+const ChildQueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoundInput, FileRoundInput>({
+  stepType: "PpQueueFix",
+  stepId: "pp-queue-fix",
+  role: "agent",
+  stepOptions: {
+    ...MODEL_STEP_OPTIONS,
+    executeLoadAttributeMaps: [ppVerify, ppOut, ppPrep],
+  },
+  inner: async (ctx, fri) => {
+    const verify = ppVerify.get(ctx, "verify");
+    const prep = ppPrep.get(ctx, "prep");
+    const out = ppOut.get(ctx, outKeyOf(fri.file, fri.round));
+    const outPath = out?.outPath ?? prep?.sourceMap[fri.file]?.outPath;
+    if (outPath === undefined) throw new Error(`output path missing for ${fri.file}#${fri.round}`);
+    const rel = outPath.replace(/^\.\//, "");
+    const errs = (verify?.errors ?? []).filter((e) => e.file === rel);
+    if (errs.length === 0) {
+      return { output: fri, tokens: null, outcome: "skipped" as EnvelopeOutcome };
+    }
+    const current = await readFile(join(fri.worktreePath, outPath), "utf8");
+    const harness = requireHarness();
+    const label = fenceLabel(`${fri.file}:queuefix`, fri.round, fri.epoch);
+    const session = await harness.createSession(label);
+    sessionFenceMap.set(ctx, label, {
+      sessionId: session.id,
+      stepId: "pp-queue-fix",
+      epoch: fri.epoch,
+      label,
+      persistedAtUtc: new Date().toISOString(),
+    });
+    const turn = composeQueueFixTurn({
+      currentContent: current,
+      outputPath: outPath,
+      errors: errs.map((e) => ({ code: e.code, message: e.message, line: e.line })),
+    });
+    const result = await runAgentTurn({
+      def: FIXER,
+      sessionId: session.id,
+      turn,
+      file: fri.file,
+      round: fri.round,
+    });
+    const code = extractCodeFence(result.text, ".ts");
+    await writeOutFile(fri.worktreePath, outPath, code);
+    return { output: fri, tokens: result.tokens };
+  },
+  route: (_ctx, _input, fri) => goTo(CaptureDiffStep, fri),
+});
+
+/** Child receipt: release the lease, hand the round's git facts to the parent. */
+export interface ChildFileResult {
+  file: string;
+  round: number;
+  commitSha: string | null;
+  treeHash: string | null;
+}
+
+const ChildReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<
+  FileRoundInput,
+  ChildFileResult
+>({
+  stepType: "PpChildRelease",
+  stepId: "pp-child-release",
+  role: "record",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  stepOptions: { executeLoadAttributeMaps: [ppLease, ppMarker] },
+  inner: async (ctx, fri) => {
+    const pool = new WorktreePool(
+      fri.repoRoot,
+      fri.worktreeRoot,
+      bindLeaseStore(ctx, ppLease),
+      2,
+    );
+    await pool.release(fri.file);
+    const marker = ppMarker.get(ctx, markerKeyOf(fri.file, fri.round));
+    return {
+      output: {
+        file: fri.file,
+        round: fri.round,
+        commitSha: marker?.sha ?? null,
+        treeHash: marker?.content_hash ?? null,
+      },
+      tokens: null,
+    };
+  },
+  // gracefulComplete(output) — the child's terminal result.
+});
+
+/** Registration helper for the per-file child flow (registered alongside the parent). */
+export class PortFileFlow implements Flow<PortFileInput> {
+  readonly childLease = new ChildLeaseStep();
+  readonly fence = new FenceStep();
+  readonly implementStart = new ImplementStart();
+  readonly implement = new ImplementStep();
+  readonly queueFixStart = new ChildQueueFixStart();
+  readonly queueFix = new ChildQueueFixStep();
+  readonly captureDiff = new CaptureDiffStep();
+  readonly reviewAStart = new ReviewAStart();
+  readonly reviewA = new ReviewAStep();
+  readonly reviewBStart = new ReviewBStart();
+  readonly reviewB = new ReviewBStep();
+  readonly verdictCheck = new VerdictCheckStep();
+  readonly prioritize = new PrioritizeStep();
+  readonly fixerStart = new FixerStart();
+  readonly fixer = new FixerStep();
+  readonly commit = new CommitStep();
+  readonly release = new ChildReleaseStep();
+
+  getFlowType(): string {
+    return "port.File";
+  }
+
+  getSteps() {
+    return StepList.startStep(this.childLease).otherSteps(
+      this.fence,
+      this.implementStart,
+      this.implement,
+      this.queueFixStart,
+      this.queueFix,
+      this.captureDiff,
+      this.reviewAStart,
+      this.reviewA,
+      this.reviewBStart,
+      this.reviewB,
+      this.verdictCheck,
+      this.prioritize,
+      this.fixerStart,
+      this.fixer,
+      this.commit,
+      this.release,
+    );
+  }
+
+  getPersistenceSchema() {
+    return portPersistenceSchema();
+  }
+}
+
+/** The singleton the WaveJoin SubFlows target (must be worker-registered). */
+export const PortFileFlowInstance = new PortFileFlow();
+
+// ---------------------------------------------------------------------------
 // Flow registration
 // ---------------------------------------------------------------------------
 
@@ -1995,6 +2504,8 @@ export class PortProjectFlow implements Flow<PortRunInput> {
   readonly queueVerify = new QueueVerifyStep();
   readonly queueFixStart = new QueueFixStart();
   readonly queueFix = new QueueFixStep();
+  readonly waveDispatch = new WaveDispatchStep();
+  readonly waveJoin = new WaveJoinStep();
   readonly final = new FinalStep();
 
   getFlowType(): string {
@@ -2037,6 +2548,8 @@ export class PortProjectFlow implements Flow<PortRunInput> {
       this.queueVerify,
       this.queueFixStart,
       this.queueFix,
+      this.waveDispatch,
+      this.waveJoin,
       this.final,
     );
   }
