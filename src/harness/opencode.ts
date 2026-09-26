@@ -144,6 +144,36 @@ export class OpencodePromptError extends Error {
 }
 
 /**
+ * Tier-0 degenerate-turn predicate (US-002, plan v5.1 §Stage 1).
+ *
+ * Degenerate shape (BUILD_NOTES §WAVE-4, live-signature): the assistant
+ * message "completes" WITH token usage but carries NO text part (0-16 output
+ * tokens, heavy reasoning) — the provider answered nothing while reporting a
+ * finished turn. Usage-present means the seam's poll loop is skipped (fast
+ * path), so the reply would otherwise flow through to verdict parsing and
+ * fail there, burning all dex retries on a poisoned cache prefix.
+ *
+ * Pure and deliberately NARROW: the ≤8-output-token arm explored in planning
+ * is DROPPED — it misclassifies a healthy text-present/output-0 reply.
+ * Aborted no-text turns are excluded (they are the recovery path, handled at
+ * flows/port-project.ts runAgentTurn).
+ */
+export function degenerateReply(
+  usage: TokenUsage | null,
+  textOut: string,
+  aborted: boolean,
+): boolean {
+  return usage !== null && textOut.length === 0 && aborted !== true;
+}
+
+/** Error message for a detected degenerate turn (notes the observed shape). */
+function degenerateTurnMessage(usage: TokenUsage | null): string {
+  return usage === null
+    ? "degenerate turn: completed reply carries no text part and no usage (Tier-0 shape)"
+    : `degenerate turn: reply completed with usage (output=${usage.output}, reasoning=${usage.reasoning}) but NO text part — Tier-0 degenerate-turn signature; retry on a fresh attempt`;
+}
+
+/**
  * Extracts the upstream error of an assistant message, if any.
  * ODW finding (live-verified): session.prompt RESOLVES (does not throw) with
  * info.error set when the upstream provider fails — callers must check.
@@ -293,8 +323,30 @@ export class OpencodeHarness {
           throw new OpencodePromptError("empty reply without usage (native-tool turn)", true);
         }
         // Completed reply, no usage exposed: provenance failure (never zero).
+        // Tier-0 guard (defensive here: usage is statically null, so the
+        // predicate cannot fire — kept so BOTH prompt() exits carry the
+        // no-degenerate-return invariant).
+        if (degenerateReply(usage, textOut, aborted)) {
+          throw new OpencodePromptError(degenerateTurnMessage(usage), true);
+        }
         return { text: textOut, usage: null, aborted: false };
       }
+      // Tier-0 guard: a usage-present, text-empty, non-aborted reply is the
+      // WAVE-4 degenerate provider signature — fail RETRYABLE here so dex
+      // re-dispatches (with the attempt-based reviewer-lane demotion) instead
+      // of burning every retry on verdict-parse failures downstream.
+      if (degenerateReply(usage, textOut, aborted)) {
+        throw new OpencodePromptError(degenerateTurnMessage(usage), true);
+      }
+      return { text: textOut, usage, aborted };
+    }
+    // Tier-0 guard (fast path): a usage-present reply skips the poll loop
+    // entirely, so the WAVE-4 degenerate signature (completed + usage, NO
+    // text part) surfaces HERE. Fail RETRYABLE so dex re-dispatches on a
+    // fresh attempt (with the attempt-based reviewer-lane demotion) instead
+    // of burning every retry on downstream verdict-parse failures.
+    if (degenerateReply(usage, textOut, aborted)) {
+      throw new OpencodePromptError(degenerateTurnMessage(usage), true);
     }
     return { text: textOut, usage, aborted };
   }

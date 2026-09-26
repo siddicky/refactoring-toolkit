@@ -24,6 +24,7 @@ import {
   AttributeMap,
   jsonCodec,
   StepList,
+  Stream,
   Wait,
   gracefulComplete,
   goTo,
@@ -103,6 +104,94 @@ export const envelopeEvents = new AttributeMap<EnvelopeEvent>(
   "envelope-event",
   jsonCodec<EnvelopeEvent>(),
 );
+
+// ---------------------------------------------------------------------------
+// Telemetry stream (US-002): best-effort mirror of every durable envelope
+// write, consumed US-007-side (dashboard + watcher). Correctness paths never
+// read the stream — the durable envelope-event attribute remains the only
+// source of truth.
+//
+// DEVIATION (recorded per the US-002 spec, live-confirmed 2026-09-26): the
+// publish does NOT use Context.writeStream from inside the step. dex's
+// Registry forbids ONE Stream instance being registered by multiple Flow
+// types (live probe: FlowDefinitionError "Stream events is registered by
+// multiple Flows"), and the envelope factory's steps are SHARED across
+// port.Project / port.File / probe.* while the step Context carries no flow
+// type — so no single stream registration can serve the shared factory.
+// Per the spec's fallback, publishing happens RUNNER-SIDE: the worker
+// process configures a publisher (src/dex/client.ts Client.writeStream over
+// its own registry, where exactly one flow type owns `envelopeStream`) and
+// the factory hands it each durable event. With no publisher configured the
+// hook is a no-op.
+// ---------------------------------------------------------------------------
+
+/** One message on the envelope telemetry stream. */
+export interface EnvelopeStreamMessage {
+  /** Topic: `port/<flowId>/events` (self-describing for stream consumers). */
+  topic: string;
+  /** Flow instance ID the event belongs to (the originating dex flow). */
+  flowId: string;
+  /** The durable envelope-event attribute key this message mirrors. */
+  eventKey: string;
+  /** The mirrored envelope event (same payload as the durable write). */
+  event: EnvelopeEvent;
+}
+
+/**
+ * Stream definition for the envelope telemetry. Registered in the persistence
+ * schema of EXACTLY ONE flow type per registry (the runner chooses — the port
+ * worker registers it on port.Project). Client.writeStream resolves the flow
+ * type from this registration; per-instance keying is by flowId.
+ */
+export const envelopeStream = new Stream<EnvelopeStreamMessage>(
+  "events",
+  jsonCodec<EnvelopeStreamMessage>(),
+  4 * 1024 * 1024, // ~4 MiB shared budget per flow instance
+);
+
+/**
+ * Runner-side publisher contract. Implementations call the dex Client's
+ * writeStream (see src/dex/client.ts startDexWorker / openDexClient) and MUST
+ * swallow their own async failures; the hook below swallows sync failures.
+ */
+export type EnvelopeStreamPublisher = (message: EnvelopeStreamMessage) => void;
+
+let envelopeStreamPublisher: EnvelopeStreamPublisher | undefined;
+
+/** Installs (or removes) the runner-side stream publisher. Idempotent. */
+export function configureEnvelopeStreamPublisher(
+  publisher: EnvelopeStreamPublisher | undefined,
+): void {
+  envelopeStreamPublisher = publisher;
+}
+
+/**
+ * The ONLY stream-publish call site in the toolkit. Emits one envelope event
+ * onto the telemetry stream. EVERY call is try/catch-swallowed (and the
+ * runner-side publisher swallows its own rejections): a telemetry outage
+ * (no publisher, unregistered stream, server unreachable) must NEVER fail a
+ * durable step — asserted by tests/turn-health.test.ts.
+ */
+function publishEnvelopeEvent(context: Context, eventKey: string, event: EnvelopeEvent): void {
+  const emit = envelopeStreamPublisher;
+  if (emit === undefined) return;
+  const message: EnvelopeStreamMessage = {
+    topic: `port/${context.flowId}/events`,
+    flowId: context.flowId,
+    eventKey,
+    event,
+  };
+  try {
+    // Promise.resolve also covers sync returns; the .catch swallows ASYNC
+    // publisher failures so a rejected publish can never become an
+    // unhandled rejection (or a step failure).
+    void Promise.resolve(emit(message)).catch(() => {
+      // Swallowed deliberately: telemetry is best-effort (US-002 spec).
+    });
+  } catch {
+    // Swallowed deliberately: telemetry is best-effort (US-002 spec).
+  }
+}
 
 /** Roles whose steps call a model: tokens are REQUIRED, never null. */
 const MODEL_CALLING_ROLES: readonly EnvelopeRole[] = [
@@ -243,6 +332,7 @@ async function executeEnvelope<I, O>(
   };
   // Staged with the decision; see the 0(g) note in the header.
   envelopeEvents.set(context, eventKey, base);
+  publishEnvelopeEvent(context, eventKey, base);
 
   const heartbeat = heartbeatLoop(context, eventKey);
   try {
@@ -255,13 +345,15 @@ async function executeEnvelope<I, O>(
       );
     }
     const endedMs = Date.now();
-    envelopeEvents.set(context, eventKey, {
+    const completedEvent: EnvelopeEvent = {
       ...base,
       ended_at: new Date(endedMs).toISOString(),
       outcome: outcome ?? "completed",
       tokens,
       wall_clock_ms: endedMs - startedMs,
-    });
+    };
+    envelopeEvents.set(context, eventKey, completedEvent);
+    publishEnvelopeEvent(context, eventKey, completedEvent);
     if (spec.route !== undefined) return spec.route(context, input, output);
     return gracefulComplete(output);
   } finally {
@@ -337,7 +429,8 @@ function writeRecordEvent(
   identity?: string,
 ): void {
   const startedAt = new Date().toISOString();
-  envelopeEvents.set(context, envelopeEventKey(stepId, attempt, identity), {
+  const eventKey = envelopeEventKey(stepId, attempt, identity);
+  const recordEvent: EnvelopeEvent = {
     stepId,
     role: "record",
     file: null,
@@ -349,7 +442,9 @@ function writeRecordEvent(
     tokens: null,
     wall_clock_ms: 0,
     identity: identity ?? null,
-  });
+  };
+  envelopeEvents.set(context, eventKey, recordEvent);
+  publishEnvelopeEvent(context, eventKey, recordEvent);
 }
 
 function writeFence(context: Context, fence: Omit<SessionFence, "persistedAtUtc"> | undefined): void {
@@ -459,7 +554,8 @@ export function envelopeStartMarker<I>(spec: StartMarkerSpec<I>): EnvelopeStepCl
     inner: async (ctx, input) => {
       const identity = spec.identityOf?.(ctx, input) ?? null;
       const startedAt = new Date().toISOString();
-      envelopeEvents.set(ctx, `${envelopeEventKey(spec.targetStepId, 0, identity ?? undefined)}@start`, {
+      const markerKey = `${envelopeEventKey(spec.targetStepId, 0, identity ?? undefined)}@start`;
+      const markerEvent: EnvelopeEvent = {
         stepId: spec.targetStepId,
         role: spec.role,
         file: null,
@@ -471,7 +567,9 @@ export function envelopeStartMarker<I>(spec: StartMarkerSpec<I>): EnvelopeStepCl
         tokens: null,
         wall_clock_ms: null,
         identity,
-      });
+      };
+      envelopeEvents.set(ctx, markerKey, markerEvent);
+      publishEnvelopeEvent(ctx, markerKey, markerEvent);
       return { output: input, tokens: null };
     },
     route: (_ctx, input) => spec.route(input),

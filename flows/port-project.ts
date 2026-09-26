@@ -42,6 +42,7 @@ import { promisify } from "node:util";
 import {
   envelopeStartMarker,
   envelopeStepClass,
+  envelopeStream,
   persistenceAttributes,
   type EnvelopeOutcome,
   type EnvelopeStepClass,
@@ -111,12 +112,14 @@ import {
   composeFixerTurn,
   composeImplementerTurn,
   composeReviewerTurn,
+  demoteReviewerLane,
   extractCodeFence,
   extractJsonObject,
   mapVerdictToMetrics,
   parseUnifiedDiff,
   renderDiffForReview,
   reviewerAgentOverride,
+  reviewerModelFallback,
   reviewerModelOverride,
   toEnvelopeUsage,
   toolOverridesAllOff,
@@ -616,12 +619,20 @@ async function runReviewTurn(input: {
     reviewerLabel: REVIEWER.name,
     diffBlock: diffBlock.block,
   });
+  const attemptNo = input.attempt ?? 1;
   const turnText =
-    (input.attempt ?? 1) > 1
-      ? `${turn}\n\n(retry attempt ${input.attempt}: a previous reply on this step was truncated or unparseable — respond with exactly one JSON object and nothing else)`
+    attemptNo > 1
+      ? `${turn}\n\n(retry attempt ${attemptNo}: a previous reply on this step was truncated or unparseable — respond with exactly one JSON object and nothing else)`
       : turn;
+  // Demotion policy = f(attempt) ONLY (US-002): attempt >= 2 on a review turn
+  // demotes the reviewer lane from OPENCODE_REVIEWER_MODEL to
+  // OPENCODE_REVIEWER_MODEL_FALLBACK (default: the implementer lane, i.e. no
+  // override). Pure policy over the durable dex attempt count — no env
+  // mutation, no durable flag substrate (intra-step writes don't survive;
+  // 0(g)). Tier-0 retries (degenerate no-text replies) therefore land on the
+  // fallback lane automatically.
   const agent = reviewerAgentOverride();
-  const model = reviewerModelOverride();
+  const model = demoteReviewerLane(attemptNo, reviewerModelOverride(), reviewerModelFallback());
   const result = await runAgentTurn({
     def: REVIEWER,
     sessionId: session.id,
@@ -2499,9 +2510,7 @@ export class PortFileFlow implements Flow<PortFileInput> {
 }
 
 /** The singleton the WaveJoin SubFlows target (must be worker-registered). */
-export const PortFileFlowInstance = new PortFileFlow();
-
-// ---------------------------------------------------------------------------
+export const PortFileFlowInstance = new PortFileFlow();// ---------------------------------------------------------------------------
 // Flow registration
 // ---------------------------------------------------------------------------
 
@@ -2592,7 +2601,13 @@ export class PortProjectFlow implements Flow<PortRunInput> {
   }
 
   getPersistenceSchema() {
-    return portPersistenceSchema();
+    // US-002 telemetry stream: dex's Registry allows ONE flow type to own a
+    // given Stream instance. port.Project owns `envelopeStream` here; the
+    // worker's runner-side publisher (Client.writeStream) uses it for every
+    // mirrored envelope event (child flows included — flowId is the
+    // per-instance key; open question for US-007 consumers, recorded in
+    // flows/steps/envelope.ts).
+    return { ...portPersistenceSchema(), streams: [envelopeStream] };
   }
 }
 

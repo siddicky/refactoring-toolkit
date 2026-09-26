@@ -28,6 +28,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   envelopeStepClass,
+  envelopeStream,
   persistenceAttributes,
   type EnvelopeOutcome,
 } from "../flows/steps/envelope.js";
@@ -147,7 +148,10 @@ export class HelloFlow implements Flow<void> {
     return StepList.startStep(this.hello);
   }
   getPersistenceSchema() {
-    return probePersistenceSchema();
+    // US-002: this probe flow type owns `envelopeStream` in the PROBE
+    // registry (probe worker) so the runner-side stream publisher can mirror
+    // HelloFlow envelopes; port.Project owns it in the port registry.
+    return { ...probePersistenceSchema(), streams: [envelopeStream] };
   }
 }
 

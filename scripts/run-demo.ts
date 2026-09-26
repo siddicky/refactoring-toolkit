@@ -14,7 +14,11 @@
  *   agent-roundtrip                                     0(e): REAL opencode session + prompt + tokens
  *   git-selftest                                        no dex needed: op-ID crash window (0d),
  *                                                       stale-writer (0d2), differing-content
- *                                                       replay across quarantine (0d3), integration
+ *                                                       replay across quarantine (0d3)
+ *   gate --flow-id <id>                                 US-002 lead-layer dispatch health gate:
+ *                                                       review-step failure facts from dexcli flow
+ *                                                       history; fail-open (degraded => no protection)
+ *   demo [--gate-flow-id <id>] [--dispatch parallel]    port flow dispatch (gate optional pre-dispatch), integration
  *
  * Requires a running dex server: `dexcli dev -open=false` (see BUILD_NOTES.md).
  */
@@ -57,12 +61,22 @@ import {
 } from "./probe-flow.js";
 import { PortProjectFlow, PortFileFlowInstance, configurePortHarness } from "../flows/port-project.js";
 import {
+  configureEnvelopeStreamPublisher,
+  envelopeStream,
+} from "../flows/steps/envelope.js";
+import {
   configurePortFault,
   configurePortJudgment,
 } from "../flows/runtime-hooks.js";
 import { createOfflineJevClient } from "../src/harness/runtime.js";
 import { createRealJevClient, isTypesafeOffline } from "../src/typesafe/client.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
+import { dexCliQueries } from "../src/dashboard/queries.js";
+import {
+  evaluateDispatchGate,
+  gateLine,
+  GATE_QUERY_TIMEOUT_MS,
+} from "./dispatch-gate.js";
 import type { Flow } from "@superdurable/dex";
 
 // ---------------------------------------------------------------------------
@@ -350,6 +364,33 @@ async function startRound(
 }
 
 // ---------------------------------------------------------------------------
+// Lead-layer dispatch health gate (US-002): dexcli flow history ONLY, 5 s
+// query timeout, fail-open with 'gate: degraded' surfaced. NEVER runs inside
+// PpWaveDispatch/DispatchStep — this is the runner's pre-dispatch surface.
+// ---------------------------------------------------------------------------
+
+function dispatchGateQueries() {
+  const config = dexConfigFromEnv();
+  return dexCliQueries({
+    bin: process.env.DEXCLI_BIN?.trim() || "dexcli",
+    server: config.serverAddress,
+    timeoutMs: GATE_QUERY_TIMEOUT_MS,
+  });
+}
+
+async function runDispatchGate(gateFlowId: string | undefined): Promise<number> {
+  const report = await evaluateDispatchGate(
+    dispatchGateQueries().flowHistory,
+    gateFlowId,
+    Date.now(),
+  );
+  console.log(gateLine(report));
+  // Fail-open by design: the gate NEVER blocks a dispatch (exit 0 either
+  // way); the degraded line above carries the explicit no-protection note.
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Port-project (Phase 2 trial gate)
 // ---------------------------------------------------------------------------
 
@@ -424,6 +465,14 @@ async function startDemo(): Promise<number> {
   const dir = argValue("--dir");
   if (dir === undefined) throw new Error("demo requires --dir <projectRepoDir>");
   if (!(await exists(dir))) await makeFixtureRepo(dir);
+  // US-002: optional pre-dispatch health gate (lead-layer, fail-open). When
+  // --gate-flow-id names a previous/current flow, its review-step facts are
+  // consulted and surfaced BEFORE startFlow; a degraded gate prints the
+  // explicit no-protection note and STILL dispatches.
+  const gateFlowId = argValue("--gate-flow-id");
+  if (gateFlowId !== undefined) {
+    await runDispatchGate(gateFlowId);
+  }
   const files = (argValue("--files") ?? "src/Money.php,src/Pricing/FlatRateDiscount.php")
     .split(",")
     .map((s) => s.trim())
@@ -589,6 +638,13 @@ async function main(): Promise<number> {
       configurePortJudgment(await resolveJudgment());
       configurePortFault(process.env.PORTING_KIT_FAULT);
       const handle = await startDexWorker(flows, config);
+      // US-002 stream publish (runner-side deviation, see envelope.ts): the
+      // worker process mirrors every durable envelope write onto the dex
+      // Stream via Client.writeStream. Both sync (hook) and async (.catch)
+      // failures are swallowed — telemetry never reaches the durable path.
+      configureEnvelopeStreamPublisher((msg) => {
+        void handle.client.writeStream(msg.flowId, envelopeStream, "envelope", msg).catch(() => {});
+      });
       console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${argValue("--harness") ?? "auto"} flows=${argValue("--flows") ?? "probe"}`);
       await new Promise(() => {}); // run until killed
       return 0;
@@ -678,10 +734,12 @@ async function main(): Promise<number> {
       return await gitSelftest();
     case "recover-port":
       return await recoverPort();
+    case "gate":
+      return await runDispatchGate(argValue("--flow-id"));
     case "demo":
       return await startDemo();
     default:
-      console.error("usage: run-demo.ts <worker|hello|long-step|wait-flow|round|recover|recover-port|agent-roundtrip|git-selftest|demo> [flags]");
+      console.error("usage: run-demo.ts <worker|hello|long-step|wait-flow|round|recover|recover-port|agent-roundtrip|git-selftest|gate|demo> [flags]");
       return 2;
   }
 }

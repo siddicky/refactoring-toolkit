@@ -79,6 +79,16 @@ export interface DexHistoryEventWire {
         nextSteps?: Array<{ stepType?: string; stepInput?: Record<string, unknown> }>;
       };
       upsertAttributes?: DexAttributeWire[];
+      /**
+       * US-002 dispatch-gate: present on `StepExecuteFailed` events (observed
+       * live against dexcli v0.13.5, BUILD_NOTES 0(h) wire). Absent on
+       * completed events.
+       */
+      failure?: {
+        attempt?: number;
+        backendError?: string;
+        details?: { originalWorkerErrorDetail?: string } | null;
+      } | null;
     };
   };
 }

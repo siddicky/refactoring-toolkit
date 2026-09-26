@@ -165,6 +165,37 @@ export function reviewerModelOverride(): { providerID: string; modelID: string }
   return { providerID: v.slice(0, slash), modelID: v.slice(slash + 1) };
 }
 
+/**
+ * Tier-0 demotion FALLBACK lane (US-002): `OPENCODE_REVIEWER_MODEL_FALLBACK`
+ * in the same `providerID/modelID` format. When unset the fallback lane IS
+ * the implementer lane (undefined override → harness default model), so an
+ * operator only sets this to demote to a DIFFERENT second-choice model.
+ */
+export function reviewerModelFallback(): { providerID: string; modelID: string } | undefined {
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  const v = proc?.env?.OPENCODE_REVIEWER_MODEL_FALLBACK?.trim();
+  if (v === undefined || v === "") return undefined;
+  const slash = v.indexOf("/");
+  if (slash <= 0 || slash >= v.length - 1) return undefined;
+  return { providerID: v.slice(0, slash), modelID: v.slice(slash + 1) };
+}
+
+/**
+ * Demotion policy = f(attempt) ONLY (US-002, plan v5.1 §Stage 1). Attempt
+ * >= 2 on a REVIEW turn demotes the lane from the OPENCODE_REVIEWER_MODEL
+ * default to the fallback lane (default: the implementer lane). PURE: no env
+ * reads, no durable state, no clock — the dex attempt count is the durable
+ * signal (intra-step writes do not survive a kill; 0(g)). A failed attempt
+ * re-enters the step with attempt+1, so every Tier-0 retry lands here.
+ */
+export function demoteReviewerLane(
+  attempt: number | undefined,
+  defaultLane: { providerID: string; modelID: string } | undefined,
+  fallbackLane: { providerID: string; modelID: string } | undefined,
+): { providerID: string; modelID: string } | undefined {
+  return (attempt ?? 1) >= 2 ? fallbackLane : defaultLane;
+}
+
 // ---------------------------------------------------------------------------
 // Diff pass-by-value plumbing
 // ---------------------------------------------------------------------------

@@ -81,6 +81,13 @@ export async function openDexClient(
 export interface DexWorkerHandle {
   readonly worker: Worker;
   readonly workerTargetAddress: string;
+  /**
+   * US-002: runner-side Client over the SAME registry + blob cache as the
+   * worker — used for telemetry publishes (Client.writeStream, see
+   * flows/steps/envelope.ts configureEnvelopeStreamPublisher). Closed with
+   * the handle.
+   */
+  readonly client: Client;
   close(): Promise<void>;
 }
 
@@ -94,6 +101,10 @@ export async function startDexWorker(
     directory: config.blobCacheDir,
     maxBytes: config.maxBlobCacheBytes,
   });
+  const client = new Client(registry, cache, {
+    serverAddress: config.serverAddress,
+    workerTarget: { address: config.workerTargetAddress ?? DEFAULT_WORKER_TARGET_ADDRESS },
+  });
   const worker = new Worker(registry, cache, {
     serverAddress: config.serverAddress,
     bindAddress: config.workerBindAddress ?? "127.0.0.1:8803",
@@ -102,8 +113,10 @@ export async function startDexWorker(
   return {
     worker,
     workerTargetAddress: worker.workerTarget.address,
+    client,
     async close() {
       await worker.close();
+      client.close();
       cache.close();
     },
   };
