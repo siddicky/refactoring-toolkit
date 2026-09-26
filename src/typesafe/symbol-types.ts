@@ -309,13 +309,17 @@ export async function selectSymbolType(
   for (const c of recall.candidates) {
     criteria[c.type] = `candidate recalled from ${c.origin}`;
   }
-  criteria.NONE = "no recalled candidate is a suitable TypeScript type for this symbol; abstain";
+  criteria.NONE =
+    "abstain: EVERY recalled candidate is unsuitable. Do not abstain when a candidate is directly evidenced by the signature or docblock (declared return type, typed parameter such as `Money $other`, @return/@var hint) — in that case the evidenced candidate is the answer";
 
   const selection = await client.systemOne({
     state,
     questions: {
       type_selection: choice(
-        `Which TypeScript type best describes PHP symbol ${symbol.name} (${symbol.kind})? Pick NONE if none of the candidates is suitable.`,
+        `Which TypeScript type best describes PHP symbol ${symbol.name} (${symbol.kind})? ` +
+          `For a method or function this means its RETURN type; for an accessor/getter method it is the mapped property's type; for a property or parameter it is that member's type. ` +
+          `When the signature or docblock directly evidences one of the candidates, select that candidate — do NOT pick NONE. ` +
+          `Pick NONE only when every candidate is unsuitable for this symbol.`,
         criteria,
       ),
     },

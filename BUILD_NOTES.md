@@ -417,4 +417,31 @@ client` post-restart.
   DELIVERED; determinism re-verified by worker-1c (generator re-run digest
   `b692f358…` == FIXTURES.md recorded digest; tree unchanged).
 
-## Phases 3/4 continuation (worker-1c) — see the next section for outcomes.
+## Phases 3/4 continuation (worker-1c)
+
+### Jev prompt fix (spot-check re-measured, one prompt-iteration budget)
+
+- Defect: Jev abstained (NONE) on methods whose type evidence is a Money-typed
+  parameter + Money return (5 spot-check rows). Root: the selection question
+  didn't say what "type of a method" means (return type) and the NONE option
+  didn't say abstention is wrong when a candidate is signature/docblock-
+  evidenced.
+- Fix (`src/typesafe/symbol-types.ts`, selection Choice only): question now
+  maps method→return type and accessor→property's type and says "when the
+  signature or docblock directly evidences one of the candidates, select it —
+  do NOT pick NONE"; the NONE criterion now reads "EVERY recalled candidate is
+  unsuitable… do not abstain when a candidate is directly evidenced (e.g.
+  `Money $other`)".
+- Measured (live Jev, same n=36 graded symbols, v2 rubric):
+  - BEFORE: 31/36 = 86.1% (worker-1b; raw selections preserved in
+    /tmp/jev-spot-check-before-v2.json) — misses: the 5 Money rows (+3
+    grading-rubric rows for truncated compound labels, accepted by v2).
+  - AFTER: 33/36 = 91.7% (≥90% target PASS; /tmp/jev-spot-check-after.json,
+    generatedAt 2026-09-26T05:01:57Z). Money-param abstentions 5 → 2
+    (`PercentageDiscount#apply`, `FlatRateDiscount#apply` still abstain — both
+    remain `flagged` and escalate to the implementer agent, the designed
+    path). Residual third miss: `Customer#toArray` truncated-candidate label
+    (`array<string,`) — the known recall-side `@return` comma-truncation,
+    recorded as a worker-3 follow-up, not a prompt issue.
+- Suites after the fix: `bun run typecheck` clean; `bun test` 188 pass / 0
+  fail (20 files).
