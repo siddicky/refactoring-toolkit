@@ -95,6 +95,33 @@ function parseWaitMs(raw: string | undefined): number {
 }
 
 /**
+ * Hard ceiling on ONE SDK prompt call (live finding, worker-1c 2026-09-26):
+ * opencode can hold the session.prompt HTTP call open indefinitely after the
+ * assistant message has completed server-side — the turn hangs, heartbeats
+ * keep the step alive, and the flow stalls. Race the call against this
+ * deadline and fail RETRYABLE so dex re-dispatches on a fresh attempt.
+ * OPENCODE_PROMPT_CALL_TIMEOUT_MS; default 20 minutes.
+ */
+const PROMPT_CALL_TIMEOUT_MS = parseWaitMs(
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
+    ?.OPENCODE_PROMPT_CALL_TIMEOUT_MS,
+) *  (4 / 3); // 20 min default (parseWaitMs falls back to 15 min; ×4/3 = 20)
+
+/** Races one promise against the prompt-call deadline (retryable timeout). */
+function withCallTimeout<T>(promise: Promise<T>, what: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      const t = setTimeout(
+        () => reject(new OpencodePromptError(`SDK call timed out after ${PROMPT_CALL_TIMEOUT_MS}ms (${what})`, true)),
+        PROMPT_CALL_TIMEOUT_MS,
+      );
+      void (t as unknown as { unref?: () => void }).unref?.();
+    }),
+  ]);
+}
+
+/**
  * Typed failure for one prompt turn. `retryable` failures (upstream aborts,
  * empty native-tool replies) should be retried on a FRESH session by the
  * caller (dex step retry); non-retryable means the reply completed but
@@ -192,15 +219,18 @@ export class OpencodeHarness {
    */
   async prompt(sessionId: string, text: string, opts?: PromptOptions): Promise<PromptResult> {
     const agent = opts?.agent ?? this.defaultAgent;
-    const res = await this.#client.session.prompt({
-      path: { id: sessionId },
-      body: {
-        ...(this.#model !== undefined ? { model: this.#model } : {}),
-        ...(agent !== undefined ? { agent } : {}),
-        ...(opts?.tools !== undefined ? { tools: opts.tools } : {}),
-        parts: [{ type: "text", text }],
-      },
-    } as never);
+    const res = await withCallTimeout(
+      this.#client.session.prompt({
+        path: { id: sessionId },
+        body: {
+          ...(this.#model !== undefined ? { model: this.#model } : {}),
+          ...(agent !== undefined ? { agent } : {}),
+          ...(opts?.tools !== undefined ? { tools: opts.tools } : {}),
+          parts: [{ type: "text", text }],
+        },
+      } as never),
+      `session.prompt (session=${sessionId})`,
+    );
     const data = unwrap(res) as
       | { info?: unknown; parts?: unknown }
       | undefined;
