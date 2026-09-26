@@ -55,7 +55,7 @@ import {
   probeFlows,
   type RoundInput,
 } from "./probe-flow.js";
-import { PortProjectFlow, PortFileFlow, configurePortHarness } from "../flows/port-project.js";
+import { PortProjectFlow, PortFileFlowInstance, configurePortHarness } from "../flows/port-project.js";
 import {
   configurePortFault,
   configurePortJudgment,
@@ -357,7 +357,13 @@ function portFlows(harness: AgentSessionClient): Flow<any>[] {
   configurePortHarness(harness);
   // v1.1: the per-file child flow MUST be registered on every worker that
   // serves port.Project — the parallel wave join starts port.File SubFlows.
-  return [new PortProjectFlow(), new PortFileFlow()];
+  // LIVE FINDING (cx-5b): dex SubFlow.run(flow, …) resolves the registry by
+  // INSTANCE IDENTITY — the registered child must be the exact instance the
+  // join's waitFor references. Registering `new PortFileFlow()` while the
+  // join runs `SubFlow.run(PortFileFlowInstance, …)` failed waitFor with
+  // "Flow instance is not registered". The shared singleton is therefore
+  // the registration contract; never construct a second PortFileFlow.
+  return [new PortProjectFlow(), PortFileFlowInstance];
 }
 
 /**
