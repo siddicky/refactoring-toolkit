@@ -186,6 +186,27 @@ describe("anchorDispatch — clean mappings", () => {
     expect(result.unexplained_dispatch_entries).toBe(0);
   });
 
+  test("live shape (worker-1c): the start mini-step's own ':start' envelope anchors under its marker spec", () => {
+    // Live stream per model step X: X#0 (attempt-0 marker, role = target role),
+    // X:start#1 (the mini-step's OWN envelope, role record), X#1 (the model
+    // envelope) — plus dispatch entries for the Start and model step types.
+    const envelopes: EnvelopeEvent[] = [
+      envelope({ stepId: "pp-implement", role: "agent", attempt: 0, outcome: "interrupted", ended_at: null, wall_clock_ms: null, identity: "src__X.php#1" }),
+      envelope({ stepId: "pp-implement:start", role: "record", attempt: 1, tokens: null, wall_clock_ms: 5, identity: "src__X.php#1" }),
+      envelope({ stepId: "pp-implement", role: "agent", attempt: 1, tokens: 100, identity: "src__X.php#1" }),
+    ];
+    const entries = [
+      entry("PpImplementStart", 1, "src__X.php#1"),
+      entry("PpImplement", 1, "src__X.php#1"),
+    ];
+    const result = anchorDispatch(envelopes, entries);
+    expect(result.ok).toBe(true);
+    expect(result.failures).toEqual([]);
+    expect(result.envelopes_anchored).toBe(3);
+    // No "does not match any known port-flow step type mapping" for :start ids.
+    expect(result.failures.some((f) => f.includes(":start"))).toBe(false);
+  });
+
   test("empty inputs anchor vacuously", () => {
     const result = anchorDispatch([], []);
     expect(result.ok).toBe(true);

@@ -1478,6 +1478,10 @@ const PrepReviewAStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
   stepType: "PpPrepReviewA",
   stepId: "pp-prep-review-a",
   role: "review",
+  // M2/M4 join identity: the attempt-0 start marker carries prep<iteration>;
+  // the model envelope must carry the SAME identity or the AC2 marker join
+  // (by stepId+identity) cannot see it.
+  identityOf: prepIdentityOf,
   stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppPrepDiff, ppPrepState] },
   inner: async (ctx, input) => {
     const diff = ppPrepDiff.get(ctx, "diff");
@@ -1510,6 +1514,8 @@ const PrepReviewBStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
   stepType: "PpPrepReviewB",
   stepId: "pp-prep-review-b",
   role: "review",
+  // M2/M4 join identity — same rationale as PrepReviewAStep.
+  identityOf: prepIdentityOf,
   stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppPrepDiff, ppPrepState] },
   inner: async (ctx, input) => {
     const diff = ppPrepDiff.get(ctx, "diff");
@@ -1622,6 +1628,8 @@ const PrepReviseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRu
   stepType: "PpPrepRevise",
   stepId: "pp-prep-revise",
   role: "agent",
+  // M2/M4 join identity — same rationale as PrepReviewAStep.
+  identityOf: prepIdentityOf,
   stepOptions: {
     ...MODEL_STEP_OPTIONS,
     executeLoadAttributeMaps: [ppPrepFindings, ppPrepDraft, ppPrepState],

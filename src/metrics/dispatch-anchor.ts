@@ -143,6 +143,14 @@ export interface PortStepSpec {
   stepId: string;
   role: EnvelopeRole;
   kind: PortStepKind;
+  /**
+   * Live shape (worker-1c, first full-run reconciliation): an M4 start
+   * mini-step ALSO writes its own envelope-factory record under stepId
+   * `<targetStepId>:start` (role "record", real attempt) — in addition to the
+   * attempt-0 marker it stages for the TARGET step. That self-envelope must
+   * anchor to the mini-step's dispatch entries like any other envelope.
+   */
+  selfStepId?: string;
 }
 
 /**
@@ -152,41 +160,41 @@ export interface PortStepSpec {
  */
 export const PORT_FLOW_STEPS: readonly PortStepSpec[] = [
   // Phase 3 (prep-analysis) — maintained by worker-1b per the mirror rule.
-  { stepType: "PpSymbolStart", stepId: "pp-symbol-table", role: "judgment", kind: "marker" },
+  { stepType: "PpSymbolStart", stepId: "pp-symbol-table", role: "judgment", kind: "marker", selfStepId: "pp-symbol-table:start" },
   { stepType: "PpSymbolTable", stepId: "pp-symbol-table", role: "judgment", kind: "model" },
-  { stepType: "PpPrepGenerateStart", stepId: "pp-prep-generate", role: "agent", kind: "marker" },
+  { stepType: "PpPrepGenerateStart", stepId: "pp-prep-generate", role: "agent", kind: "marker", selfStepId: "pp-prep-generate:start" },
   { stepType: "PpPrepGenerate", stepId: "pp-prep-generate", role: "agent", kind: "model" },
   { stepType: "PpPrepDiffCapture", stepId: "pp-prep-diff-capture", role: "diff-capture", kind: "support" },
-  { stepType: "PpPrepReviewAStart", stepId: "pp-prep-review-a", role: "review", kind: "marker" },
+  { stepType: "PpPrepReviewAStart", stepId: "pp-prep-review-a", role: "review", kind: "marker", selfStepId: "pp-prep-review-a:start" },
   { stepType: "PpPrepReviewA", stepId: "pp-prep-review-a", role: "review", kind: "model" },
-  { stepType: "PpPrepReviewBStart", stepId: "pp-prep-review-b", role: "review", kind: "marker" },
+  { stepType: "PpPrepReviewBStart", stepId: "pp-prep-review-b", role: "review", kind: "marker", selfStepId: "pp-prep-review-b:start" },
   { stepType: "PpPrepReviewB", stepId: "pp-prep-review-b", role: "review", kind: "model" },
   { stepType: "PpPrepVerdictCheck", stepId: "pp-prep-verdict-check", role: "verdict-check", kind: "support" },
   { stepType: "PpPrepLoopDecision", stepId: "pp-prep-loop-decision", role: "record", kind: "support" },
-  { stepType: "PpPrepReviseStart", stepId: "pp-prep-revise", role: "agent", kind: "marker" },
+  { stepType: "PpPrepReviseStart", stepId: "pp-prep-revise", role: "agent", kind: "marker", selfStepId: "pp-prep-revise:start" },
   { stepType: "PpPrepRevise", stepId: "pp-prep-revise", role: "agent", kind: "model" },
   { stepType: "PpPrepFinalize", stepId: "pp-prep-finalize", role: "record", kind: "support" },
   { stepType: "PpPrep", stepId: "pp-prep", role: "record", kind: "support" },
   { stepType: "PpDispatch", stepId: "pp-dispatch", role: "record", kind: "support" },
   { stepType: "PpLease", stepId: "pp-lease", role: "record", kind: "support" },
   { stepType: "PpFence", stepId: "pp-fence", role: "record", kind: "support" },
-  { stepType: "PpImplementStart", stepId: "pp-implement", role: "agent", kind: "marker" },
+  { stepType: "PpImplementStart", stepId: "pp-implement", role: "agent", kind: "marker", selfStepId: "pp-implement:start" },
   { stepType: "PpImplement", stepId: "pp-implement", role: "agent", kind: "model" },
   { stepType: "PpCaptureDiff", stepId: "pp-capture-diff", role: "diff-capture", kind: "support" },
-  { stepType: "PpReviewAStart", stepId: "pp-review-a", role: "review", kind: "marker" },
+  { stepType: "PpReviewAStart", stepId: "pp-review-a", role: "review", kind: "marker", selfStepId: "pp-review-a:start" },
   { stepType: "PpReviewA", stepId: "pp-review-a", role: "review", kind: "model" },
-  { stepType: "PpReviewBStart", stepId: "pp-review-b", role: "review", kind: "marker" },
+  { stepType: "PpReviewBStart", stepId: "pp-review-b", role: "review", kind: "marker", selfStepId: "pp-review-b:start" },
   { stepType: "PpReviewB", stepId: "pp-review-b", role: "review", kind: "model" },
   { stepType: "PpVerdictCheck", stepId: "pp-verdict-check", role: "verdict-check", kind: "support" },
   { stepType: "PpPrioritize", stepId: "pp-prioritize", role: "prioritize", kind: "support" },
-  { stepType: "PpFixerStart", stepId: "pp-fixer", role: "agent", kind: "marker" },
+  { stepType: "PpFixerStart", stepId: "pp-fixer", role: "agent", kind: "marker", selfStepId: "pp-fixer:start" },
   { stepType: "PpFixer", stepId: "pp-fixer", role: "agent", kind: "model" },
   { stepType: "PpCommit", stepId: "pp-commit", role: "commit", kind: "support" },
   { stepType: "PpIntegrate", stepId: "pp-integrate", role: "integration", kind: "support" },
   { stepType: "PpRelease", stepId: "pp-release", role: "record", kind: "support" },
   // Phase 4 (verification queues + fix rounds) — maintained by worker-1b.
   { stepType: "PpQueueVerify", stepId: "pp-queue-verify", role: "queue", kind: "support" },
-  { stepType: "PpQueueFixStart", stepId: "pp-queue-fix", role: "agent", kind: "marker" },
+  { stepType: "PpQueueFixStart", stepId: "pp-queue-fix", role: "agent", kind: "marker", selfStepId: "pp-queue-fix:start" },
   { stepType: "PpQueueFix", stepId: "pp-queue-fix", role: "agent", kind: "model" },
   { stepType: "PpFinal", stepId: "pp-final", role: "record", kind: "support" },
 ];
@@ -204,9 +212,9 @@ export function specForStepType(stepType: string): PortStepSpec | null {
   return SPEC_BY_STEP_TYPE.get(stepType) ?? null;
 }
 
-/** All flow specs sharing a step id (a model step and its M4 marker). */
+/** All flow specs sharing a step id (a model step and its M4 marker), including marker self-envelope ids. */
 export function specsForStepId(stepId: string): PortStepSpec[] {
-  return PORT_FLOW_STEPS.filter((s) => s.stepId === stepId);
+  return PORT_FLOW_STEPS.filter((s) => s.stepId === stepId || s.selfStepId === stepId);
 }
 
 /** True when the step type is a known dex non-agent kind (case-insensitive). */
@@ -358,7 +366,11 @@ export function anchorDispatch(
       continue;
     }
     const isMarker = env.attempt === 0;
-    const spec = specs.find((s) => (isMarker ? s.kind === "marker" : s.kind !== "marker"));
+    // The start mini-step's own envelope (`<target>:start`, role record, real
+    // attempt) anchors under its marker spec: the dispatch entry IS the same
+    // step execution that staged the attempt-0 marker.
+    const selfSpec = !isMarker ? specs.find((s) => s.selfStepId === env.stepId) : undefined;
+    const spec = selfSpec ?? specs.find((s) => (isMarker ? s.kind === "marker" : s.kind !== "marker"));
     if (spec === undefined) {
       failures.push(
         isMarker
@@ -367,7 +379,9 @@ export function anchorDispatch(
       );
       continue;
     }
-    if (spec.role !== env.role) {
+    // The self-envelope carries role "record" by design (marker specs carry
+    // the TARGET role) — role equality applies only to non-self envelopes.
+    if (spec.role !== env.role && selfSpec === undefined) {
       failures.push(
         `envelope ${env.stepId}#${env.attempt} role "${env.role}" does not match flow spec role "${spec.role}"`,
       );
