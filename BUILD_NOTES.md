@@ -645,3 +645,134 @@ policy) that types cannot prove. Design + deviations: "v1.1" section above.
   implementer/reviewer input tokens (~60–90k per review attempt, mostly
   cache-read); ~15 full/partial runs this wave. Degenerate turns themselves
   produce no output tokens — the cost is inputs + wall clock.
+
+---
+
+# WAVE-5 — final report (worker-1d, 2026-09-26)
+
+Mission: finish the blocked evidence runs with the reviewer lane swapped to
+**gpt-6-luna** (user's choice), plus Tier-1 polish. The wave-4 blocker
+(glm-5.3-default degenerate reviewer turns) is BROKEN: every reviewer turn in
+every run below parsed first-try on luna — **zero degenerate turns across
+22+ live review turns** (prep 3 iterations × 2 + 10 child rounds × 2).
+
+## STEP 1 — reviewer lane swap (PASS, opencode route)
+
+- Route: opencode server (:4096) CAN reach `openai/gpt-6-luna` via the
+  ChatGPT-plan auth (`auth.json` `openai` refresh). Codex fallback not needed.
+- Seam: per-turn model override — `PromptOptions.model` in the opencode seam +
+  `reviewerModelOverride()` (env `OPENCODE_REVIEWER_MODEL=provider/model`),
+  applied ONLY in `runReviewTurn`; implementer/fixer stay on the default glm
+  lane (commit `e55b321`).
+- Binding for all runs: `OPENCODE_REVIEWER_AGENT=plan` +
+  `OPENCODE_REVIEWER_MODEL=openai/gpt-6-luna`.
+- Probe validity honored (wave-4 lesson): probes replicate the flow's EXACT
+  turn shape — `composeAgentTurn(REVIEWER, turn)` header + toolPolicyBlock +
+  diff-by-value via `renderDiffForReview` + `toolOverridesAllOff()` + verdict
+  contract validation. Result: **3/3 healthy parses** (findings=1 minor / 1
+  major / clean; 10-13s per turn; ~40k input) → GO. Script: /tmp/probe-luna-reviewer.ts.
+
+## STEP 2 — CreatorPay runs cx-5 → cx-5e (PASS after 4 deterministic fixes)
+
+The v1.1 parallel dispatch was NEVER live-proven (wave-4: "first live exercise
+will surface dex SubFlow runtime semantics"). It did — four deterministic
+wiring gaps, each fixed + committed, none provider-related:
+
+| Dispatch | Failure (all at/near the wave join, before child model spend) | Fix (commit) |
+|---|---|---|
+| cx-5 | `waitFor` reads pp-prep undeclared — dex loads WAIT-FOR-phase maps SEPARATELY (`waitForLoadAttributeMaps`) | `be61be3` |
+| cx-5b | `SubFlow.run(PortFileFlowInstance)` → "Flow instance is not registered": dex resolves the registry by INSTANCE IDENTITY; the worker registered `new PortFileFlow()` | `467ee06` |
+| cx-5c | Child `PpChildLease` read `pp-lease/pool` via bindLeaseStore undeclared; full reads-only audit of every step (writes stage automatically, only READS declare) | `7d65601` |
+| cx-5d | Fix-round pipeline: `FixerStep` threw "output path missing file#2" — fix rounds enter via queue-fix which never sets ppOut; prep source-map fallback added (same as queue-fix/integrate) | `531b753` |
+| cx-5e | — (COMPLETED; see STEP 3) | — |
+
+cx-5d additionally proved the kill/resume machinery fires (see below) before
+dying on the fixer bug. Prep burned ~450k input tokens per dispatch (mostly
+cache-read) — the cost of five gate arrivals at the never-proven join.
+
+## STEP 3 — fix-round/queue kill + AC1 battery: **ALL PASS (cx-5e)**
+
+- Run: cx-5e, runId `01a0df1a-58ef-732c-ba4d-b695df85f8c6`, 5 CreatorPay
+  files, parallel dispatch, maxRounds 2, worker fault
+  `queue-verify:inject-error:seed` (deterministic fix-round window).
+- Kill: watcher caught `PpQueueVerify` ACTIVE (iteration 1) → chaos-kill
+  SIGKILLed dex (pid 68294) + worker (pid 72852) at **19:50:38.665Z**;
+  sidecar intent (mono 44ms) BEFORE completed (mono 98ms), both anchored
+  `flow_run_id=01a0df1a…` (`/tmp/kill-events-cx5.jsonl`).
+- Resume: SAME SQLite DB (`~/.dex/dev/7233/dex.sqlite.db`), fast restart
+  (<10s — cx-5d showed model steps burn their 3 quick attempts if the worker
+  is down longer). Flow resumed through queue-verify → fix waves 4-6 →
+  **FLOW_STATUS_COMPLETED 20:26:38Z**.
+- Phase 6 assertion battery — `/tmp/metrics-cx5/ac1-battery.txt`, ALL PASS:
+  flow completed; sidecar intent-before-kill + run-id anchored; post-kill
+  envelopes exist and close time > kill; **zero new implementer invocations
+  post-kill for all 5 completed files**; **no duplicate op-ID commits** (10
+  keyed commits = 5 files × 2 rounds, one each); **all round-1 keyed commits
+  are ancestors of `integration` HEAD**; ported content present in the
+  integrated output; fix-round (redone) work present post-kill (20 completed
+  + 5 skipped fix/commit/integrate outcomes).
+- cx-5d's earlier kill (18:58:18Z, mid fix-wave) also FIRED + resumed children
+  before dying on the then-unfixed ppOut bug — same sidecar, superseded.
+
+## STEP 4 — Tier-1 polish (all four landed)
+
+- (a) removed-behavior reviewer lens — prompt-only attack angle on the `-`
+  lines (commit `c29cc88`), documented in harness/agents/reviewer.ts.
+- (b) cost honesty — envelopes carry the FULL provider usage split
+  (input/cache-read/cache-write/reasoning/USD); report gains
+  `usage_by_role` + `cost_total_usd` + `~estimated` flag; dashboard gains
+  section 07 (agent usage & cost) and split tooltips (commit `e7fec97`).
+  Live values on cx-5e: agent 772k in/350k cache-read/196k reasoning;
+  review (luna) 329k in/**576k cache-read**/8k out — all plan-authed →
+  honest `~$0 (estimated)` flag, never silently exact.
+- (c) lifecycle headline — one-line run status with the live
+  running→killed→resumed→completed flip; final state rendered:
+  `◆ cx-5e: 10/10 files · completed (survived kill)` with the kill timeline.
+- (d) git-exec 30s timeout + maxBuffer (hung git no longer burns heartbeats);
+  cleanup ordering VERIFIED correct already (worktree remove --force
+  deregisters missing worktrees; never prune) — documented in release().
+
+## STEP 5 — AC2 render on the luna run: **provenance_ok=true**
+
+`bun scripts/render-metrics.ts --flow-id cx-5e --kill-events
+/tmp/kill-events-cx5.jsonl --out-dir /tmp/metrics-cx5`:
+
+- **213 envelopes, 22 verdict records, 14 burn-down samples, kill events
+  merged, provenance OK, 213/213 dispatch-anchored** (child-flow topology
+  aware). Tokens model roles: 2,292,331. Zero fixer retries. Agreement
+  matrix live: agree-clean (spec round 0), disagree cases surfaced honestly.
+- Two render-side gaps found + fixed by this render: `pp-wave-children` is
+  OVERWRITTEN per wave (children must come from history upserts, `bdc6989` +
+  prefix fix — the map is `pp-wave-children`, not `pp-wave/children`), and
+  ChildLease/queue-fix envelopes were flow-keyed (steps lacked identityOf;
+  anchor now proves flow-keyed completions via support-type match or the
+  identity-bearing start marker, commit `b14a03c`; future runs write
+  identity-keyed envelopes directly).
+- Dashboard verified rendering the run (headline + usage + kill timeline).
+
+## Evidence paths (wave-5)
+
+- AC1 battery (ALL PASS): `/tmp/metrics-cx5/ac1-battery.txt`
+- Kill sidecar: `/tmp/kill-events-cx5.jsonl` (copy: /tmp/metrics-cx5/)
+- AC2 report: `/tmp/metrics-cx5/report.{md,json}`
+- Project repo (10 keyed commits, integration branch): `/tmp/pk-cx5`
+- dex flows: cx-5e (+ children), cx-5d (first kill), cx-5..cx-5c (wiring-gap
+  narrative above); probe script /tmp/probe-luna-reviewer.ts
+- Worker/server logs: /tmp/worker-1d*.log, /tmp/dex-server-1d.log
+- Dashboard: :4646 (STATUS_REPO_ROOT=/tmp/pk-cx5)
+
+## Commits (wave-5, in order)
+
+e55b321 reviewer-model seam · e7fec97 tier-1 b/c/d · be61be3 waitFor maps ·
+467ee06 SubFlow instance singleton · 7d65601 child lease maps + audit ·
+531b753 fixer ppOut fallback · bdc6989 render children-from-history (+prefix) ·
+b14a03c anchor flow-keyed join + identityOf · c29cc88 removed-behavior lens ·
+e38b8a6 headline top-level flow. 204/204 tests, tsc clean at every commit.
+
+## Remaining Phase 7 scope (go/no-go with costs)
+
+Full php-sample run incl. the AC1 kill at seed scale. Cost shape from cx-5e:
+~2.3M model tokens per 5-file CreatorPay run (implementer glm ~810k +
+reviewer luna ~920k incl. heavy cache-read + fix rounds), ~90 min wall clock.
+php-sample is the 2-file seed (~40% of that). The reviewer lane is stable;
+the parallel topology is now live-proven end-to-end. Awaiting user go/no-go.
