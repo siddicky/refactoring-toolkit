@@ -42,27 +42,52 @@ export type FailureClass = "port-caused" | "fixture-problem";
 
 export interface FailureClassification {
   failureClass: FailureClass;
+  /**
+    * File the failure routes to in the fix-round feed: the ported output file
+    * that decided "port-caused", or the fixture/test-harness file for
+    * "fixture-problem". null when nothing in the stack matched a known root —
+    * the class then defaults to "port-caused" (deterministic, documented) but
+    * there is no file to route to, so the record stays visible in the queue
+    * state without entering any per-file feed.
+    */
+  attributedFile: string | null;
   /** Human-readable justification (what frame/root decided the class). */
   reason: string;
 }
 
 /**
  * Seam: anything that can triage a failing test. The flow consumes this
- * interface; swap implementations without touching the loop.
+ * interface; swap implementations without touching the loop. Judgment-backed
+ * implementations (Lane-B vitest-triage, registered in
+ * src/judgment-registry.ts) are async — they satisfy AsyncFailureClassifier,
+ * the same seam shaped for providers that await.
  */
 export interface FailureClassifier {
   classify(failure: VitestFailureRecord): FailureClassification;
 }
 
+/** Async variant of the classifier seam (Jev route). */
+export interface AsyncFailureClassifier {
+  classify(failure: VitestFailureRecord): Promise<FailureClassification>;
+}
+
+/** One parsed failure paired with its triage outcome. */
+export interface ClassifiedVitestFailure {
+  record: VitestFailureRecord;
+  classification: FailureClassification;
+}
+
 /**
  * Durable queue state for one vitest queue run (plain JSON, dex-attribute
- * safe — mirrors TscQueueState).
+ * safe — mirrors TscQueueState). `classified` is written by classifyMany at
+ * queue-build; empty when the state was built without a classifier.
  */
 export interface VitestQueueState {
   kind: "vitest-queue";
   iteration: number;
   total: number;
   failures: VitestFailureRecord[];
+  classified: ClassifiedVitestFailure[];
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +205,7 @@ function parseStackFrame(line: string): StackFrame | null {
   };
 }
 
-/** Build durable queue state from parsed failures. */
+/** Build durable queue state from parsed failures (unclassified). */
 export function buildVitestQueueState(
   failures: readonly VitestFailureRecord[],
   iteration: number,
@@ -190,7 +215,84 @@ export function buildVitestQueueState(
     iteration,
     total: failures.length,
     failures: [...failures],
+    classified: [],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Triage at queue-build: classifyMany over the parsed records (Lane-B
+// vitest-triage; registered in src/judgment-registry.ts)
+// ---------------------------------------------------------------------------
+
+/** Records persisted per queue attribute write (mirrors the tsc errors cap). */
+export const VITEST_RECORD_CAP = 80;
+
+/**
+ * Classify every parsed record through one classifier (naive default or the
+ * async Jev route). Per-record: a classifier throwing on one record rejects
+ * the whole batch — the flow-level fail-open (Jev unavailable → naive) wraps
+ * THIS function, not individual records, so a half-Jev batch never persists.
+ */
+export async function classifyMany(
+  records: readonly VitestFailureRecord[],
+  classifier: FailureClassifier | AsyncFailureClassifier,
+): Promise<ClassifiedVitestFailure[]> {
+  const classified: ClassifiedVitestFailure[] = [];
+  for (const record of records) {
+    classified.push({ record, classification: await classifier.classify(record) });
+  }
+  return classified;
+}
+
+/**
+ * Queue-build with triage: parse output → classifyMany → durable state.
+ * Same attribute shape as buildVitestQueueState plus the classified records.
+ */
+export async function buildClassifiedVitestQueueState(
+  failures: readonly VitestFailureRecord[],
+  iteration: number,
+  classifier: FailureClassifier | AsyncFailureClassifier,
+): Promise<VitestQueueState> {
+  const classified = await classifyMany(failures, classifier);
+  return {
+    kind: "vitest-queue",
+    iteration,
+    total: failures.length,
+    failures: [...failures],
+    classified,
+  };
+}
+
+/**
+ * Deterministic file attribution for an already-decided class: the first
+ * stack frame under the matching root set (ported roots for "port-caused",
+ * fixture roots for "fixture-problem"); null for unknown/other classes.
+ * Shared by the naive classifier and the Jev route so the ATTRIBUTION step is
+ * always deterministic — only the CLASS is judgment-derived.
+ */
+export function attributedFileOfClass(
+  failure: VitestFailureRecord,
+  failureClass: FailureClass,
+  roots?: { portedRoots?: readonly string[]; fixtureRoots?: readonly string[] },
+): string | null {
+  const frames = failure.frames;
+  if (failureClass === "port-caused") {
+    const portedRoots = roots?.portedRoots ?? DEFAULT_PORTED_ROOTS;
+    for (const frame of frames) {
+      const root = matchRoot(frame.file, portedRoots);
+      if (root !== null) return frame.file;
+    }
+    return null;
+  }
+  if (failureClass === "fixture-problem") {
+    const fixtureRoots = roots?.fixtureRoots ?? DEFAULT_FIXTURE_ROOTS;
+    for (const frame of frames) {
+      const root = matchRoot(frame.file, fixtureRoots);
+      if (root !== null) return frame.file;
+    }
+    return null;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +326,11 @@ export const DEFAULT_FIXTURE_ROOTS: readonly string[] = [
  * ported code appearing in the stack means the port loop should look at it);
  * a failure whose stack only contains fixture/test-harness files is a
  * fixture-problem. Walks frames in printed order and checks all roots.
+ *
+ * Attribution mirrors the class decision: the deciding frame's file becomes
+ * attributedFile; the unknown case (no frame matched any root) keeps the
+ * documented deterministic default — class "port-caused", attributedFile
+ * null (visible in the queue state, routable to no per-file feed).
  */
 export function createNaiveClassifier(
   options: NaiveClassifierOptions = {},
@@ -239,6 +346,7 @@ export function createNaiveClassifier(
         if (ported) {
           return {
             failureClass: "port-caused",
+            attributedFile: frame.file,
             reason: `stack frame in ported output: ${frame.file}:${frame.line}:${frame.column}`,
           };
         }
@@ -248,12 +356,14 @@ export function createNaiveClassifier(
         if (fixture) {
           return {
             failureClass: "fixture-problem",
+            attributedFile: frame.file,
             reason: `stack limited to fixture/test-harness file: ${frame.file}:${frame.line}:${frame.column}`,
           };
         }
       }
       return {
         failureClass: unknownClass,
+        attributedFile: null,
         reason: "no stack frame matched known roots; assigned configured unknown class",
       };
     },

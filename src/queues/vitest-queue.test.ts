@@ -149,6 +149,7 @@ runTestFile("vitest-queue", {
   "custom classifier implementations satisfy the same interface": () => {
     const alwaysFixture: FailureClassification = {
       failureClass: "fixture-problem",
+      attributedFile: "tests/discount.test.ts",
       reason: "policy override",
     };
     const classifier: FailureClassifier = { classify: () => alwaysFixture };

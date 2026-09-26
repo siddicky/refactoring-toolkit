@@ -1,0 +1,32 @@
+{
+  "queue": "vitest-triage",
+  "acReference": "AC-T (.omc/plans/2026-09-26-post-wave5-consensus.md)",
+  "generatedAtUtc": "2026-09-26T23:01:00.000Z",
+  "purpose": "Reproducible triage-validation manifest: every case is one adjudicated vitest failure (id, evidence path, adjudicated label, note). Agreement = (classifier label == adjudicated label)/n, per class and overall.",
+  "adjudicationProtocol": "Implementing worker labels each case from its evidence; lead double-reviews every label; disagreements resolved by joint re-read with the resolution recorded in the case's adjudication-note. Labels: port-caused | fixture-problem.",
+  "promotionThresholds": {
+    "minCases": 20,
+    "minPerClass": 5,
+    "minOverallAgreement": 0.9,
+    "minPerClassAgreement": 0.8
+  },
+  "promotionRule": "Promotion of the Jev classifier to DEFAULT requires >= 20 cases AND >= 5 per class AND >= 90% overall AND >= 80% in every class. ANY per-class shortfall (< 5 cases or < 80%) marks that class insufficient and the classifier stays NON-default.",
+  "cases": [],
+  "perClass": {
+    "port-caused": { "cases": 0, "status": "insufficient", "reason": "0 adjudicated cases (< 5 minimum)" },
+    "fixture-problem": { "cases": 0, "status": "insufficient", "reason": "0 adjudicated cases (< 5 minimum)" }
+  },
+  "overall": { "cases": 0, "agreement": null, "status": "insufficient" },
+  "shortfall": {
+    "totalAdjudicatedCases": 0,
+    "requiredMinimum": 20,
+    "evidenceSearched": [
+      "cx-5e (runId 01a0df1a-58ef-732c-ba4d-b695df85f8c6): /tmp/metrics-cx5/report.md section 'vitest' records 0 failures in all 4 iterations; AC1 battery ALL PASS",
+      "p4-7 (runId 01a0dd01-..., epoch 6): BUILD_NOTES WAVE-4 records QueueVerify 'vitest 0' at completion",
+      "/tmp/pk-creatorex and /tmp/pk-p4 integrated checkouts: stripped to .git after the waves; no failing-test output retained",
+      "BUILD_NOTES WAVE-5: all 22+ live review turns parsed; no vitest failure records exist in any surviving artifact"
+    ],
+    "reason": "Both completed live runs (cx-5e, p4-7) were fully GREEN on the vitest queue - zero real vitest failures were ever produced, so zero cases exist to adjudicate.",
+    "consequence": "The classifier stays NON-default per AC-T: the naive path-heuristic classifier (src/queues/vitest-queue.ts createNaiveClassifier) remains the deterministic default and fail-open target; the Jev route (src/typesafe/vitest-triage.ts) is used only when TYPESAFE_API_KEY is present and is never the default. Re-adjudicate from the first live run that produces real vitest failures (evidence: /tmp/metrics-<run>/report.md + durable pp-verify/vitestState records)."
+  }
+}

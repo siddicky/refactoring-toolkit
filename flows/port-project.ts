@@ -97,11 +97,17 @@ import {
   parseTscOutput,
 } from "../src/queues/tsc-queue.js";
 import {
-  buildVitestQueueState,
+  buildClassifiedVitestQueueState,
+  createNaiveClassifier,
   parseVitestOutput,
+  VITEST_RECORD_CAP,
+  type ClassifiedVitestFailure,
+  type VitestFailureRecord,
+  type VitestQueueState,
 } from "../src/queues/vitest-queue.js";
 import { portJevLive } from "./runtime-hooks.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
+import { createJevFailureClassifier } from "../src/typesafe/vitest-triage.js";
 import {
   buildRetryContextDiagnosis,
   type DiffDocument,
@@ -178,6 +184,8 @@ export interface FileRoundInput {
   childFlow?: boolean;
   /** v1.1: grouped queue errors for this file (fix rounds in child flows). */
   queueFixErrors?: ReadonlyArray<QueueVerifyError>;
+  /** v1.1: vitest failures triaged to this file (fix rounds in child flows). */
+  queueFixVitest?: ReadonlyArray<ClassifiedVitestFailure>;
 }
 
 export interface PortRunConfig {
@@ -234,6 +242,14 @@ export interface QueueVerifyState {
   lastRunAt: string;
   /** Raw tsc error records (capped) consumed by the per-file fix loop. */
   errors: QueueVerifyError[];
+  /**
+    * Durable vitest queue state: parsed failure records PLUS their Lane-B
+    * triage ({failureClass, attributedFile, reason} per record — declared in
+    * src/judgment-registry.ts as "vitest-triage"). null when vitest is not
+    * installed in the integrated checkout. Older persisted states predate
+    * this field — every consumer treats undefined like null.
+    */
+  vitestState: VitestQueueState | null;
 }
 
 /** Phase 4: one burn-down sample (dashboard renders queue-burndown/*). */
@@ -331,6 +347,8 @@ export const ppBurndown = new AttributeMap<QueueBurnDownSample>("queue-burndown"
 export interface WaveEntry {
   file: string;
   errors: ReadonlyArray<QueueVerifyError>;
+  /** Vitest failures triaged to this file (fix waves; Lane-B vitest-triage). */
+  vitest: ReadonlyArray<ClassifiedVitestFailure>;
 }
 export interface WaveDispatchRecord {
   entries: WaveEntry[];
@@ -508,6 +526,92 @@ async function recordJevUsage(ctx: Context, stepId: string, tokens: number): Pro
   const log = ppJevUsage.get(ctx, "usage") ?? [];
   log.push({ stepId, tokens, atUtc: new Date().toISOString() });
   ppJevUsage.set(ctx, "usage", log);
+}
+
+// Vitest triage (Lane-B "vitest-triage", declared in src/judgment-registry.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Queue-build triage for the parsed vitest records: Jev classifier when a
+ * live client is injected (TYPESAFE_API_KEY), naive path-heuristic default
+ * otherwise; Jev failing MID-batch fails open to the naive classifier (the
+ * whole batch re-runs naive — no half-Jev state persists). Usage tokens are
+ * surfaced through hooks.onUsage as each Jev call completes, so tokens spent
+ * before a failure are still accounted.
+ */
+export async function classifyVitestRecords(
+  records: readonly VitestFailureRecord[],
+  iteration: number,
+  jev: JudgmentClient | undefined,
+  hooks: { onUsage?: (tokens: number) => void } = {},
+): Promise<VitestQueueState> {
+  const naive = createNaiveClassifier();
+  let state: VitestQueueState;
+  if (jev === undefined) {
+    state = await buildClassifiedVitestQueueState(records, iteration, naive);
+  } else {
+    try {
+      state = await buildClassifiedVitestQueueState(
+        records,
+        iteration,
+        createJevFailureClassifier(jev, hooks.onUsage === undefined ? {} : { onUsage: hooks.onUsage }),
+      );
+    } catch {
+      // Fail-open (Lane-B rule): Jev unavailable/erroring degrades to the
+      // deterministic naive classifier — never a hard step failure.
+      state = await buildClassifiedVitestQueueState(records, iteration, naive);
+    }
+  }
+  // `total` stays the TRUE failure count (burn-down honesty); the durable
+  // per-record evidence is capped like the tsc error list.
+  return {
+    ...state,
+    failures: state.failures.slice(0, VITEST_RECORD_CAP),
+    classified: state.classified.slice(0, VITEST_RECORD_CAP),
+  };
+}
+
+/**
+ * The vitest-triage routing predicate (single authority): a record reaches a
+ * per-file fix feed iff it is port-caused AND attributed to that exact
+ * output path ("./"-normalized). Unattributable records (attributedFile
+ * null, deterministic port-caused default) match nothing per-file.
+ */
+export function vitestRoutedTo(
+  classified: readonly ClassifiedVitestFailure[] | undefined,
+  relPath: string,
+): ClassifiedVitestFailure[] {
+  const rel = relPath.replace(/^\.\//, "");
+  return (classified ?? []).filter(
+    (c) =>
+      c.classification.failureClass === "port-caused" &&
+      c.classification.attributedFile !== null &&
+      c.classification.attributedFile.replace(/^\.\//, "") === rel,
+  );
+}
+
+/**
+ * Per-file fix-round feed (consumer of the classified queue state): the tsc
+ * errors for this output path PLUS the vitest failures Lane-B triage routed
+ * here (failureClass port-caused AND attributedFile === this path, normalized
+ * "./"-free). Fixture-problem records and unattributable records (class
+ * port-caused by the deterministic default, attributedFile null) reach no
+ * per-file feed — they stay visible in the durable vitest queue state.
+ */
+export function queueFixFeedForFile(
+  verify: QueueVerifyState | undefined,
+  relPath: string,
+): { errors: QueueVerifyError[]; testFailures: Array<{ name: string; message: string }> } {
+  const rel = relPath.replace(/^\.\//, "");
+  const errors = (verify?.errors ?? []).filter((e) => e.file.replace(/^\.\//, "") === rel);
+  const testFailures = vitestRoutedTo(verify?.vitestState?.classified, rel).map((c) => ({
+    name:
+      c.record.testName === ""
+        ? c.record.testFile
+        : `${c.record.testFile} > ${c.record.testName}`,
+    message: c.record.errorMessage,
+  }));
+  return { errors, testFailures };
 }
 
 // Harness injection (worker calls configurePortHarness at startup)
@@ -1990,7 +2094,9 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
 
     // vitest queue: runs only when the integrated checkout carries its own
     // runner; otherwise the burn-down records an honest unavailable note.
-    let vitestTotal = 0;
+    // Parsed failure RECORDS (not just totals) are persisted durably with
+    // their Lane-B triage classification (vitest-triage registry entry).
+    let vitestRecords: VitestFailureRecord[] = [];
     let vitestNote: string | null = "vitest not installed in the integrated checkout";
     const vitestBin = join(itg, "node_modules", ".bin", "vitest");
     if (await pathExists(vitestBin)) {
@@ -2000,14 +2106,25 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
           timeout: 180_000,
           maxBuffer: 64 * 1024 * 1024,
         });
-        vitestTotal = buildVitestQueueState(parseVitestOutput(stdout), iteration).total;
+        vitestRecords = parseVitestOutput(stdout);
         vitestNote = null;
       } catch (err) {
         const e = err as { stdout?: string };
-        vitestTotal = buildVitestQueueState(parseVitestOutput(e.stdout ?? ""), iteration).total;
+        vitestRecords = parseVitestOutput(e.stdout ?? "");
         vitestNote = null;
       }
     }
+    const jevUsageSink: number[] = [];
+    const vitestState = await classifyVitestRecords(vitestRecords, iteration, portJevLiveClient(), {
+      onUsage: (tokens) => {
+        jevUsageSink.push(tokens);
+      },
+    });
+    const vitestJevTokens = jevUsageSink.reduce((sum, t) => sum + t, 0);
+    if (vitestJevTokens > 0) {
+      await recordJevUsage(ctx, "pp-queue-verify:vitest-triage", vitestJevTokens);
+    }
+    const vitestTotal = vitestState.total;
 
     // Burn-down upserts (dashboard renders queue-burndown/*).
     ppBurndown.set(ctx, `tsc-${iteration}`, {
@@ -2077,6 +2194,7 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
         message: e.message,
         line: e.line,
       })),
+      vitestState,
     });
     ppQueue.set(ctx, "queue", {
       ...queue,
@@ -2130,8 +2248,11 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
     const outPath = out?.outPath ?? prep?.sourceMap[fri.file]?.outPath;
     if (outPath === undefined) throw new Error(`output path missing for ${fri.file}#${fri.round}`);
     const rel = outPath.replace(/^\.\//, "");
-    const errs = (verify?.errors ?? []).filter((e) => e.file === rel);
-    if (errs.length === 0) {
+    // Fix-round feed: tsc errors + vitest failures triaged to this file
+    // (Lane-B vitest-triage; registry-declared routing by attributedFile).
+    const feed = queueFixFeedForFile(verify, rel);
+    const errs = feed.errors;
+    if (errs.length === 0 && feed.testFailures.length === 0) {
       return { output: fri, tokens: null, outcome: "skipped" as EnvelopeOutcome };
     }
     const current = await readFile(join(fri.worktreePath, outPath), "utf8");
@@ -2152,6 +2273,7 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
       currentContent: current,
       outputPath: outPath,
       errors: errs.map((e) => ({ code: e.code, message: e.message, line: e.line })),
+      testFailures: feed.testFailures,
     });
     const result = await runAgentTurn({
       def: FIXER,
@@ -2198,6 +2320,8 @@ export interface PortFileInput {
   prep: PrepArtifact;
   /** Grouped queue errors for fix rounds (round ≥ 2); empty for round 1. */
   queueFixErrors: ReadonlyArray<QueueVerifyError>;
+  /** Vitest failures triaged to this file (fix rounds; by-value records). */
+  queueFixVitest: ReadonlyArray<ClassifiedVitestFailure>;
 }
 
 const CHILD_SLOT_CAP = 2;
@@ -2208,6 +2332,7 @@ function childInputOf(
   file: string,
   round: number,
   errors: ReadonlyArray<QueueVerifyError>,
+  vitest: ReadonlyArray<ClassifiedVitestFailure>,
 ): PortFileInput {
   return {
     repoRoot: base.repoRoot,
@@ -2220,6 +2345,7 @@ function childInputOf(
     maxRounds: base.maxRounds,
     prep,
     queueFixErrors: errors,
+    queueFixVitest: vitest,
   };
 }
 
@@ -2254,11 +2380,12 @@ const WaveDispatchStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClas
       entries = fixable.map((f) => ({
         file: f.file,
         errors: (verify?.errors ?? []).filter((e) => e.file === outPathOf(f.file)),
+        vitest: vitestRoutedTo(verify?.vitestState?.classified, outPathOf(f.file)),
       }));
     } else {
       const files = queue.pending.slice(0, CHILD_SLOT_CAP);
       if (files.length === 0) throw new Error("port wave dispatched with empty pending queue");
-      entries = files.map((file) => ({ file, errors: [] }));
+      entries = files.map((file) => ({ file, errors: [], vitest: [] }));
       round = 1;
     }
     ppWave.set(ctx, "wave", {
@@ -2299,7 +2426,7 @@ const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
     const conditions = wave.entries.map((entry, i) =>
       SubFlow.run(
         PortFileFlowInstance,
-        childInputOf(input, prep, entry.file, wave.round, entry.errors),
+        childInputOf(input, prep, entry.file, wave.round, entry.errors, entry.vitest),
         { conditionId: `wave-${wave.mode}-${wave.round}-${i}` },
       ),
     );
@@ -2430,15 +2557,25 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
     // Seed the child's OWN stores with the parent-provided prep + queue
     // errors: every downstream per-file step is store-local (ctx-bound), so
     // the child pipeline reads its copies exactly like the sequential path.
+    // The vitest triage state rides along by value: the child's fix feed
+    // (queueFixFeedForFile) re-derives the SAME routing the parent decided.
+    const childVitest = [...input.queueFixVitest];
     ppPrep.set(ctx, "prep", input.prep);
     ppVerify.set(ctx, "verify", {
       iteration: input.round,
       fixQueue: [],
       tscTotal: input.queueFixErrors.length,
-      vitestTotal: 0,
+      vitestTotal: childVitest.length,
       vitestNote: "child flow (errors by value)",
       lastRunAt: new Date().toISOString(),
       errors: [...input.queueFixErrors].slice(0, 80).map((e) => ({ ...e })),
+      vitestState: {
+        kind: "vitest-queue",
+        iteration: input.round,
+        total: childVitest.length,
+        failures: childVitest.map((c) => c.record),
+        classified: childVitest,
+      },
     });
     const pool = new WorktreePool(
       input.repoRoot,
@@ -2461,6 +2598,7 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
           branch: existing.branch,
           childFlow: true,
           queueFixErrors: input.queueFixErrors,
+          queueFixVitest: input.queueFixVitest,
         },
         tokens: null,
       };
@@ -2483,6 +2621,7 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
         branch: acquired.lease.branch,
         childFlow: true,
         queueFixErrors: input.queueFixErrors,
+        queueFixVitest: input.queueFixVitest,
       },
       tokens: null,
     };
@@ -2516,8 +2655,11 @@ const ChildQueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<F
     const outPath = out?.outPath ?? prep?.sourceMap[fri.file]?.outPath;
     if (outPath === undefined) throw new Error(`output path missing for ${fri.file}#${fri.round}`);
     const rel = outPath.replace(/^\.\//, "");
-    const errs = (verify?.errors ?? []).filter((e) => e.file === rel);
-    if (errs.length === 0) {
+    // Fix-round feed: tsc errors + vitest failures triaged to this file
+    // (Lane-B vitest-triage; registry-declared routing by attributedFile).
+    const feed = queueFixFeedForFile(verify, rel);
+    const errs = feed.errors;
+    if (errs.length === 0 && feed.testFailures.length === 0) {
       return { output: fri, tokens: null, outcome: "skipped" as EnvelopeOutcome };
     }
     const current = await readFile(join(fri.worktreePath, outPath), "utf8");
@@ -2535,6 +2677,7 @@ const ChildQueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<F
       currentContent: current,
       outputPath: outPath,
       errors: errs.map((e) => ({ code: e.code, message: e.message, line: e.line })),
+      testFailures: feed.testFailures,
     });
     const result = await runAgentTurn({
       def: FIXER,
