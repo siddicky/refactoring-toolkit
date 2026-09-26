@@ -417,6 +417,44 @@ client` post-restart.
   DELIVERED; determinism re-verified by worker-1c (generator re-run digest
   `b692f358…` == FIXTURES.md recorded digest; tree unchanged).
 
+## Infra finding (beyond this project): glm-5.3 "default"-variant degenerate turns
+
+Recorded 2026-09-26 (worker-1c) — provider-side failure mode hit during Phase 4
+re-dispatches; valuable for anyone building on opencode + zai-coding-plan:
+
+- **Shape**: reviewer-shaped turns (large prompt: agent-definition + tool-deny
+  policy + unified diff + "emit exactly one JSON object") on model
+  `glm-5.3` variant `default` (via the `plan` agent) return a COMPLETED
+  assistant message with 0–4 output tokens, NO text part, and ~32k reasoning
+  tokens. The turn is "completed" with usage, so the seam's poll loop is
+  skipped (fast path) and the verdict JSON parse fails downstream.
+- **Cache amplification**: consecutive retry attempts on the identical prompt
+  replayed IDENTICAL degenerate turns (reasoning token count 31,996 twice,
+  then 3 identical failures on the same step) — the provider response-caches
+  the prefix. Fix `3cab591` appends a per-attempt retry note (cache-bust):
+  necessary but NOT sufficient — p4-6 prep0/prep1/prep2 review-A retries
+  succeeded with the note (74–80k-token real verdicts, visible in flow
+  history as non-degenerate attempt-2 envelopes), yet p4-6 prep2 review-B
+  still failed 3/3 with distinct prompts.
+- **Window**: 05:00–08:05 UTC 2026-09-26, ~50% of plan-agent review turns
+  degenerate (vs 100% healthy 02:30–04:41 on the same agent/model — p3-4 and
+  p4-1 completed 14 review turns). Not deterministic per prompt; the default
+  variant was effectively unusable for heavy-reasoning turns during the window.
+- **What did NOT work**: Momus (`gpt-5.6-terra xhigh`) returns 31-token
+  persona prose, not the verdict contract (3/3 in-flow failures, p4-5);
+  `plan` on `glm-5.3-flash` and `Sisyphus-Junior` die as native-tool turns
+  (tool-denied → empty reply) when probed WITHOUT the flow's exact turn shape
+  (agent definition + toolPolicyBlock + tools-off) — probe validity note:
+  agent probes MUST replicate `composeAgentTurn(def, turn)` + tools-off or
+  they measure a different failure mode.
+- **What worked**: the IMPLEMENTER's own agent (`Sisyphus - ultraworker`,
+  `glm-5.3-flash` variant `max`) serving the reviewer turn with the exact
+  flow shape — parses the verdict contract first-try (2 findings, 235 output
+  tokens, tools-off). p4-7 runs with `OPENCODE_REVIEWER_AGENT="Sisyphus -
+  ultraworker"` (env-only). Reviewer independence is preserved by the harness
+  (per-turn server-side tools all-off + reviewer definition prefix), not by
+  the vendor agent persona.
+
 ## Phases 3/4 continuation (worker-1c)
 
 ### Jev prompt fix (spot-check re-measured, one prompt-iteration budget)
