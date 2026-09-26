@@ -80,11 +80,19 @@ export interface PromptOptions {
 }
 
 /** How long prompt() polls for a completed assistant reply (0(g) provenance). */
-const PROMPT_WAIT_MS = Number.parseInt(
+const PROMPT_WAIT_MS = parseWaitMs(
   (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
-    ?.OPENCODE_PROMPT_WAIT_MS ?? "900000",
-  10,
+    ?.OPENCODE_PROMPT_WAIT_MS,
 );
+
+/** m4: invalid values (NaN, ≤0, absurdly large) fall back to 15 minutes. */
+function parseWaitMs(raw: string | undefined): number {
+  const parsed = Number.parseInt(raw ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 24 * 60 * 60_000) {
+    return 900_000;
+  }
+  return parsed;
+}
 
 /**
  * Typed failure for one prompt turn. `retryable` failures (upstream aborts,
@@ -271,10 +279,12 @@ export class OpencodeHarness {
     return undefined;
   }
 
-  /** Aborts a session. Returns true when the server accepted the abort. */
+  /** Aborts a session. Returns true only when the server accepted without error. */
   async abort(sessionId: string): Promise<boolean> {
     const res = await this.#client.session.abort({ path: { id: sessionId } });
-    return unwrap(res) !== undefined || res.error === undefined;
+    // m2: the SDK resolves with {data?, error?}; acceptance = no error field.
+    const r = res as { error?: unknown } | undefined;
+    return r !== undefined && r !== null && r.error === undefined;
   }
 
   /**

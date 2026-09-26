@@ -142,7 +142,7 @@ export function renderDiffForReview(input: {
     `DIFF_ID: ${input.diffId}`,
     `FILE: ${input.file}`,
     `ROUND: ${input.round}`,
-    "Line numbers below are 1-based positions in this block (the first line of the diff body is line 1).",
+    `Evidence line numbers are 1-based positions IN THIS BLOCK: lines 1-${DIFF_HEADER_LINES} are this header and the diff body starts at line ${DIFF_HEADER_LINES + 1}.`,
     "--- BEGIN DIFF ---",
   ];
   const body = input.diffText.replace(/\n$/, "").split("\n");

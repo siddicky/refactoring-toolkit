@@ -37,6 +37,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
+  envelopeStartMarker,
   envelopeStepClass,
   persistenceAttributes,
   type EnvelopeOutcome,
@@ -52,6 +53,9 @@ import {
   commitLeaseChanges,
   findCommitByOpId,
   integratedContentExists,
+  isWorktreeClean,
+  keyedCommitIntegrated,
+  makeCommitReachable,
   mergeLeaseIntoIntegration,
   operationId,
   WorktreePool,
@@ -136,7 +140,14 @@ export interface PrepArtifact {
 export interface PortQueueState {
   pending: string[];
   current: { file: string; round: number; epoch: number } | null;
-  done: Array<{ file: string; round: number; commitSha: string | null }>;
+  done: Array<{
+    file: string;
+    round: number;
+    /** Commit sha (m1: distinct from the tree-hash evidence below). */
+    commitSha: string | null;
+    /** Tree hash recorded in the completion marker (content evidence). */
+    treeHash: string | null;
+  }>;
   blocked: Array<{ file: string; round: number; reason: string }>;
 }
 
@@ -469,6 +480,12 @@ const DispatchStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
   stepId: "pp-dispatch",
   role: "record",
   stepOptions: { executeLoadAttributeMaps: [ppQueue, ppConfig] },
+  // Best-effort identity: the claim happens inside inner, so the start
+  // event reports the in-flight file (resume) or flow-level (fresh claim).
+  identityOf: (ctx) => {
+    const q = ppQueue.get(ctx, "queue");
+    return q?.current ? markerKeyOf(q.current.file, q.current.round) : "";
+  },
   inner: async (ctx, input) => {
     const queue = ppQueue.get(ctx, "queue");
     const config = ppConfig.get(ctx, "config");
@@ -573,6 +590,7 @@ const FenceStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
   stepType: "PpFence",
   stepId: "pp-fence",
   role: "record",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   inner: async (ctx, fri) => {
     const harness = requireHarness();
     const label = fenceLabel(fri.file, fri.round, fri.epoch);
@@ -588,13 +606,25 @@ const FenceStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
     });
     return { output: fri, tokens: null };
   },
-  route: (_ctx, _input, fri) => goTo(ImplementStep, fri),
+  route: (_ctx, _input, fri) => goTo(ImplementStart, fri),
+});
+
+// M4 (0(g)): durable PRE-start markers for model-calling steps. The
+// envelope's own start event is staged with its step's decision, so a kill
+// inside the step leaves no envelope; this marker's decision lands first.
+const ImplementStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<FileRoundInput>({
+  stepType: "PpImplementStart",
+  targetStepId: "pp-implement",
+  role: "agent",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  route: (fri) => goTo(ImplementStep, fri),
 });
 
 const ImplementStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoundInput, FileRoundInput>({
   stepType: "PpImplement",
   stepId: "pp-implement",
   role: "agent",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   stepOptions: {
     ...MODEL_STEP_OPTIONS,
     executeLoadAttributeMaps: [sessionFenceMap, ppPrep, ppQueue],
@@ -638,6 +668,7 @@ const CaptureDiffStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fil
   stepType: "PpCaptureDiff",
   stepId: "pp-capture-diff",
   role: "diff-capture",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   inner: async (ctx, fri) => {
     const raw = await gitDiffStaged(fri.worktreePath);
     const diffId = `diff-${safe(fri.file)}-r${fri.round}`;
@@ -655,13 +686,22 @@ const CaptureDiffStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fil
     });
     return { output: fri, tokens: null };
   },
-  route: (_ctx, _input, fri) => goTo(ReviewAStep, fri),
+  route: (_ctx, _input, fri) => goTo(ReviewAStart, fri),
+});
+
+const ReviewAStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<FileRoundInput>({
+  stepType: "PpReviewAStart",
+  targetStepId: "pp-review-a",
+  role: "review",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  route: (fri) => goTo(ReviewAStep, fri),
 });
 
 const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoundInput, FileRoundInput>({
   stepType: "PpReviewA",
   stepId: "pp-review-a",
   role: "review",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppDiff] },
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
@@ -675,13 +715,22 @@ const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
     ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-A"), tuple);
     return { output: fri, tokens };
   },
-  route: (_ctx, _input, fri) => goTo(ReviewBStep, fri),
+  route: (_ctx, _input, fri) => goTo(ReviewBStart, fri),
+});
+
+const ReviewBStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<FileRoundInput>({
+  stepType: "PpReviewBStart",
+  targetStepId: "pp-review-b",
+  role: "review",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  route: (fri) => goTo(ReviewBStep, fri),
 });
 
 const ReviewBStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoundInput, FileRoundInput>({
   stepType: "PpReviewB",
   stepId: "pp-review-b",
   role: "review",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppDiff] },
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
@@ -702,6 +751,7 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
   stepType: "PpVerdictCheck",
   stepId: "pp-verdict-check",
   role: "verdict-check",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   stepOptions: { executeLoadAttributeMaps: [ppVerdict, ppDiff] },
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
@@ -755,6 +805,7 @@ const PrioritizeStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<File
   stepType: "PpPrioritize",
   stepId: "pp-prioritize",
   role: "prioritize",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   stepOptions: { executeLoadAttributeMaps: [ppKept] },
   inner: async (ctx, fri) => {
     const kept = ppKept.get(ctx, keptKeyOf(fri.file, fri.round));
@@ -765,13 +816,22 @@ const PrioritizeStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<File
     });
     return { output: fri, tokens: null };
   },
-  route: (_ctx, _input, fri) => goTo(FixerStep, fri),
+  route: (_ctx, _input, fri) => goTo(FixerStart, fri),
+});
+
+const FixerStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<FileRoundInput>({
+  stepType: "PpFixerStart",
+  targetStepId: "pp-fixer",
+  role: "agent",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  route: (fri) => goTo(FixerStep, fri),
 });
 
 const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoundInput, FileRoundInput>({
   stepType: "PpFixer",
   stepId: "pp-fixer",
   role: "agent",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   stepOptions: {
     ...MODEL_STEP_OPTIONS,
     executeLoadAttributeMaps: [ppKept, ppOut],
@@ -823,6 +883,7 @@ const CommitStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoun
   stepType: "PpCommit",
   stepId: "pp-commit",
   role: "commit",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   inner: async (ctx, fri) => {
     const opId = operationId(fri.file, fri.round);
     const key = markerKeyOf(fri.file, fri.round);
@@ -830,10 +891,20 @@ const CommitStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoun
     // Sole-committer dedup: keyed lookup scans ALL branches first.
     const keyed = await findCommitByOpId(fri.repoRoot, opId);
     if (keyed !== undefined) {
+      // C1: the keyed commit may sit on a DIFFERENT branch than this round's
+      // lease (quarantined lease / epoch bump). Making it reachable from THIS
+      // branch is what lets the integration step actually ship the round —
+      // without it, the lease merges a branch that lacks the commit and the
+      // completed round silently never lands in the output project.
+      const replayDivergent = !(await isWorktreeClean(fri.worktreePath));
+      const reach = await makeCommitReachable(fri.worktreePath, keyed);
       ppMarker.set(ctx, key, {
         round: fri.round,
         disposition: `committed:${opId}`,
         content_hash: keyed.contentHash ?? keyed.sha,
+        sha: keyed.sha,
+        keyed_branch: keyed.branch,
+        replay_divergent: replayDivergent && reach !== "already",
       });
       return { output: fri, tokens: null, outcome: "skipped" as EnvelopeOutcome };
     }
@@ -847,6 +918,7 @@ const CommitStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoun
       round: fri.round,
       disposition: res.disposition,
       content_hash: res.contentHash,
+      sha: res.sha,
     });
     return {
       output: fri,
@@ -861,7 +933,8 @@ const IntegrateStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileR
   stepType: "PpIntegrate",
   stepId: "pp-integrate",
   role: "integration",
-  stepOptions: { executeLoadAttributeMaps: [ppMarker] },
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  stepOptions: { executeLoadAttributeMaps: [ppMarker, ppOut, ppPrep] },
   inner: async (ctx, fri) => {
     const result = await mergeLeaseIntoIntegration(
       fri.repoRoot,
@@ -869,12 +942,32 @@ const IntegrateStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileR
       fri.branch,
       "integration",
     );
-    // No-op rounds presuppose prior committed content in the output project.
+
+    // C1 guard: when a keyed commit exists for this round it MUST be
+    // reachable from integration HEAD — a no-op merge of a branch lacking
+    // the commit would mark the round done while dropping its content.
+    const opId = operationId(fri.file, fri.round);
+    const keyed = await findCommitByOpId(fri.repoRoot, opId);
+    if (keyed !== undefined && !(await keyedCommitIntegrated(fri.integrationWorktreePath, keyed))) {
+      throw new Error(
+        `C1: keyed commit ${keyed.sha} (${opId}) is NOT reachable from integration — refusing to mark the round integrated`,
+      );
+    }
+
+    // M1: no-op rounds presuppose the ported OUTPUT file (outPath from the
+    // prep map / pp-out), never the PHP source path this round ported FROM.
     const marker = ppMarker.get(ctx, markerKeyOf(fri.file, fri.round));
     if (marker !== undefined && marker.disposition === "no-op-empty-diff") {
-      const exists = await integratedContentExists(fri.integrationWorktreePath, fri.file);
-      if (!exists) {
-        throw new Error(`no-op round for ${fri.file} but integrated output lacks the file`);
+      const out = ppOut.get(ctx, outKeyOf(fri.file, fri.round));
+      const prep = ppPrep.get(ctx, "prep");
+      const outPath = out?.outPath ?? prep?.sourceMap[fri.file]?.outPath;
+      if (
+        outPath === undefined ||
+        !(await integratedContentExists(fri.integrationWorktreePath, outPath))
+      ) {
+        throw new Error(
+          `no-op round for ${fri.file} (output ${outPath ?? "unknown"}) but integrated output lacks the file`,
+        );
       }
     }
     void result;
@@ -887,6 +980,7 @@ const ReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
   stepType: "PpRelease",
   stepId: "pp-release",
   role: "record",
+  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   stepOptions: { executeLoadAttributeMaps: [ppQueue, ppMarker] },
   inner: async (ctx, fri) => {
     const queue = ppQueue.get(ctx, "queue");
@@ -899,7 +993,12 @@ const ReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
       current: null,
       done: [
         ...queue.done,
-        { file: fri.file, round: fri.round, commitSha: marker?.content_hash ?? null },
+        {
+          file: fri.file,
+          round: fri.round,
+          commitSha: marker?.sha ?? null,
+          treeHash: marker?.content_hash ?? null,
+        },
       ],
     });
     return { output: baseInput(fri), tokens: null };
@@ -943,12 +1042,16 @@ export class PortProjectFlow implements Flow<PortRunInput> {
   readonly dispatch = new DispatchStep();
   readonly lease = new LeaseStep();
   readonly fence = new FenceStep();
+  readonly implementStart = new ImplementStart();
   readonly implement = new ImplementStep();
   readonly captureDiff = new CaptureDiffStep();
+  readonly reviewAStart = new ReviewAStart();
   readonly reviewA = new ReviewAStep();
+  readonly reviewBStart = new ReviewBStart();
   readonly reviewB = new ReviewBStep();
   readonly verdictCheck = new VerdictCheckStep();
   readonly prioritize = new PrioritizeStep();
+  readonly fixerStart = new FixerStart();
   readonly fixer = new FixerStep();
   readonly commit = new CommitStep();
   readonly integrate = new IntegrateStep();
@@ -964,12 +1067,16 @@ export class PortProjectFlow implements Flow<PortRunInput> {
       this.dispatch,
       this.lease,
       this.fence,
+      this.implementStart,
       this.implement,
       this.captureDiff,
+      this.reviewAStart,
       this.reviewA,
+      this.reviewBStart,
       this.reviewB,
       this.verdictCheck,
       this.prioritize,
+      this.fixerStart,
       this.fixer,
       this.commit,
       this.integrate,

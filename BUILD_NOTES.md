@@ -206,3 +206,101 @@ Completed 2026-09-25 by worker-1b. Seed: **2 files** per FIXTURES.md guidance �
 
 - `bun run typecheck` → clean (0 errors).
 - `bun test` → 142 pass / 0 fail (17 files; includes worker-5 dashboard suites).
+
+---
+
+# VERIFY-FIX — team-verify wave 1 (fix_loop 1/3)
+
+Committed 2026-09-25. Verifier APPROVED the gate; code-reviewer's 1 CRITICAL +
+6 MAJOR + folds addressed. Commit: `verify-fix` (git log).
+
+## MUST fixes
+
+- **[C1 · CRITICAL] Cross-branch dedup loses the committed round — FIXED.**
+  New `makeCommitReachable(worktreePath, keyed)` (src/git/worktree.ts): on a
+  dedup hit whose keyed commit lives on a DIFFERENT branch (quarantine /
+  epoch-bump), the lease branch is fast-forwarded (or explicitly merged) to
+  the keyed commit so the round's integration step actually ships it;
+  divergent replay content is discarded first (keyed commit authoritative).
+  Divergence + keyed branch recorded as marker evidence
+  (`CompletionMarker.keyed_branch` / `.replay_divergent` / `.sha`).
+  New `keyedCommitIntegrated()` + IntegrateStep guard: when a keyed commit
+  exists, `merge-base --is-ancestor keyed.sha integration` MUST hold or the
+  step throws (no more silent `alreadyIntegrated` drops).
+  Regression tests (tests/verify-fix.test.ts) REPRODUCE the defect geometry:
+  merging the spare branch without the fix leaves integration WITHOUT the
+  file; with the fix the content lands and the ancestor check passes.
+  Marker payload extended with optional evidence fields (plan payload fields
+  unchanged).
+- **[M1] no-op assertion now checks the round's OUTPUT path** — resolved from
+  ppOut with prep source-map fallback (`outPath`), never the PHP source path.
+- **[M2] envelope events carry per-target identity** — new
+  `identityOf(context, input)` on EnvelopeSpec +
+  `envelopeEventKey(stepId, attempt, identity)`; all per-file steps use
+  sanitized `file#round`; dispatch reports the in-flight file (its claim
+  happens in-inner, so fresh claims key flow-level — documented). Event shape
+  gained `identity` (also live-verified in flow history:
+  `pp-implement#1@src__Money.php#1`).
+- **[M4] envelope-START durability (0(g))** — new `envelopeStartMarker`
+  record mini-steps precede ALL model-calling steps (implement, review-A,
+  review-B, fixer): attempt 0, outcome `interrupted`, `ended_at` null — a
+  kill inside a model turn now leaves a durable start record. Markers use
+  role-record/attempt-0 semantics so Phase 5's AC2 token totals can exclude
+  them while joining to real envelopes by (stepId, identity). Live-verified
+  (smoke-3 history shows `pp-implement#0@…#start` markers).
+- **[M5] reviewer numbering header** — renderDiffForReview now derives the
+  true body-start line from DIFF_HEADER_LINES
+  ("the diff body starts at line 6"), matching resolveEvidence; regression
+  test proves an early finding resolves (pre-fix it silently dropped).
+- **[F1] step-factory completeness lint** — tree-walk: `getStepType()` /
+  `implements Step` allowed ONLY in flows/steps/envelope.ts.
+- **[F2]** `toolOverridesAllOff()` asserted: entire plugin surface disabled.
+
+## BEFORE-PHASE-6 fixes (done now)
+
+- **[M3] ordered recovery wired for the port flow**: `run-demo.ts
+  recover-port --dir --epoch N --files …` — epoch bump → abort stale writers
+  (enumeration fallback over the surviving opencode server) → durable
+  lease/reconcile at git level (`git worktree list`, keyed-commit-first
+  reconcile + applyReconcile; poisoned = hard failure) → prints the exact
+  re-dispatch command at the bumped epoch. The flow's own LeaseStep reclaims
+  stale-epoch records in the DURABLE pp-lease store on next claim.
+- **[M6] lease branches base on the integration tip** when it exists
+  (`acquire(..., baseRef?)`, default resolution integration→HEAD), so
+  same-path re-rounds are pure fast-forwards; divergent leases fall back to
+  --no-ff (documented as the only sanctioned merge-commit shape). Regression
+  test asserts round-2 lease HEAD == integration tip and `fastForward: true`.
+- Fence-in-same-step note (per reviewer): the probe-flow fence writes inside
+  the same durable step as its decision — accepted there because the
+  enumeration fallback covers the gap; the port flow keeps the dedicated
+  pre-prompt FenceStep. Reviewer-turn kill added to the Phase 3 smoke plan.
+
+## Folds
+
+m1 `commitSha` (commit) vs `treeHash` (content) split in queue done-entries +
+marker `.sha`; reconcile backfill uses `keyed.round` (parsed, no more −1).
+m2 `abort()` returns true only on error-free acceptance. m3
+`sanitizePathSegment` appends a hash suffix whenever sanitizing changed the
+input (no collisions). m4 `PROMPT_WAIT_MS` validated (NaN/≤0/>24h → 15 min).
+m5 gitSelftest integration check asserts `integrated === true` (was a
+tautology). m6 `.gitignore` covers `kill-events*.jsonl`. chaosKill accepts
+`--flow-run-id` (sidecar self-anchors to the dex run). m7 recordStep
+envelope-write deduplicated into `writeRecordEvent`. pidAlive treats EPERM as
+alive. DEFERRED per handoff: round-increment wiring (Phase 4), prep role
+cosmetic.
+
+## Live smoke (required: C1 touches the commit/integration path)
+
+Single-file smoke `smoke-3` (Money.php, runId `01a0daeb-…`, project
+`/tmp/pk-smoke`): full pipeline COMPLETED in one pass — implement → reviewA →
+reviewB → fixer → commit → integrate → release → dispatch(exhausted) → final;
+exactly 1 op-ID commit (`c5b91ea`); integration carries the port; envelope
+history shows identity-keyed events + attempt-0 start markers; the C1 guard
+did not false-fire. Note: the first smoke attempt sat queued while no worker
+was running (my process-management miss, not a code defect) — starting the
+worker let it proceed; retry/backoff behaved as designed.
+
+## Final verification
+
+- `bun run typecheck` → clean.
+- `bun test` → 150 pass / 0 fail (18 files; includes 8 new verify-fix tests).

@@ -23,7 +23,12 @@ dist/
 
 # Chaos-kill evidence sidecars written at run time
 kill-events*.json
+kill-events*.jsonl
 
 # Logs and OS noise
 *.log
 .DS_Store
+
+# OMC/ZCode local tool state
+.omo/
+.zcodeignore

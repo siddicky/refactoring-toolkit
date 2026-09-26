@@ -20,6 +20,7 @@ const keyed = (opId: string): KeyedCommit => ({
   sha: "abc123",
   contentHash: "tree-hash",
   branch: `lease/src__a.php/1`,
+  round: 1,
 });
 
 describe("reconcile — full decision table (plan §State ownership)", () => {

@@ -29,6 +29,8 @@ export interface KillEventIntent {
   target_pids: number[];
   signal: "SIGKILL";
   reason: string;
+  /** Dex flow run id, when known — the sidecar self-anchors to the run. */
+  flow_run_id?: string;
 }
 
 export interface KillEventCompletion {
@@ -38,6 +40,8 @@ export interface KillEventCompletion {
   monotonic_ms: number;
   killed_pids: number[];
   notes: string;
+  /** Dex flow run id, when known — the sidecar self-anchors to the run. */
+  flow_run_id?: string;
 }
 
 export type KillEvent = KillEventIntent | KillEventCompletion;
@@ -50,7 +54,9 @@ function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err) {
+    // EPERM: the process exists but is owned by another user — alive.
+    if ((err as NodeJS.ErrnoException).code === "EPERM") return true;
     return false;
   }
 }
@@ -72,13 +78,15 @@ export interface ChaosKillOptions {
   runId: string;
   eventsPath: string;
   waitMs: number;
+  /** Dex flow run id (verifier F3-analog): written into both sidecar records. */
+  flowRunId?: string;
 }
 
 export async function chaosKill(options: ChaosKillOptions): Promise<{
   killed: number[];
   stillAlive: number[];
 }> {
-  const { pids, reason, runId, eventsPath, waitMs } = options;
+  const { pids, reason, runId, eventsPath, waitMs, flowRunId } = options;
 
   // 1. INTENT BEFORE KILL — fsynced before any signal is sent.
   appendKillEvent(eventsPath, {
@@ -89,6 +97,7 @@ export async function chaosKill(options: ChaosKillOptions): Promise<{
     target_pids: pids,
     signal: "SIGKILL",
     reason,
+    ...(flowRunId !== undefined ? { flow_run_id: flowRunId } : {}),
   });
 
   // 2. KILL
@@ -122,6 +131,7 @@ export async function chaosKill(options: ChaosKillOptions): Promise<{
       stillAlive.length === 0
         ? `all targets exited after SIGKILL (reason=${reason})`
         : `WARNING: ${stillAlive.length} target(s) survived SIGKILL: ${stillAlive.join(",")}`,
+    ...(flowRunId !== undefined ? { flow_run_id: flowRunId } : {}),
   });
 
   return { killed, stillAlive };
@@ -151,12 +161,14 @@ async function main(): Promise<number> {
     console.error("no valid pids given");
     return 2;
   }
+  const flowRunId = argValue(argv, "--flow-run-id");
   const options: ChaosKillOptions = {
     pids,
     reason: argValue(argv, "--reason") ?? "unspecified",
     runId: argValue(argv, "--run-id") ?? `kill-${Date.now()}`,
     eventsPath: argValue(argv, "--events") ?? "kill-events.json",
     waitMs: Number.parseInt(argValue(argv, "--wait-ms") ?? "5000", 10),
+    ...(flowRunId !== undefined ? { flowRunId } : {}),
   };
   const result = await chaosKill(options);
   console.log(

@@ -76,6 +76,20 @@ export interface EnvelopeEvent {
   /** Total tokens for model-calling roles; null = not applicable. */
   tokens: number | null;
   wall_clock_ms: number | null;
+  /** Per-target identity (sanitized file#round) appended to the event key. */
+  identity: string | null;
+}
+
+/**
+ * Event key for one envelope execution. M2: multi-target runs (one flow,
+ * many file-rounds) collide on `stepId#attempt` alone — the identity
+ * (sanitized file#round for per-file steps) keeps every execution's event
+ * distinct. AttributeMap keys prohibit `/`; callers sanitize.
+ */
+export function envelopeEventKey(stepId: string, attempt: number, identity?: string): string {
+  return identity !== undefined && identity !== ""
+    ? `${stepId}#${attempt}@${identity}`
+    : `${stepId}#${attempt}`;
 }
 
 /** AttributeMap instance; flows must include it via persistenceAttributes(). */
@@ -145,6 +159,12 @@ export interface EnvelopeSpec<I, O> {
    * flows; the final step of a flow uses the default.
    */
   route?: (context: Context, input: I, output: O) => StepDecision;
+  /**
+   * M2: per-target identity for the event key (e.g. sanitized `file#round`
+   * for per-file steps). Flow-level steps omit it. Called for the start
+   * event (before inner) and the completion event with the same value.
+   */
+  identityOf?: (context: Context, input: I) => string;
 }
 
 /**
@@ -189,7 +209,8 @@ async function executeEnvelope<I, O>(
 ): Promise<StepDecision> {
   const startedMs = Date.now();
   const startedAt = new Date(startedMs).toISOString();
-  const eventKey = `${spec.stepId}#${context.attempt}`;
+  const identity = spec.identityOf?.(context, input) ?? null;
+  const eventKey = envelopeEventKey(spec.stepId, context.attempt, identity ?? undefined);
   const attempt = context.attempt;
 
   const base: EnvelopeEvent = {
@@ -203,6 +224,7 @@ async function executeEnvelope<I, O>(
     outcome: "interrupted",
     tokens: null,
     wall_clock_ms: null,
+    identity,
   };
   // Staged with the decision; see the 0(g) note in the header.
   envelopeEvents.set(context, eventKey, base);
@@ -290,6 +312,37 @@ export function envelopeStepClass<I, O>(
 // recordStep — durable mini-step (role `record`, pre-decided 0(g) fallback)
 // ---------------------------------------------------------------------------
 
+/** Shared writer for record-role mini-steps (fold m7: single code path). */
+function writeRecordEvent(
+  context: Context,
+  stepId: string,
+  attempt: number,
+  identity?: string,
+): void {
+  const startedAt = new Date().toISOString();
+  envelopeEvents.set(context, envelopeEventKey(stepId, attempt, identity), {
+    stepId,
+    role: "record",
+    file: null,
+    round: null,
+    attempt,
+    started_at: startedAt,
+    ended_at: startedAt,
+    outcome: "completed",
+    tokens: null,
+    wall_clock_ms: 0,
+    identity: identity ?? null,
+  });
+}
+
+function writeFence(context: Context, fence: Omit<SessionFence, "persistedAtUtc"> | undefined): void {
+  if (fence === undefined) return;
+  sessionFenceMap.set(context, fence.label, {
+    ...fence,
+    persistedAtUtc: new Date().toISOString(),
+  });
+}
+
 /**
  * A minimal durable step that only persists a record envelope with the given
  * payload events. Used to make session-ID (fence) and envelope-start writes
@@ -301,6 +354,8 @@ export function recordStep(spec: {
   stepId: string;
   /** Session fence to persist before a dependent agent step runs. */
   fence?: Omit<SessionFence, "persistedAtUtc"> | undefined;
+  /** Optional per-target identity for the event key. */
+  identity?: string | undefined;
   /** Optional routing decision; defaults to gracefulComplete. */
   route?: (context: Context) => StepDecision;
 }): Step<void> {
@@ -312,25 +367,8 @@ export function recordStep(spec: {
       return Wait.skipImmediately();
     },
     execute(context: Context): StepDecision {
-      const startedAt = new Date().toISOString();
-      if (spec.fence !== undefined) {
-        sessionFenceMap.set(context, spec.fence.label, {
-          ...spec.fence,
-          persistedAtUtc: startedAt,
-        });
-      }
-      envelopeEvents.set(context, `${spec.stepId}#${context.attempt}`, {
-        stepId: spec.stepId,
-        role: "record",
-        file: null,
-        round: null,
-        attempt: context.attempt,
-        started_at: startedAt,
-        ended_at: startedAt,
-        outcome: "completed",
-        tokens: null,
-        wall_clock_ms: 0,
-      });
+      writeFence(context, spec.fence);
+      writeRecordEvent(context, spec.stepId, context.attempt, spec.identity);
       if (spec.route !== undefined) return spec.route(context);
       return gracefulComplete(undefined);
     },
@@ -342,6 +380,7 @@ export function recordStepClass(spec: {
   stepType: string;
   stepId: string;
   fence?: Omit<SessionFence, "persistedAtUtc"> | undefined;
+  identity?: string | undefined;
   route?: (context: Context) => StepDecision;
 }): StepClass<void> {
   return class RecordStepClass implements Step<void> {
@@ -352,29 +391,67 @@ export function recordStepClass(spec: {
       return Wait.skipImmediately();
     }
     execute(context: Context): StepDecision {
-      const startedAt = new Date().toISOString();
-      if (spec.fence !== undefined) {
-        sessionFenceMap.set(context, spec.fence.label, {
-          ...spec.fence,
-          persistedAtUtc: startedAt,
-        });
-      }
-      envelopeEvents.set(context, `${spec.stepId}#${context.attempt}`, {
-        stepId: spec.stepId,
-        role: "record",
-        file: null,
-        round: null,
-        attempt: context.attempt,
-        started_at: startedAt,
-        ended_at: startedAt,
-        outcome: "completed",
-        tokens: null,
-        wall_clock_ms: 0,
-      });
+      writeFence(context, spec.fence);
+      writeRecordEvent(context, spec.stepId, context.attempt, spec.identity);
       if (spec.route !== undefined) return spec.route(context);
       return gracefulComplete(undefined);
     }
   };
+}
+
+// ---------------------------------------------------------------------------
+// envelopeStartMarker — durable PRE-start record for model-calling steps (M4)
+// ---------------------------------------------------------------------------
+
+/**
+ * A record-role mini-step inserted BEFORE a model-calling step that persists
+ * a durable "step started" marker (attempt 0, outcome `interrupted`,
+ * `ended_at` null). 0(g) finding: the envelope's own start event is staged
+ * with the step's decision, so a SIGKILL inside the step leaves NO envelope —
+ * an AC1 evidence hole. The marker's decision lands INDEPENDENTLY, so every
+ * model-calling execution is provable even when killed mid-turn.
+ *
+ * Markers use attempt 0 and role `record` semantics so Phase 5's AC2
+ * provenance pass can exclude them from token totals while still joining
+ * them to the target step's real envelopes by (stepId, identity).
+ */
+export interface StartMarkerSpec<I> {
+  /** The mini-step's own durable Step type. */
+  stepType: string;
+  /** stepId of the model-calling step this marker precedes. */
+  targetStepId: string;
+  /** The target step's role (recorded on the marker for joining). */
+  role: EnvelopeRole;
+  identityOf?: (context: Context, input: I) => string;
+  route: (input: I) => StepDecision;
+}
+
+export function envelopeStartMarker<I>(spec: StartMarkerSpec<I>): EnvelopeStepClass<I> {
+  return envelopeStepClass<I, I>({
+    stepType: spec.stepType,
+    stepId: `${spec.targetStepId}:start`,
+    role: "record",
+    ...(spec.identityOf !== undefined ? { identityOf: spec.identityOf } : {}),
+    inner: async (ctx, input) => {
+      const identity = spec.identityOf?.(ctx, input) ?? null;
+      const startedAt = new Date().toISOString();
+      envelopeEvents.set(ctx, `${envelopeEventKey(spec.targetStepId, 0, identity ?? undefined)}@start`, {
+        stepId: spec.targetStepId,
+        role: spec.role,
+        file: null,
+        round: null,
+        attempt: 0,
+        started_at: startedAt,
+        ended_at: null,
+        outcome: "interrupted",
+        tokens: null,
+        wall_clock_ms: null,
+        identity,
+      });
+      return { output: input, tokens: null };
+    },
+    route: (_ctx, input) => spec.route(input),
+  });
 }
 
 /** Convenience for chaining: startStep + otherSteps in registration order. */

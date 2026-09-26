@@ -35,12 +35,21 @@ export type CommitDisposition = `committed:${OperationId}` | "no-op-empty-diff";
 /**
  * Completion marker payload — a dex attribute (source of truth). The
  * disposition disambiguates reconcile rows by data, not by reachability.
+ * Optional evidence fields: `sha` (commit, vs `content_hash` tree), and the
+ * C1 cross-branch fields recorded when dedup found the keyed commit on a
+ * DIFFERENT branch than this round's lease.
  */
 export interface CompletionMarker {
   round: number;
   disposition: CommitDisposition;
   /** SHA-256-style evidence hash of the committed tree (`<sha>^{tree}`). */
   content_hash: string;
+  /** Commit sha (evidence; distinct from the tree hash above). */
+  sha?: string | null;
+  /** C1: branch the deduped keyed commit was found on. */
+  keyed_branch?: string;
+  /** C1: the replay's worktree content diverged from the keyed commit. */
+  replay_divergent?: boolean;
 }
 
 export function isCommittedDisposition(
@@ -55,7 +64,10 @@ export interface KeyedCommit {
   sha: string;
   /** Content hash trailer if recorded; evidence only. */
   contentHash: string | null;
+  /** Branch the scan found the commit on (evidence; other branches may hold it). */
   branch: string;
+  /** Round parsed from the opId (`file#round`); -1 when unparseable. */
+  round: number;
 }
 
 export interface WorktreeState {
@@ -132,9 +144,11 @@ export function reconcile(input: ReconcileInput): ReconcileAction {
       };
     }
     const backfillMarker: CompletionMarker = {
-      round: -1,
+      round: keyed.round,
       disposition: `committed:${keyed.opId}`,
       content_hash: keyed.contentHash ?? keyed.sha,
+      sha: keyed.sha,
+      keyed_branch: keyed.branch,
     };
     if (worktree.clean) {
       return {
@@ -241,6 +255,7 @@ export class WorktreePool {
     epoch: number,
     holderExecutionId: string,
     now: () => Date = () => new Date(),
+    baseRef?: string | undefined,
   ): Promise<AcquireResult> {
     const existing = this.#store.get(file);
     if (existing !== undefined) {
@@ -266,8 +281,19 @@ export class WorktreePool {
     const branch = `lease/${safeFile}/${epoch}`;
     const worktreePath = `${this.#worktreeRoot}/${safeFile}-${epoch}`;
 
-    const headSha = (await runner.run(["rev-parse", "HEAD"])).trim();
-    // Create the lease branch at HEAD if absent, then add the worktree.
+    // M6: new lease branches base on the INTEGRATION tip when it exists (the
+    // one output project) so re-rounds of the same path fast-forward into
+    // integration; only a baseless first round falls back to HEAD.
+    const resolvedBase =
+      baseRef ??
+      ((
+        await runner.tryRun(["rev-parse", "--verify", "refs/heads/integration"])
+      ).ok
+        ? "integration"
+        : "HEAD");
+
+    const headSha = (await runner.run(["rev-parse", resolvedBase])).trim();
+    // Create the lease branch at the resolved base if absent, then add the worktree.
     const branchExists = (
       await runner.tryRun(["rev-parse", "--verify", `refs/heads/${branch}`])
     ).ok;
@@ -354,6 +380,14 @@ export async function commitLeaseChanges(
   return { disposition: `committed:${opId}`, sha, contentHash: treeHash };
 }
 
+/** Parses the round out of an opId (`file#round`); -1 when unparseable (m1). */
+export function roundOfOpId(opId: OperationId): number {
+  const i = opId.lastIndexOf("#");
+  if (i < 0) return -1;
+  const n = Number.parseInt(opId.slice(i + 1), 10);
+  return Number.isInteger(n) ? n : -1;
+}
+
 /**
  * Scans ALL branches (shared object store) for a commit carrying the
  * operation-ID trailer, so a redo on a spare or reclaimed worktree still
@@ -385,10 +419,50 @@ export async function findCommitByOpId(
         sha,
         contentHash: hashLine ? hashLine.slice(CONTENT_HASH_TRAILER.length + 1) : null,
         branch,
+        round: roundOfOpId(opId),
       };
     }
   }
   return undefined;
+}
+
+/**
+ * C1: after a cross-branch dedup hit, the keyed commit lives on a DIFFERENT
+ * branch (quarantined lease / earlier epoch) than this round's lease branch —
+ * merging the lease branch alone would integrate NOTHING while the round is
+ * already marked done. Makes the keyed commit reachable from THIS branch:
+ * fast-forward when possible, else an explicit merge. Divergent replay
+ * content (uncommitted, this round's re-implementation) is discarded first —
+ * the round is completed and the keyed commit is authoritative; callers
+ * record `replay_divergent` evidence before calling.
+ */
+export async function makeCommitReachable(
+  worktreePath: string,
+  keyed: KeyedCommit,
+): Promise<"already" | "fast-forward" | "merge"> {
+  const runner = git(worktreePath);
+  if ((await runner.tryRun(["merge-base", "--is-ancestor", keyed.sha, "HEAD"])).ok) {
+    return "already";
+  }
+  // Completed round: keyed commit authoritative; drop divergent replay state.
+  await runner.run(["reset", "--hard"]);
+  await runner.run(["clean", "-fd"]);
+  const ff = await runner.tryRun(["merge", "--ff-only", keyed.sha]);
+  if (ff.ok) return "fast-forward";
+  await runner.run(["merge", "--no-ff", "--no-edit", keyed.sha]);
+  return "merge";
+}
+
+/**
+ * C1 verification for the integration step: when a keyed commit exists for
+ * the round, it MUST be reachable from the integration branch HEAD — a
+ * no-op merge of the wrong branch would silently drop a committed round.
+ */
+export async function keyedCommitIntegrated(
+  integrationWorktreePath: string,
+  keyed: KeyedCommit,
+): Promise<boolean> {
+  return (await git(integrationWorktreePath).tryRun(["merge-base", "--is-ancestor", keyed.sha, "HEAD"])).ok;
 }
 
 /** Reads the worktree status (clean/dirty) without touching the index lock. */
@@ -478,7 +552,11 @@ export async function mergeLeaseIntoIntegration(
     return { alreadyIntegrated: true, fastForward: false, sha };
   }
 
-  // Fast-forward when possible; otherwise a real merge (same-path re-rounds).
+  // Fast-forward when possible; otherwise a real merge. Explicit re-round
+  // strategy (M6): re-round leases base on the integration tip, so a same-path
+  // re-round merges as a pure FAST-FORWARD; a genuinely divergent lease (its
+  // branch has own commits while integration moved) falls back to --no-ff,
+  // which is the only sanctioned merge-commit shape in the toolkit.
   const headBefore = (await integ.run(["rev-parse", "HEAD"])).trim();
   const ff = await integ.tryRun(["merge", "--ff-only", leaseBranch]);
   if (ff.ok) {
@@ -505,9 +583,12 @@ export async function integratedContentExists(
 
 function sanitizePathSegment(input: string): string {
   const safe = input.replace(/[^a-zA-Z0-9._-]+/g, "__");
-  return safe.length > 0 && safe.length <= 96
-    ? safe
-    : `seg-${hashOf(input)}`;
+  if (safe.length === 0 || safe.length > 96) return `seg-${hashOf(input)}`;
+  // m3: inputs differing only in sanitized-away characters (e.g. `a/b` vs
+  // `a.b`) would otherwise collide; suffix the hash whenever sanitizing
+  // actually changed the input.
+  if (safe !== input) return `${safe}-${hashOf(input)}`;
+  return safe;
 }
 
 function hashOf(input: string): string {
