@@ -455,6 +455,47 @@ re-dispatches; valuable for anyone building on opencode + zai-coding-plan:
   (per-turn server-side tools all-off + reviewer definition prefix), not by
   the vendor agent persona.
 
+## v1.1 — parallel per-file dispatch (worker-1c, confirmed by lead mid-flight)
+
+Commit `4973fcc`. dex-native shape, DEFAULT for Phase 6–7 (`demo --dispatch
+parallel`; `sequential` keeps the Phase 2 loop for A/B):
+
+- **Parent** (`port.Project`): prep + prep-review loop unchanged →
+  `PpWaveDispatch` plans the next ≤2-file wave from the durable queue (fresh
+  or fix rounds) → `PpWaveJoin` declares
+  `waitFor: Wait.allOf(...SubFlow.run(PortFileFlow, childInput))` — both lease
+  slots fill CONCURRENTLY — and its `execute` runs only when every child is
+  terminal. The join then integrates each child's keyed commit SERIALLY (the
+  shared integration worktree never races; a no-op child round uses its
+  terminal receipt + the plan's no-op content check), appends git-derived
+  done entries, publishes `pp-wave-children/children` (metrics/dashboard
+  fan-out), and loops to dispatch / QueueVerify.
+- **Child** (`port.File`, one per file-round): `PpChildLease` seeds its OWN
+  attribute stores with the parent's reviewed prep artifact + queue errors
+  (SubFlow input — every downstream per-file step is store-local, so the
+  child pipeline is the UNCHANGED exported step chain: fence → implement/fix
+  → diff → review A/B → verdict-check → prioritize → fixer → keyed commit)
+  → `PpChildRelease` releases the lease and returns the receipt. Children
+  never touch git integration.
+- **Caps and durability**: one lease per child; wave width = the WorktreePool
+  cap (2) — concurrency bounded at the wave planner. Kill safety: dex's
+  SubFlow reuse policy RESTART_IF_PREVIOUS_EXITS_ABNORMALLY restarts a dead
+  child on resume and attaches to running ones; the wave record
+  (`pp-wave/wave`) and the join are durable, so a mid-wave kill resumes
+  exactly like the sequential loop (this is the same AC1 surface, now with
+  two worktrees migrating visibly in parallel on the dashboard grid).
+- **AC2**: the dispatch anchor gained `PpWaveDispatch`, `PpWaveJoin`,
+  `PpChildLease`, `PpChildRelease` (support steps); children reuse the SAME
+  step types as the sequential pipeline, so per-flow typed 1:N anchoring is
+  unchanged. `render-metrics.ts` merges parent + `pp-wave-children` flows
+  (state, history, envelopes) into one report.
+- Dispatch failures surfaced during wiring review and fixed: DispatchStep no
+  longer drains `pending` before WaveDispatch reads it (parallel branch skips
+  deriveNext); clean fix rounds (no keyed commit) resolve via the child's
+  terminal receipt instead of throwing. `tests/port-parallel.test.ts` covers
+  wave planning, anchor registration, and both flow registrations (196 pass,
+  tsc clean). NOT YET live-proven — the first parallel run is Phase 6.
+
 ## Phase 4 — final status (worker-1c)
 
 - **GREEN (clean path)**: p4-7 (runId `01a0dd01…`, epoch 6) COMPLETED
