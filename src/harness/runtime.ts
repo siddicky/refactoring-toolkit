@@ -520,6 +520,24 @@ export function composeReviewerTurn(input: {
   ].join("\n");
 }
 
+/**
+ * US-006 repair re-prompt (ONE per review turn, SAME reviewer session): sent
+ * on the session that already holds the diff, so it re-asks for the verdict
+ * JSON only — no diff redelivery. `reasons` are the deterministic suspicion
+ * reasons (src/metrics/suspicion.ts); the reply is routed through the SAME
+ * harness.prompt path, so the Tier-0 degenerateReply guard applies to it.
+ */
+export function composeReviewerRepairTurn(input: { reasons: readonly string[] }): string {
+  return [
+    "Your previous reply on this review was NOT accepted as a usable verdict.",
+    "Deterministic checks it failed:",
+    ...input.reasons.map((r) => `- ${r}`),
+    "",
+    "Emit exactly one valid JSON verdict object for the SAME diff (already in this conversation) and nothing else.",
+    "Rules: every finding's evidence_span lines must point INTO the diff hunks with the snippet quoted verbatim from the diff; at most 5 findings unless severities vary; output exactly one JSON object.",
+  ].join("\n");
+}
+
 export function composeFixerTurn(input: {
   currentContent: string;
   findings: readonly MetricsFinding[];

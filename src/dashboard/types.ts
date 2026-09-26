@@ -294,12 +294,28 @@ export interface KillTimelineGroupView {
   entries: KillTimelineEntryView[];
 }
 
+/**
+ * US-006 degraded round: a file+round that reached verdict-check with BOTH
+ * reviewers tombstoned (discarded) — the round proceeded as unreviewed. A
+ * degraded round must never read as clean on any surface; it is surfaced
+ * here (the /api/state payload) and folded into the headline marker.
+ */
+export interface DegradedRoundView {
+  flowId: string;
+  file: string;
+  round: number;
+  reviewers: string[];
+  reasons: string[];
+}
+
 export interface DashboardStateView {
   generatedAt: string;
   /**
    * Wave-5 lifecycle headline (takeaways-synthesis #3): one-line run status
    * for the newest port flow with the live running → killed → resumed →
    * completed flip (derived from flow status + kill sidecar ordering).
+   * US-006: carries a `DEGRADED (N unreviewed)` marker when the headline
+   * flow has degraded rounds.
    */
   headline: string;
   sources: {
@@ -316,4 +332,6 @@ export interface DashboardStateView {
   worktrees: Array<{ path: string; branch: string; head: string; clean: boolean | null }>;
   killTimeline: KillTimelineGroupView[];
   agentUsage: AgentUsageView[];
+  /** US-006: rounds whose every reviewer verdict is a tombstone. */
+  degradedRounds: DegradedRoundView[];
 }

@@ -133,13 +133,20 @@ function withCallTimeout<T>(promise: Promise<T>, what: string): Promise<T> {
  * empty native-tool replies) should be retried on a FRESH session by the
  * caller (dex step retry); non-retryable means the reply completed but
  * carried no usage — a provenance failure for model-calling steps.
+ *
+ * `usage` carries the provider usage of the failed turn when the failure
+ * shape exposed it (the Tier-0 degenerate signature reports usage with no
+ * text) — US-006 exhaustion tombstones anchor these tokens; null when the
+ * turn produced nothing measurable.
  */
 export class OpencodePromptError extends Error {
   readonly retryable: boolean;
-  constructor(message: string, retryable: boolean) {
+  readonly usage: TokenUsage | null;
+  constructor(message: string, retryable: boolean, usage: TokenUsage | null = null) {
     super(message);
     this.name = "OpencodePromptError";
     this.retryable = retryable;
+    this.usage = usage;
   }
 }
 
@@ -327,7 +334,7 @@ export class OpencodeHarness {
         // predicate cannot fire — kept so BOTH prompt() exits carry the
         // no-degenerate-return invariant).
         if (degenerateReply(usage, textOut, aborted)) {
-          throw new OpencodePromptError(degenerateTurnMessage(usage), true);
+          throw new OpencodePromptError(degenerateTurnMessage(usage), true, usage);
         }
         return { text: textOut, usage: null, aborted: false };
       }
@@ -336,7 +343,7 @@ export class OpencodeHarness {
       // re-dispatches (with the attempt-based reviewer-lane demotion) instead
       // of burning every retry on verdict-parse failures downstream.
       if (degenerateReply(usage, textOut, aborted)) {
-        throw new OpencodePromptError(degenerateTurnMessage(usage), true);
+        throw new OpencodePromptError(degenerateTurnMessage(usage), true, usage);
       }
       return { text: textOut, usage, aborted };
     }
@@ -346,7 +353,7 @@ export class OpencodeHarness {
     // fresh attempt (with the attempt-based reviewer-lane demotion) instead
     // of burning every retry on downstream verdict-parse failures.
     if (degenerateReply(usage, textOut, aborted)) {
-      throw new OpencodePromptError(degenerateTurnMessage(usage), true);
+      throw new OpencodePromptError(degenerateTurnMessage(usage), true, usage);
     }
     return { text: textOut, usage, aborted };
   }

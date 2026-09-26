@@ -8,7 +8,8 @@
  * Inputs (all read-only, matching the proven surfaces):
  * - `dexcli flow state <flowId>` attribute store: `envelope-event/*` (the
  *   envelope stream), `pp-verdict/*` + `pp-prep-verdict/*` (ReviewTuple — the
- *   `metrics` member is the AC2 VerdictRecord), `queue-burndown/*`;
+ *   `metrics` member is the AC2 VerdictRecord — plus the US-006 tombstone
+ *   variant `{reviewer, discarded, reason, attempt, tokens}`), `queue-burndown/*`;
  * - `dexcli flow history <flowId>` (typed dispatch anchoring);
  * - optional chaos sidecar (JSON lines, intent/completed records) merged into
  *   the renderer's KillEventsFile shape (`resumed` is supplied by this driver
@@ -30,7 +31,9 @@ import type {
   KillEventsFile,
   QueueBurnDownEvent,
   QueueKind,
+  TokenUsage,
   VerdictRecord,
+  VerdictTombstone,
 } from "../src/metrics/types.js";
 import type { DispatchHistory } from "../src/metrics/dispatch-anchor.js";
 
@@ -164,6 +167,45 @@ function collectVerdicts(attrs: StateAttribute[]): VerdictRecord[] {
   );
 }
 
+/**
+ * US-006 tombstones (discarded reviewer verdicts) stored under the same
+ * pp-verdict / pp-prep-verdict keys a completed tuple would use. The value
+ * carries {reviewer, discarded, reason, attempt, tokens}; file+round are
+ * recovered from the attribute key (`<sanitized-file>#<round>#<reviewer>` —
+ * "__" -> "/" is lossy for filenames containing "__", documented pattern of
+ * fileFromIdentity). Tombstones never enter the VerdictRecord stream; the
+ * renderer uses them for the degraded marker and the exhaustion under-count
+ * note.
+ */
+function collectTombstones(
+  attrs: StateAttribute[],
+): Array<VerdictTombstone & { file: string; round: number }> {
+  const out: Array<VerdictTombstone & { file: string; round: number }> = [];
+  for (const a of attrs) {
+    if (!a.key.startsWith("pp-verdict/") && !a.key.startsWith("pp-prep-verdict/")) continue;
+    const suffix = a.key.slice(a.key.indexOf("/") + 1);
+    const reviewerSep = suffix.lastIndexOf("#");
+    const roundSep = reviewerSep > 0 ? suffix.lastIndexOf("#", reviewerSep - 1) : -1;
+    if (reviewerSep <= 0 || roundSep <= 0) continue;
+    const v = a.value as Partial<VerdictTombstone> | null;
+    if (v === null || typeof v !== "object" || v.discarded !== true) continue;
+    if (typeof v.reviewer !== "string" || typeof v.reason !== "string") continue;
+    if (typeof v.attempt !== "number") continue;
+    out.push({
+      file: suffix.slice(0, roundSep).replace(/__/g, "/"),
+      round: Number(suffix.slice(roundSep + 1, reviewerSep)),
+      reviewer: v.reviewer,
+      discarded: true,
+      reason: v.reason,
+      attempt: v.attempt,
+      tokens: (v.tokens ?? null) as number | TokenUsage | null,
+    });
+  }
+  return out.sort((p, q) =>
+    `${p.file}#${p.round}#${p.reviewer}`.localeCompare(`${q.file}#${q.round}#${q.reviewer}`),
+  );
+}
+
 function collectEnvelopes(attrs: StateAttribute[]): EnvelopeEvent[] {
   const out: EnvelopeEvent[] = [];
   for (const a of attrs) {
@@ -270,11 +312,13 @@ async function main(): Promise<number> {
   }
   const envelopes: EnvelopeEvent[] = [];
   const verdicts: VerdictRecord[] = [];
+  const tombstones: Array<VerdictTombstone & { file: string; round: number }> = [];
   const burnDown: QueueBurnDownEvent[] = [];
   for (const id of [flowId, ...childIds]) {
     const s = id === flowId ? state : (runDexcli(["flow", "state", id]) as FlowState);
     envelopes.push(...collectEnvelopes(s.attributes ?? []));
     verdicts.push(...collectVerdicts(s.attributes ?? []));
+    tombstones.push(...collectTombstones(s.attributes ?? []));
     burnDown.push(...collectBurnDown(s.attributes ?? []));
   }
 
@@ -288,6 +332,7 @@ async function main(): Promise<number> {
   const report = renderReport({
     envelopes,
     verdicts,
+    tombstones,
     burnDown,
     ...(killEvents !== null ? { killEvents } : {}),
     history,
@@ -301,7 +346,7 @@ async function main(): Promise<number> {
   writeFileSync(jsonPath, `${JSON.stringify(report.json, null, 2)}\n`, "utf8");
 
   console.log(
-    `[render-metrics] flow=${flowId} run=${runId} envelopes=${envelopes.length} verdicts=${verdicts.length} burnDown=${burnDown.length} killEvents=${killEvents?.events.length ?? 0} provenance_ok=${report.json.provenance_ok}`,
+    `[render-metrics] flow=${flowId} run=${runId} envelopes=${envelopes.length} verdicts=${verdicts.length} tombstones=${tombstones.length} degradedRounds=${report.json.summary.degraded_round_count} burnDown=${burnDown.length} killEvents=${killEvents?.events.length ?? 0} provenance_ok=${report.json.provenance_ok}`,
   );
   console.log(`[render-metrics] wrote ${mdPath} + ${jsonPath}`);
   return report.json.provenance_ok ? 0 : 1;

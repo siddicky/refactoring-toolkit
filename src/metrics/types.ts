@@ -382,6 +382,38 @@ export interface VerdictRecord {
   citation_check: CitationCheckResult[];
 }
 
+/**
+ * US-006 tombstone variant stored under the SAME verdict attribute keys a
+ * completed record would use (pp-verdict / pp-prep-verdict). A tombstoned
+ * reviewer contributes ZERO kept findings; the round proceeds and agreement
+ * surfaces `unreviewed` for the discarded side (a tombstone is NOT a
+ * VerdictRecord — it never enters the agreement/metrics record stream).
+ *
+ * `reason` carries the deterministic discard trigger (suspicion repair
+ * failure or attempt exhaustion); `tokens` carries the burned tokens of the
+ * discarded attempt(s) so AC2 token accounting can anchor them — an
+ * attempt-exhausted tombstone anchors ONLY the final attempt's tokens
+ * (attempts 1..n-1 leave no durable trace per 0(g)); the AC2 report states
+ * that under-count explicitly instead of reconciling silently.
+ */
+export interface VerdictTombstone {
+  reviewer: string;
+  discarded: true;
+  reason: string;
+  /** Dex attempt of the step execution that wrote the tombstone. */
+  attempt: number;
+  tokens: number | TokenUsage | null;
+}
+
+/** Narrow an unknown/union verdict-attribute value to a tombstone. */
+export function isVerdictTombstone(value: unknown): value is VerdictTombstone {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { discarded?: unknown }).discarded === true
+  );
+}
+
 /** One hunk of a reviewed diff (delivered to reviewers by value). */
 export interface DiffHunk {
   hunk_id: string;

@@ -60,6 +60,7 @@ import {
   fenceLabel,
   sessionFenceMap,
   tokenTotal,
+  OpencodePromptError,
   type AgentSessionClient,
 } from "../src/harness/opencode.js";
 import {
@@ -117,12 +118,16 @@ import {
   type TurnObservation,
   type TurnShapeClass,
   type VerdictRecord as MetricsVerdictRecord,
+  type VerdictTombstone,
+  isVerdictTombstone,
 } from "../src/metrics/types.js";
+import { evaluateSuspicion, normalizeVerdictText } from "../src/metrics/suspicion.js";
 import { createCitationChecker, naiveCitationCheck } from "../src/typesafe/verdict-check.js";
 import { createJevPrioritizer, naivePrioritize } from "../src/typesafe/prioritize.js";
 import {
   composeFixerTurn,
   composeImplementerTurn,
+  composeReviewerRepairTurn,
   composeReviewerTurn,
   demoteReviewerLane,
   extractCodeFence,
@@ -295,6 +300,14 @@ export interface ReviewTuple {
   metrics: MetricsVerdictRecord;
 }
 
+/**
+ * US-006: what a reviewer verdict attribute holds — a completed tuple, or a
+ * tombstone marking a DISCARDED reviewer (suspicion repair failed, or the
+ * step exhausted its dex attempts). A tombstoned reviewer contributes ZERO
+ * kept findings; both reviewers tombstoned = a degraded, unreviewed round.
+ */
+export type ReviewVerdict = ReviewTuple | VerdictTombstone;
+
 export interface KeptFindings {
   findings: MetricsFinding[];
   dropped: Array<{ finding_id: string; reviewer: string; reason: string }>;
@@ -325,7 +338,7 @@ export const ppQueue = new AttributeMap<PortQueueState>("pp-queue", jsonCodec<Po
 export const ppPrep = new AttributeMap<PrepArtifact>("pp-prep", jsonCodec<PrepArtifact>());
 export const ppLease = new AttributeMap<Record<string, LeaseRecord>>("pp-lease", jsonCodec<Record<string, LeaseRecord>>());
 export const ppDiff = new AttributeMap<CapturedDiff>("pp-diff", jsonCodec<CapturedDiff>());
-export const ppVerdict = new AttributeMap<ReviewTuple>("pp-verdict", jsonCodec<ReviewTuple>());
+export const ppVerdict = new AttributeMap<ReviewVerdict>("pp-verdict", jsonCodec<ReviewVerdict>());
 export const ppKept = new AttributeMap<KeptFindings>("pp-kept", jsonCodec<KeptFindings>());
 export const ppOut = new AttributeMap<OutPathRef>("pp-out", jsonCodec<OutPathRef>());
 export const ppMarker = new AttributeMap<CompletionMarker>("pp-marker", jsonCodec<CompletionMarker>());
@@ -335,7 +348,7 @@ export const ppPrepSeed = new AttributeMap<PrepSeedState>("pp-prep-seed", jsonCo
 export const ppSymtab = new AttributeMap<{ rows: SymbolTableRow[] }>("pp-symtab", jsonCodec<{ rows: SymbolTableRow[] }>());
 export const ppPrepDraft = new AttributeMap<PrepDraft>("pp-prep-draft", jsonCodec<PrepDraft>());
 export const ppPrepDiff = new AttributeMap<PrepDiffArtifact>("pp-prep-diff", jsonCodec<PrepDiffArtifact>());
-export const ppPrepVerdict = new AttributeMap<ReviewTuple>("pp-prep-verdict", jsonCodec<ReviewTuple>());
+export const ppPrepVerdict = new AttributeMap<ReviewVerdict>("pp-prep-verdict", jsonCodec<ReviewVerdict>());
 export const ppPrepFindings = new AttributeMap<KeptFindings>("pp-prep-findings", jsonCodec<KeptFindings>());
 export const ppPrepState = new AttributeMap<{ prepIteration: number }>("pp-prep-state", jsonCodec<{ prepIteration: number }>());
 
@@ -746,6 +759,26 @@ async function diagnoseAmbiguousThrow(input: {
  * extracted, validated, and mapped onto the metrics shapes. Any failure
  * throws so dex retries the whole turn on a fresh session.
  *
+ * US-006 repair-or-discard (on top of the US-003 turn-health behavior):
+ * - a SCHEMA-VALID verdict is checked against the deterministic suspicion
+ *   predicate (src/metrics/suspicion.ts — Lane A, zero judgment input);
+ * - a SUSPECT verdict gets ONE repair re-prompt through the SAME reviewer
+ *   session (same config; the repair reply flows through harness.prompt, so
+ *   the Tier-0 degenerateReply guard applies to it). Repair success = the
+ *   repaired verdict passes schema AND is not suspect. Repair failure =
+ *   TOMBSTONE;
+ * - attempt EXHAUSTION (deterministic: ctx.attempt >= maxAttempts, the step's
+ *   own retry policy) converts the final attempt's failure into a TOMBSTONE
+ *   instead of a throw — with the failed turn's usage when the failure shape
+ *   exposed it (the Tier-0 degenerate class does). A no-usage exhaustion
+ *   (nothing measurable to anchor — provenance never zero) stays fatal:
+ *   documented limitation, per the honest ADR.
+ *
+ * Tombstones carry the burned tokens of the discarded attempt(s); a
+ * tombstoned reviewer contributes zero kept findings and, when BOTH
+ * reviewers tombstone, the round proceeds degraded/unreviewed and the flow
+ * reaches terminal-success.
+ *
  * Turn-health (US-003, evidence-only):
  * - an ambiguous-shape throw (text present, verdict extraction failed /
  *   validation discarded) runs the injected Tier-1 assessor and publishes the
@@ -756,6 +789,46 @@ async function diagnoseAmbiguousThrow(input: {
  *   step piggybacks onto its completion envelope. A first-attempt success
  *   records nothing (healthy turns are shape-trivial: zero Jev, zero records).
  */
+
+/** In-step verbatim-repeat memo (US-006 predicate arm c): the previous
+ *  attempt's normalized reply per `<step>:<diffId>`, held in the step
+ *  closure's process memory ONLY — zero durable substrate; cross-attempt
+ *  replay is already cache-busted by the retry-prompt suffix. */
+const inStepVerdictTexts = new Map<string, string>();
+
+/** Test seam: clears the in-step verbatim memo (per-test isolation). */
+export function resetInStepVerdictMemo(): void {
+  inStepVerdictTexts.clear();
+}
+
+/** Review-step retry policy (dex executeRetry) — the exhaustion bound. */
+export const REVIEW_STEP_MAX_ATTEMPTS = 3;
+
+/** Sums two usage splits (original turn + repair turn burned tokens). */
+function addUsage(
+  a: TokenUsage | null,
+  b: TokenUsage | null,
+): TokenUsage | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return {
+    input_tokens: a.input_tokens + b.input_tokens,
+    output_tokens: a.output_tokens + b.output_tokens,
+    ...(a.reasoning_tokens !== undefined || b.reasoning_tokens !== undefined
+      ? { reasoning_tokens: (a.reasoning_tokens ?? 0) + (b.reasoning_tokens ?? 0) }
+      : {}),
+    ...(a.cache_read_tokens !== undefined || b.cache_read_tokens !== undefined
+      ? { cache_read_tokens: (a.cache_read_tokens ?? 0) + (b.cache_read_tokens ?? 0) }
+      : {}),
+    ...(a.cache_write_tokens !== undefined || b.cache_write_tokens !== undefined
+      ? { cache_write_tokens: (a.cache_write_tokens ?? 0) + (b.cache_write_tokens ?? 0) }
+      : {}),
+    ...(a.cost_usd !== undefined || b.cost_usd !== undefined
+      ? { cost_usd: (a.cost_usd ?? 0) + (b.cost_usd ?? 0) }
+      : {}),
+  };
+}
+
 export async function runReviewTurn(input: {
   ctx: Context;
   reviewerId: string;
@@ -768,7 +841,13 @@ export async function runReviewTurn(input: {
   attempt?: number;
   /** The durable step's id (diagnosis turn identity: `<stepId>@<identity>`). */
   stepId?: string;
-}): Promise<{ tuple: ReviewTuple; tokens: number | TokenUsage | null; turnDiagnosis: TurnDiagnosis | null }> {
+  /** The step's retry policy bound (default REVIEW_STEP_MAX_ATTEMPTS). */
+  maxAttempts?: number;
+}): Promise<{
+  verdict: ReviewVerdict;
+  tokens: number | TokenUsage | null;
+  turnDiagnosis: TurnDiagnosis | null;
+}> {
   const harness = requireHarness();
   const label = fenceLabel(input.file, input.round, input.epoch);
   const session = await harness.createSession(label);
@@ -780,126 +859,242 @@ export async function runReviewTurn(input: {
     persistedAtUtc: new Date().toISOString(),
   });
 
-  const diffBlock = renderDiffForReview({
-    diffText: input.diff.raw,
-    file: input.file,
-    round: input.round,
-    diffId: input.diff.diffId,
-  });
-  const turn = composeReviewerTurn({
-    reviewerId: input.reviewerId,
-    reviewerLabel: REVIEWER.name,
-    diffBlock: diffBlock.block,
-  });
   const attemptNo = input.attempt ?? 1;
-  const turnText =
-    attemptNo > 1
-      ? `${turn}\n\n(retry attempt ${attemptNo}: a previous reply on this step was truncated or unparseable — respond with exactly one JSON object and nothing else)`
-      : turn;
-  // Demotion policy = f(attempt) ONLY (US-002): attempt >= 2 on a review turn
-  // demotes the reviewer lane from OPENCODE_REVIEWER_MODEL to
-  // OPENCODE_REVIEWER_MODEL_FALLBACK (default: the implementer lane, i.e. no
-  // override). Pure policy over the durable dex attempt count — no env
-  // mutation, no durable flag substrate (intra-step writes don't survive;
-  // 0(g)). Tier-0 retries (degenerate no-text replies) therefore land on the
-  // fallback lane automatically.
-  const agent = reviewerAgentOverride();
-  const model = demoteReviewerLane(attemptNo, reviewerModelOverride(), reviewerModelFallback());
-  // Lane LABEL from the same f(attempt) policy (generic instantiation) — used
-  // only in diagnosis records, never for decisions (AC-B2).
-  const lane = demoteReviewerLane<"default" | "demoted">(attemptNo, "default", "demoted");
-  const result = await runAgentTurn({
-    def: REVIEWER,
-    sessionId: session.id,
-    turn: turnText,
-    file: input.file,
-    round: input.round,
-    ...(agent !== undefined ? { agent } : {}),
-    ...(model !== undefined ? { model } : {}),
-  });
+  const maxAttempts = Math.max(1, input.maxAttempts ?? REVIEW_STEP_MAX_ATTEMPTS);
+  const stepKey = `${input.stepId ?? `pp-review-${input.reviewerId}`}:${input.diff.diffId}`;
+  // Tokens of THIS attempt's failed turn(s), reachable when the failure shape
+  // exposed usage (Tier-0 degenerate throws carry it; parse/validation
+  // failures had it in hand). null = nothing measurable to anchor.
+  let lastUsage: TokenUsage | null = null;
+  const tombstoneOf = (reason: string, usage: TokenUsage | null): {
+    verdict: VerdictTombstone;
+    tokens: number | TokenUsage | null;
+    turnDiagnosis: TurnDiagnosis | null;
+  } => {
+    const tokens = usage;
+    return {
+      verdict: {
+        reviewer: input.reviewerId,
+        discarded: true,
+        reason,
+        attempt: attemptNo,
+        tokens,
+      },
+      tokens,
+      turnDiagnosis: null,
+    };
+  };
 
-  // Deterministic successor re-record (US-003): on attempt n >= 2 the prior
-  // attempt(s) left NO durable trace (0(g) — a throwing attempt cannot
-  // persist), so THIS successful attempt records the deterministic context:
-  // attempt count + resulting lane. NO Jev call — a parsed verdict is
-  // shape-trivial and the battery must never fire on it (AC-B1).
-  const turnDiagnosis =
-    attemptNo >= 2
-      ? buildRetryContextDiagnosis({
-          file: input.file,
-          stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
-          identity: markerKeyOf(input.file, input.round),
-          reviewer: input.reviewerId,
-          attempt: attemptNo,
-          shape: {
-            shape: "parsed",
-            output_tokens: result.usage?.output_tokens ?? null,
-            reasoning_tokens: result.usage?.reasoning_tokens ?? null,
-            text_chars: result.text.length,
-            error: null,
-          },
-          recordedAtUtc: new Date().toISOString(),
-        })
-      : null;
-
-  let parsed: unknown;
   try {
-    parsed = extractJsonObject(result.text);
+    const diffBlock = renderDiffForReview({
+      diffText: input.diff.raw,
+      file: input.file,
+      round: input.round,
+      diffId: input.diff.diffId,
+    });
+    const turn = composeReviewerTurn({
+      reviewerId: input.reviewerId,
+      reviewerLabel: REVIEWER.name,
+      diffBlock: diffBlock.block,
+    });
+    const turnText =
+      attemptNo > 1
+        ? `${turn}\n\n(retry attempt ${attemptNo}: a previous reply on this step was truncated or unparseable — respond with exactly one JSON object and nothing else)`
+        : turn;
+    // Demotion policy = f(attempt) ONLY (US-002): attempt >= 2 on a review turn
+    // demotes the reviewer lane from OPENCODE_REVIEWER_MODEL to
+    // OPENCODE_REVIEWER_MODEL_FALLBACK (default: the implementer lane, i.e. no
+    // override). Pure policy over the durable dex attempt count — no env
+    // mutation, no durable flag substrate (intra-step writes don't survive;
+    // 0(g)). Tier-0 retries (degenerate no-text replies) therefore land on the
+    // fallback lane automatically.
+    const agent = reviewerAgentOverride();
+    const model = demoteReviewerLane(attemptNo, reviewerModelOverride(), reviewerModelFallback());
+    // Lane LABEL from the same f(attempt) policy (generic instantiation) — used
+    // only in diagnosis records, never for decisions (AC-B2).
+    const lane = demoteReviewerLane<"default" | "demoted">(attemptNo, "default", "demoted");
+    const result = await runAgentTurn({
+      def: REVIEWER,
+      sessionId: session.id,
+      turn: turnText,
+      file: input.file,
+      round: input.round,
+      ...(agent !== undefined ? { agent } : {}),
+      ...(model !== undefined ? { model } : {}),
+    });
+    lastUsage = result.usage;
+    // In-step verbatim memo (arm c): capture the PRIOR attempt's normalized
+    // reply BEFORE recording this one.
+    const priorNormalized = inStepVerdictTexts.get(stepKey) ?? null;
+    const replyNormalized = normalizeVerdictText(result.text);
+    inStepVerdictTexts.set(stepKey, replyNormalized);
+
+    // Deterministic successor re-record (US-003): on attempt n >= 2 the prior
+    // attempt(s) left NO durable trace (0(g) — a throwing attempt cannot
+    // persist), so THIS successful attempt records the deterministic context:
+    // attempt count + resulting lane. NO Jev call — a parsed verdict is
+    // shape-trivial and the battery must never fire on it (AC-B1).
+    const turnDiagnosis =
+      attemptNo >= 2
+        ? buildRetryContextDiagnosis({
+            file: input.file,
+            stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+            identity: markerKeyOf(input.file, input.round),
+            reviewer: input.reviewerId,
+            attempt: attemptNo,
+            shape: {
+              shape: "parsed",
+              output_tokens: result.usage?.output_tokens ?? null,
+              reasoning_tokens: result.usage?.reasoning_tokens ?? null,
+              text_chars: result.text.length,
+              error: null,
+            },
+            recordedAtUtc: new Date().toISOString(),
+          })
+        : null;
+
+    let parsed: unknown;
+    try {
+      parsed = extractJsonObject(result.text);
+    } catch (err) {
+      // Ambiguous shape: parseable-length text that fails verdict extraction
+      // (the 885-token case). Evidence-only Tier-1 assessment; the original
+      // error still drives the retry (AC-B2/B3) — or the US-006 exhaustion
+      // tombstone on the final attempt (catch below).
+      await diagnoseAmbiguousThrow({
+        ctx: input.ctx,
+        file: input.file,
+        round: input.round,
+        reviewerId: input.reviewerId,
+        stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+        attempt: attemptNo,
+        usage: result.usage,
+        text: result.text,
+        shape: "unparseable-text",
+        errorMessage: (err as Error).message,
+      });
+      throw err;
+    }
+    const parsedDiff = parseUnifiedDiff(input.diff.raw);
+    const mapArgs = {
+      file: input.file,
+      reviewer: input.reviewerId,
+      round: input.round,
+      diffId: input.diff.diffId,
+      // Re-parse from the stored raw text: ParsedDiff carries non-JSON helpers
+      // (hunk resolution) and cannot live in the durable attribute itself.
+      parsedDiff,
+      bodyLineOffset: input.diff.bodyLineOffset,
+      naiveCited: (finding: MetricsFinding) =>
+        naiveCitationCheck(
+          emptyRecordWith(input.file, input.round, input.reviewerId, input.diff.diffId, finding),
+          input.diff.doc,
+        ).find((c) => c.finding_id === finding.finding_id)?.p_cited ?? 0,
+    } as const;
+    const mapped = mapVerdictToMetrics({ raw: parsed, ...mapArgs });
+    if (!mapped.ok) {
+      // Extracted but invalid: the discard-class trigger (diagnosed as
+      // evidence-only; the error drives the dex retry — or the US-006
+      // exhaustion tombstone on the final attempt).
+      const err = new Error(
+        `reviewer ${input.reviewerId} verdict failed validation: ${mapped.errors.join("; ")}`,
+      );
+      await diagnoseAmbiguousThrow({
+        ctx: input.ctx,
+        file: input.file,
+        round: input.round,
+        reviewerId: input.reviewerId,
+        stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+        attempt: attemptNo,
+        usage: result.usage,
+        text: result.text,
+        shape: "discarded-verdict",
+        errorMessage: err.message,
+      });
+      throw err;
+    }
+
+    // US-006 suspicion gate (Lane A): schema-valid does not mean trusted.
+    const suspicion = evaluateSuspicion({
+      record: mapped.record,
+      parsedDiff,
+      verdictText: result.text,
+      priorNormalizedText: priorNormalized,
+    });
+    if (!suspicion.suspect) {
+      return {
+        verdict: { agent: mapped.agentRecord, metrics: mapped.record },
+        tokens: result.usage ?? result.tokens,
+        turnDiagnosis,
+      };
+    }
+
+    // ONE repair re-prompt through the SAME reviewer session config; the
+    // reply is routed through harness.prompt (Tier-0 degenerateReply guard).
+    const repair = await runAgentTurn({
+      def: REVIEWER,
+      sessionId: session.id,
+      turn: composeReviewerRepairTurn({ reasons: suspicion.reasons }),
+      file: input.file,
+      round: input.round,
+      ...(agent !== undefined ? { agent } : {}),
+      ...(model !== undefined ? { model } : {}),
+    });
+    const burned = addUsage(result.usage, repair.usage);
+    let repairedRaw: unknown;
+    try {
+      repairedRaw = extractJsonObject(repair.text);
+    } catch {
+      return tombstoneOf(
+        `repair-failed-schema: repair reply had no parseable JSON object`,
+        burned,
+      );
+    }
+    const repaired = mapVerdictToMetrics({ raw: repairedRaw, ...mapArgs });
+    if (!repaired.ok) {
+      return tombstoneOf(
+        `repair-failed-schema: ${repaired.errors.join("; ")}`,
+        burned,
+      );
+    }
+    // Repair-vs-original verbatim comparison (in-step, held in memory only).
+    const suspicionAfter = evaluateSuspicion({
+      record: repaired.record,
+      parsedDiff,
+      verdictText: repair.text,
+      priorNormalizedText: replyNormalized,
+    });
+    if (suspicionAfter.suspect) {
+      return tombstoneOf(
+        `repair-still-suspect: ${suspicionAfter.reasons.join("; ")}`,
+        burned,
+      );
+    }
+    inStepVerdictTexts.set(stepKey, normalizeVerdictText(repair.text));
+    return {
+      verdict: { agent: repaired.agentRecord, metrics: repaired.record },
+      tokens: burned ?? result.usage ?? result.tokens,
+      turnDiagnosis,
+    };
   } catch (err) {
-    // Ambiguous shape: parseable-length text that fails verdict extraction
-    // (the 885-token case). Evidence-only Tier-1 assessment; the original
-    // error still drives the retry (AC-B2/B3).
-    await diagnoseAmbiguousThrow({
-      ctx: input.ctx,
-      file: input.file,
-      round: input.round,
-      reviewerId: input.reviewerId,
-      stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
-      attempt: attemptNo,
-      usage: result.usage,
-      text: result.text,
-      shape: "unparseable-text",
-      errorMessage: (err as Error).message,
-    });
+    // US-006 exhaustion tombstone: deterministic ctx.attempt >= maxAttempts.
+    if (attemptNo >= maxAttempts) {
+      const errUsage =
+        err instanceof OpencodePromptError && err.usage !== null
+          ? toEnvelopeUsage(err.usage)
+          : null;
+      if (lastUsage !== null || errUsage !== null) {
+        return tombstoneOf(
+          `attempt-exhausted: ${(err as Error).message.slice(0, 300)}`,
+          lastUsage ?? errUsage,
+        );
+      }
+      // No measurable provider usage on the exhausted attempt — nothing to
+      // anchor (provenance: never zero, never invented). The failure stays
+      // fatal; documented US-006 limitation.
+    }
     throw err;
   }
-  const mapped = mapVerdictToMetrics({
-    raw: parsed,
-    file: input.file,
-    reviewer: input.reviewerId,
-    round: input.round,
-    diffId: input.diff.diffId,
-    // Re-parse from the stored raw text: ParsedDiff carries non-JSON helpers
-    // (hunk resolution) and cannot live in the durable attribute itself.
-    parsedDiff: parseUnifiedDiff(input.diff.raw),
-    bodyLineOffset: input.diff.bodyLineOffset,
-    naiveCited: (finding) =>
-      naiveCitationCheck(
-        emptyRecordWith(input.file, input.round, input.reviewerId, input.diff.diffId, finding),
-        input.diff.doc,
-      ).find((c) => c.finding_id === finding.finding_id)?.p_cited ?? 0,
-  });
-  if (!mapped.ok) {
-    // Extracted but invalid: the discard-class trigger (explicit enforcement
-    // arrives with US-006; today it is diagnosed and thrown as before).
-    const err = new Error(
-      `reviewer ${input.reviewerId} verdict failed validation: ${mapped.errors.join("; ")}`,
-    );
-    await diagnoseAmbiguousThrow({
-      ctx: input.ctx,
-      file: input.file,
-      round: input.round,
-      reviewerId: input.reviewerId,
-      stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
-      attempt: attemptNo,
-      usage: result.usage,
-      text: result.text,
-      shape: "discarded-verdict",
-      errorMessage: err.message,
-    });
-    throw err;
-  }
-  return { tuple: { agent: mapped.agentRecord, metrics: mapped.record }, tokens: result.usage ?? result.tokens, turnDiagnosis };
 }
 
 /** Single-finding metrics record scoping for the naive fallback citation. */
@@ -1213,7 +1408,7 @@ const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
     if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
-    const { tuple, tokens } = await runReviewTurn({
+    const { verdict, tokens } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-A",
       file: fri.file,
@@ -1222,7 +1417,7 @@ const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
       diff,
       attempt: ctx.attempt,
     });
-    ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-A"), tuple);
+    ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-A"), verdict);
     return { output: fri, tokens };
   },
   route: (_ctx, _input, fri) => goTo(ReviewBStart, fri),
@@ -1245,7 +1440,7 @@ const ReviewBStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
     if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
-    const { tuple, tokens } = await runReviewTurn({
+    const { verdict, tokens } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-B",
       file: fri.file,
@@ -1254,7 +1449,7 @@ const ReviewBStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
       diff,
       attempt: ctx.attempt,
     });
-    ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-B"), tuple);
+    ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-B"), verdict);
     return { output: fri, tokens };
   },
   route: (_ctx, _input, fri) => goTo(VerdictCheckStep, fri),
@@ -1273,9 +1468,21 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
     const dropped: KeptFindings["dropped"] = [];
     for (const reviewerId of ["reviewer-A", "reviewer-B"] as const) {
       const key = verdictKeyOf(fri.file, fri.round, reviewerId);
-      const tuple = ppVerdict.get(ctx, key);
-      if (tuple === undefined) {
+      const verdict = ppVerdict.get(ctx, key);
+      if (verdict === undefined) {
         throw new Error(`verdict record missing for ${key}`);
+      }
+      // US-006 tombstone: a discarded reviewer contributes ZERO kept findings
+      // — the discard rides the existing dropped-findings semantics. With
+      // both reviewers tombstoned keptCount stays 0 and the keptCount-0
+      // route below proceeds (degraded, unreviewed round — never a failure).
+      if (isVerdictTombstone(verdict)) {
+        dropped.push({
+          finding_id: `tombstoned:${reviewerId}`,
+          reviewer: reviewerId,
+          reason: `reviewer discarded (attempt ${verdict.attempt}): ${verdict.reason}`,
+        });
+        continue;
       }
       // Citation check: LIVE Jev nouls when configured (Phase 3 swap-in,
       // createCitationChecker seam), else the naive code-only default. A
@@ -1293,14 +1500,14 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
             return r;
           },
         };
-        citations = await createCitationChecker(counting).check(tuple.metrics, diff.doc);
+        citations = await createCitationChecker(counting).check(verdict.metrics, diff.doc);
         if (jt > 0) await recordJevUsage(ctx, `pp-verdict-check:${fri.file}#${fri.round}`, jt);
       } else {
-        citations = naiveCitationCheck(tuple.metrics, diff.doc);
+        citations = naiveCitationCheck(verdict.metrics, diff.doc);
       }
       for (const check of citations) {
-        const agentFinding = tuple.agent.findings.find((f) => f.finding_id === check.finding_id);
-        const metricsFinding = tuple.metrics.findings.find((f) => f.finding_id === check.finding_id);
+        const agentFinding = verdict.agent.findings.find((f) => f.finding_id === check.finding_id);
+        const metricsFinding = verdict.metrics.findings.find((f) => f.finding_id === check.finding_id);
         if (agentFinding === undefined || metricsFinding === undefined) continue;
         if (check.p_cited < 1) {
           dropped.push({
@@ -1807,7 +2014,7 @@ const PrepReviewAStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const diff = ppPrepDiff.get(ctx, "diff");
     const state = ppPrepState.get(ctx, "state");
     if (diff === undefined || state === undefined) throw new Error("prep diff/state missing");
-    const { tuple, tokens } = await runReviewTurn({
+    const { verdict, tokens } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-A",
       file: PREP_SPEC_FILE,
@@ -1816,7 +2023,7 @@ const PrepReviewAStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
       diff,
       attempt: ctx.attempt,
     });
-    ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-A"), tuple);
+    ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-A"), verdict);
     return { output: input, tokens };
   },
   route: (_ctx, _input, input) => goTo(PrepReviewBStart, input),
@@ -1842,7 +2049,7 @@ const PrepReviewBStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const diff = ppPrepDiff.get(ctx, "diff");
     const state = ppPrepState.get(ctx, "state");
     if (diff === undefined || state === undefined) throw new Error("prep diff/state missing");
-    const { tuple, tokens } = await runReviewTurn({
+    const { verdict, tokens } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-B",
       file: PREP_SPEC_FILE,
@@ -1851,7 +2058,7 @@ const PrepReviewBStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
       diff,
       attempt: ctx.attempt,
     });
-    ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-B"), tuple);
+    ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-B"), verdict);
     return { output: input, tokens };
   },
   route: (_ctx, _input, input) => goTo(PrepVerdictCheckStep, input),
@@ -1873,11 +2080,23 @@ const PrepVerdictCheckStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     const dropped: KeptFindings["dropped"] = [];
     for (const reviewerId of ["reviewer-A", "reviewer-B"] as const) {
       const key = verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, reviewerId);
-      const tuple = ppPrepVerdict.get(ctx, key);
-      if (tuple === undefined) throw new Error(`prep verdict missing for ${key}`);
-      for (const check of naiveCitationCheck(tuple.metrics, diff.doc)) {
-        const agentFinding = tuple.agent.findings.find((f) => f.finding_id === check.finding_id);
-        const metricsFinding = tuple.metrics.findings.find((f) => f.finding_id === check.finding_id);
+      const verdict = ppPrepVerdict.get(ctx, key);
+      if (verdict === undefined) throw new Error(`prep verdict missing for ${key}`);
+      // US-006 tombstone: a discarded prep reviewer contributes ZERO kept
+      // findings; with both discarded the findings list stays empty and
+      // PrepLoopDecisionStep finalizes (revise requires findings > 0) — the
+      // prep loop TERMINATES on a degraded, unreviewed iteration.
+      if (isVerdictTombstone(verdict)) {
+        dropped.push({
+          finding_id: `tombstoned:${reviewerId}`,
+          reviewer: reviewerId,
+          reason: `reviewer discarded (attempt ${verdict.attempt}): ${verdict.reason}`,
+        });
+        continue;
+      }
+      for (const check of naiveCitationCheck(verdict.metrics, diff.doc)) {
+        const agentFinding = verdict.agent.findings.find((f) => f.finding_id === check.finding_id);
+        const metricsFinding = verdict.metrics.findings.find((f) => f.finding_id === check.finding_id);
         if (agentFinding === undefined || metricsFinding === undefined) continue;
         if (check.p_cited < 1) {
           dropped.push({

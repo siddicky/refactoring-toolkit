@@ -16,6 +16,7 @@ import type {
   BurnDownSeriesView,
   CommitView,
   DashboardStateView,
+  DegradedRoundView,
   DexActiveStepWire,
   DexAttributeWire,
   DexHistoryWire,
@@ -649,6 +650,77 @@ export function killTimeline(events: readonly NormalizedKillEvent[]): KillTimeli
 }
 
 // ---------------------------------------------------------------------------
+// US-006 degraded rounds (tombstoned reviewer verdicts)
+// ---------------------------------------------------------------------------
+
+export interface ParsedTombstone {
+  file: string;
+  round: number;
+  reviewer: string;
+  reason: string;
+}
+
+/** Parses a verdict attribute key suffix `<sanitized-file>#<round>#<reviewer>`. */
+function parseVerdictKeySuffix(suffix: string): { file: string; round: number; reviewer: string } | null {
+  const reviewerSep = suffix.lastIndexOf("#");
+  const roundSep = reviewerSep > 0 ? suffix.lastIndexOf("#", reviewerSep - 1) : -1;
+  if (reviewerSep <= 0 || roundSep <= 0) return null;
+  const roundPart = suffix.slice(roundSep + 1, reviewerSep);
+  const round = Number(roundPart);
+  if (!Number.isInteger(round) || roundPart === "") return null;
+  return {
+    file: suffix.slice(0, roundSep).replace(/__/g, "/"),
+    round,
+    reviewer: suffix.slice(reviewerSep + 1),
+  };
+}
+
+/**
+ * US-006 degraded rounds per flow: groups of >= 2 tombstones
+ * (`{reviewer, discarded: true, ...}` under pp-verdict / pp-prep-verdict)
+ * for a file+round with NO completed verdict record. A tombstoned reviewer
+ * is NOT a VerdictRecord, so such rounds surface `unreviewed` everywhere;
+ * this derives the explicit DEGRADED marker for /api/state + the headline.
+ */
+export function degradedRoundsOf(flowId: string, state: DexStateWire | null): DegradedRoundView[] {
+  const tombstones = new Map<string, ParsedTombstone[]>();
+  const completed = new Set<string>();
+  for (const attr of state?.attributes ?? []) {
+    const key = typeof attr?.key === "string" ? attr.key : "";
+    if (!key.startsWith("pp-verdict/") && !key.startsWith("pp-prep-verdict/")) continue;
+    const parsedKey = parseVerdictKeySuffix(key.slice(key.indexOf("/") + 1));
+    if (parsedKey === null) continue;
+    const groupKey = `${parsedKey.file}\u0000${parsedKey.round}`;
+    const value = attr?.value as Record<string, unknown> | null | undefined;
+    if (value !== null && typeof value === "object" && value.discarded === true) {
+      const reviewer = typeof value.reviewer === "string" ? value.reviewer : parsedKey.reviewer;
+      const reason = typeof value.reason === "string" ? value.reason : "";
+      const list = tombstones.get(groupKey) ?? [];
+      list.push({ file: parsedKey.file, round: parsedKey.round, reviewer, reason });
+      tombstones.set(groupKey, list);
+    } else if (
+      value !== null &&
+      typeof value === "object" &&
+      typeof (value as { metrics?: { file?: unknown } }).metrics?.file === "string"
+    ) {
+      completed.add(groupKey);
+    }
+  }
+  const out: DegradedRoundView[] = [];
+  for (const [groupKey, list] of tombstones) {
+    if (list.length < 2 || completed.has(groupKey)) continue;
+    out.push({
+      flowId,
+      file: list[0]?.file ?? "<unknown>",
+      round: list[0]?.round ?? 0,
+      reviewers: list.map((t) => t.reviewer),
+      reasons: list.map((t) => t.reason),
+    });
+  }
+  return out.sort((a, b) => (a.file !== b.file ? a.file.localeCompare(b.file) : a.round - b.round));
+}
+
+// ---------------------------------------------------------------------------
 // Aggregator
 // ---------------------------------------------------------------------------
 
@@ -740,6 +812,9 @@ export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[
  * - running + a kill after start + NO post-kill activity + dex unreachable
  *   → "killed (dex down)";
  * - completed/failed → terminal wording with the file count.
+ *
+ * US-006: `degradedRounds` > 0 appends an explicit `DEGRADED` marker so no
+ * surface can read a zero-reviewer round as clean.
  */
 export function lifecycleHeadline(input: {
   flow: FlowView | undefined;
@@ -748,17 +823,23 @@ export function lifecycleHeadline(input: {
   killEvents: readonly NormalizedKillEvent[];
   dexAvailable: boolean;
   feed: readonly FeedEntry[];
+  /** US-006: count of the headline flow's degraded (all-reviewers-discarded) rounds. */
+  degradedRounds?: number;
 }): string {
   const { flow, filesDone, filesTotal } = input;
   if (flow === undefined) return "no port flow found";
   const files = `${filesDone}/${filesTotal} files`;
+  const degraded =
+    input.degradedRounds !== undefined && input.degradedRounds > 0
+      ? ` · DEGRADED (${input.degradedRounds} unreviewed round${input.degradedRounds === 1 ? "" : "s"})`
+      : "";
   const killAfterStart = input.killEvents
     .filter((e) => tsMs(e.utc) > tsMs(flow.startTime))
     .sort((a, b) => tsMs(b.utc) - tsMs(a.utc))[0];
   const status = flow.status;
   if (status === "completed" || status === "failed") {
     const killedNote = killAfterStart !== undefined ? " (survived kill)" : "";
-    return `◆ ${flow.flowId}: ${files} · ${status}${killedNote}`;
+    return `◆ ${flow.flowId}: ${files} · ${status}${killedNote}${degraded}`;
   }
   if (killAfterStart !== undefined) {
     const killMs = tsMs(killAfterStart.utc);
@@ -766,14 +847,14 @@ export function lifecycleHeadline(input: {
       (e) => e.flowId === flow.flowId && tsMs(e.startedAt) > killMs,
     );
     if (activityAfterKill) {
-      return `◆ ${flow.flowId}: ${files} · resumed (killed ${killAfterStart.utc.slice(11, 19)}Z)`;
+      return `◆ ${flow.flowId}: ${files} · resumed (killed ${killAfterStart.utc.slice(11, 19)}Z)${degraded}`;
     }
     if (!input.dexAvailable) {
-      return `◆ ${flow.flowId}: ${files} · killed (dex down since ${killAfterStart.utc.slice(11, 19)}Z)`;
+      return `◆ ${flow.flowId}: ${files} · killed (dex down since ${killAfterStart.utc.slice(11, 19)}Z)${degraded}`;
     }
-    return `◆ ${flow.flowId}: ${files} · running (kill at ${killAfterStart.utc.slice(11, 19)}Z, awaiting resume)`;
+    return `◆ ${flow.flowId}: ${files} · running (kill at ${killAfterStart.utc.slice(11, 19)}Z, awaiting resume)${degraded}`;
   }
-  return `◆ ${flow.flowId}: ${files} · running`;
+  return `◆ ${flow.flowId}: ${files} · running${degraded}`;
 }
 
 /** Sorts flows newest-first (startTime desc, flowId as tiebreak). */
@@ -864,6 +945,11 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
   // to the parent port.Project flow) + its queue progress + kill overlay.
   const headlineFlow = flowViews.find((f) => !f.flowId.startsWith("SubFlow:"));
   const headlineQueue = headlineQueueFor(headlineFlow, queueSummaries);
+  // US-006 degraded rounds: derived per flow from the verdict attributes;
+  // the headline flow's count drives the headline DEGRADED marker.
+  const degradedRounds = flowsSorted.flatMap((f) =>
+    degradedRoundsOf(f.flowId, input.dex.states[f.flowId] ?? null),
+  );
   const headline = lifecycleHeadline({
     flow: headlineFlow,
     filesDone: headlineQueue.done + headlineQueue.blocked,
@@ -871,6 +957,7 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     killEvents: input.killEvents.events,
     dexAvailable: input.dex.available,
     feed,
+    degradedRounds: degradedRounds.filter((r) => r.flowId === headlineFlow?.flowId).length,
   });
 
   return {
@@ -898,6 +985,7 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     })),
     killTimeline: killTimeline(input.killEvents.events),
     agentUsage: aggregateAgentUsage(feed),
+    degradedRounds,
   };
 }
 

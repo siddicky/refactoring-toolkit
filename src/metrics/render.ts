@@ -39,6 +39,7 @@ import {
   type QueueKind,
   type TokenUsage,
   type VerdictRecord,
+  type VerdictTombstone,
   tokenTotalOf,
 } from "./types.js";
 
@@ -48,6 +49,12 @@ const FIXER_STEP_ID = "pp-fixer";
 export interface MetricsRenderInput {
   envelopes: readonly EnvelopeEvent[];
   verdicts: readonly VerdictRecord[];
+  /**
+   * US-006 tombstones (discarded reviewer verdicts) with their file+round
+   * target, recovered by the driver from the verdict attribute keys. A round
+   * with ZERO completed records and >= 2 tombstones is DEGRADED.
+   */
+  tombstones?: ReadonlyArray<VerdictTombstone & { file: string; round: number }>;
   burnDown: readonly QueueBurnDownEvent[];
   /** Merged kill-events.json sidecar; null/undefined when the run had no kill. */
   killEvents?: KillEventsFile | null;
@@ -84,6 +91,12 @@ export interface ReportJson {
     /** Interrupted envelopes over REAL attempts (attempt >= 1) only. */
     interrupted_envelope_count: number;
     verdict_record_count: number;
+    /** Rounds with zero completed records and every reviewer tombstoned (US-006). */
+    degraded_round_count: number;
+    /** Total discarded-reviewer tombstones in the stream. */
+    tombstoned_reviewer_count: number;
+    /** Tombstones whose reason is attempt exhaustion (final-attempt tokens only). */
+    exhausted_attempt_tombstones: number;
     /** Total over model-calling roles, real attempts only; null when none. */
     tokens_model_roles: number | null;
     wall_clock_ms_total: number;
@@ -93,6 +106,9 @@ export interface ReportJson {
     round: number;
     records: Array<{ reviewer: string; diff_id: string; findings: Finding[] }>;
     agreement: AgreementRecord;
+    /** True when the round reached verdict-check with every reviewer discarded. */
+    degraded: boolean;
+    tombstones: Array<{ reviewer: string; reason: string; attempt: number }>;
     citation_checks: CitationCheckResult[];
   }>;
   tokens_by_file_role: Array<{
@@ -267,6 +283,10 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     fileRoundKeys.add(`${v.file}\u0000${v.round}`);
     files.add(v.file);
   }
+  for (const t of input.tombstones ?? []) {
+    fileRoundKeys.add(`${t.file}\u0000${t.round}`);
+    files.add(t.file);
+  }
 
   // ---- verdicts grouped by file+round ------------------------------------
   const verdictsByGroup = new Map<string, VerdictRecord[]>();
@@ -275,6 +295,15 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     const list = verdictsByGroup.get(key);
     if (list) list.push(v);
     else verdictsByGroup.set(key, [v]);
+  }
+
+  // ---- US-006 tombstones grouped by file+round ---------------------------
+  const tombstonesByGroup = new Map<string, Array<VerdictTombstone>>();
+  for (const t of input.tombstones ?? []) {
+    const key = `${t.file}\u0000${t.round}`;
+    const list = tombstonesByGroup.get(key);
+    if (list) list.push(t);
+    else tombstonesByGroup.set(key, [t]);
   }
 
   const fileRounds: ReportJson["file_rounds"] = [];
@@ -286,6 +315,11 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
       compareStrings(p.reviewer, q.reviewer),
     );
     const agreement = agreementForGroup(records, file, round);
+    const groupTombstones = [...(tombstonesByGroup.get(key) ?? [])];
+    // DEGRADED: the round reached verdict-check and EVERY reviewer was
+    // discarded (zero completed records, >= 2 tombstones) — never readable
+    // as a clean round on any surface.
+    const degraded = records.length === 0 && groupTombstones.length >= 2;
     const citationChecks: CitationCheckResult[] = records.flatMap((r) =>
       r.citation_check.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
     );
@@ -298,6 +332,10 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
         findings: r.findings,
       })),
       agreement,
+      degraded,
+      tombstones: groupTombstones
+        .map((t) => ({ reviewer: t.reviewer, reason: t.reason, attempt: t.attempt }))
+        .sort((p, q) => compareStrings(p.reviewer, q.reviewer)),
       citation_checks: citationChecks,
     });
   }
@@ -482,6 +520,11 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
       start_marker_count: startMarkerCount,
       interrupted_envelope_count: interruptedRealCount,
       verdict_record_count: verdicts.length,
+      degraded_round_count: fileRounds.filter((fr) => fr.degraded).length,
+      tombstoned_reviewer_count: (input.tombstones ?? []).length,
+      exhausted_attempt_tombstones: (input.tombstones ?? []).filter((t) =>
+        t.reason.startsWith("attempt-exhausted"),
+      ).length,
       tokens_model_roles: modelTokens,
       wall_clock_ms_total: wallClockTotal,
     },
@@ -545,6 +588,17 @@ function renderMarkdown(report: ReportJson): string {
     `- envelopes: ${report.summary.envelope_count} (start markers: ${report.summary.start_marker_count}, interrupted: ${report.summary.interrupted_envelope_count})`,
   );
   lines.push(`- completed verdict records: ${report.summary.verdict_record_count}`);
+  lines.push(`- tombstoned reviewers: ${report.summary.tombstoned_reviewer_count}`);
+  if (report.summary.degraded_round_count > 0) {
+    lines.push(
+      `- DEGRADED rounds: ${report.summary.degraded_round_count} (every reviewer discarded — the round is UNREVIEWED, not clean)`,
+    );
+  }
+  if (report.summary.exhausted_attempt_tombstones > 0) {
+    lines.push(
+      "- token under-count (attempt exhaustion): a tombstone anchors only the FINAL attempt's tokens; attempts 1..n-1 of an exhausted step leave no durable trace (0(g)) and are NOT reconciled — token totals under-count those steps.",
+    );
+  }
   const tokens = report.summary.tokens_model_roles;
   lines.push(
     tokens === null
@@ -560,9 +614,15 @@ function renderMarkdown(report: ReportJson): string {
   }
   for (const fr of report.file_rounds) {
     lines.push("");
-    lines.push(`### ${fr.file} — round ${fr.round} (agreement: ${fr.agreement.outcome})`);
+    lines.push(
+      `### ${fr.file} — round ${fr.round} (agreement: ${fr.agreement.outcome}${fr.degraded ? " — DEGRADED" : ""})`,
+    );
     if (fr.records.length === 0) {
-      lines.push("_no completed verdict records (unreviewed)_");
+      lines.push(
+        fr.degraded
+          ? "_DEGRADED: every reviewer discarded — the round proceeds UNREVIEWED_"
+          : "_no completed verdict records (unreviewed)_",
+      );
     } else {
       lines.push("| reviewer | findings | severities |");
       lines.push("| --- | --- | --- |");
@@ -572,6 +632,9 @@ function renderMarkdown(report: ReportJson): string {
       }
     }
     lines.push(`- agreement: ${fr.agreement.outcome} — ${mdCell(fr.agreement.reason)}`);
+    for (const t of fr.tombstones) {
+      lines.push(`- tombstone: ${mdCell(t.reviewer)} discarded at attempt ${t.attempt} — ${mdCell(t.reason)}`);
+    }
     if (fr.citation_checks.length > 0) {
       const checks = fr.citation_checks
         .map((c) => `${c.finding_id}=${pFmt(c.p_cited)}`)
