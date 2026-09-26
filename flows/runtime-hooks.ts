@@ -13,12 +13,31 @@
 
 import { execFileSync } from "node:child_process";
 import type { JudgmentClient } from "../src/typesafe/client.js";
+import type { TurnHealthAssessor } from "../src/metrics/types.js";
 
 let PORT_JUDGMENT: JudgmentClient | undefined;
 let PORT_FAULT: string | undefined;
+/**
+ * Tier-1 turn-health assessor (US-003). NULL by default = Tier-1 unavailable:
+ * ambiguous turns degrade to no-diagnosis and the step proceeds unchanged
+ * (AC-B3). The IMPLEMENTATION lives in src/typesafe/turn-health.ts — this
+ * module (and every control-flow module) imports only the interface; the
+ * import-boundary test asserts the judgment module is never loaded by flows.
+ */
+let PORT_TURN_HEALTH: TurnHealthAssessor | null = null;
 
 export function configurePortJudgment(client: JudgmentClient): void {
   PORT_JUDGMENT = client;
+}
+
+/** Injects (or removes, null) the Tier-1 assessor. Runner-side, idempotent. */
+export function configureTurnHealthAssessor(assessor: TurnHealthAssessor | null): void {
+  PORT_TURN_HEALTH = assessor;
+}
+
+/** The configured assessor, or null when Tier-1 is unavailable (fail-open). */
+export function portTurnHealthAssessor(): TurnHealthAssessor | null {
+  return PORT_TURN_HEALTH;
 }
 
 export function requirePortJudgment(): JudgmentClient {

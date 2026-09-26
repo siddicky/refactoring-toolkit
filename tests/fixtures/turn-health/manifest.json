@@ -1,0 +1,61 @@
+{
+  "_readme": "Raw SDK message shapes ({info:{tokens}, parts}) for turn-health tests. _expected: retry=Tier-0 degenerate (no text, usage present, not aborted); generic_retry=fails downstream verdict extraction but NOT Tier-0 (text present); discard_class=non-Tier-0 persona prose; pass=healthy negative; abort_path=aborted (handled at flows/port-project.ts:563, NOT Tier-0). Sources: BUILD_NOTES \u00a7WAVE-4 session signatures (p4-6/8/9/10, cx-4); healthy ~235-token verdict = wave-5 Sisyphus signature. NOTE: aborted-no-text is NOT a raw reply shape \u2014 aborted turns surface as the SDK MessageAbortedError path (upstream-failure retryable), covered by the inline test, not by fixtures.",
+  "cases": [
+    {
+      "id": "deg-01-p4-6-review-a-first",
+      "expected": "retry"
+    },
+    {
+      "id": "deg-02-p4-6-review-a-identical-replay",
+      "expected": "retry"
+    },
+    {
+      "id": "deg-03-p4-8-review-b-3out",
+      "expected": "retry"
+    },
+    {
+      "id": "deg-04-p4-8-review-b-0out-non-text-part",
+      "expected": "retry"
+    },
+    {
+      "id": "deg-05-p4-9-review-a-3out",
+      "expected": "retry"
+    },
+    {
+      "id": "deg-06-p4-10-review-b-1out",
+      "expected": "retry"
+    },
+    {
+      "id": "deg-07-cx-4-review-a-6out",
+      "expected": "retry"
+    },
+    {
+      "id": "deg-08-cx-4-review-a-4out",
+      "expected": "retry"
+    },
+    {
+      "id": "deg-09-cx-4-review-a-16out",
+      "expected": "retry"
+    },
+    {
+      "id": "generic-885-token-unparseable",
+      "expected": "generic_retry"
+    },
+    {
+      "id": "generic-cache-identical-replay",
+      "expected": "generic_retry"
+    },
+    {
+      "id": "discard-persona-prose-31out",
+      "expected": "discard_class"
+    },
+    {
+      "id": "healthy-verdict-235out",
+      "expected": "pass"
+    },
+    {
+      "id": "healthy-text-present-0out",
+      "expected": "pass"
+    }
+  ]
+}

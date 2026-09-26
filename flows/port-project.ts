@@ -44,6 +44,7 @@ import {
   envelopeStepClass,
   envelopeStream,
   persistenceAttributes,
+  publishTurnDiagnosisEvent,
   type EnvelopeOutcome,
   type EnvelopeStepClass,
 } from "./steps/envelope.js";
@@ -52,6 +53,7 @@ import {
   configurePortJudgment,
   crashPortWorker,
   faultMatches,
+  portTurnHealthAssessor,
   requirePortJudgment,
 } from "./runtime-hooks.js";
 import {
@@ -100,11 +102,15 @@ import {
 } from "../src/queues/vitest-queue.js";
 import { portJevLive } from "./runtime-hooks.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
-import type {
-  DiffDocument,
-  Finding as MetricsFinding,
-  TokenUsage,
-  VerdictRecord as MetricsVerdictRecord,
+import {
+  buildRetryContextDiagnosis,
+  type DiffDocument,
+  type Finding as MetricsFinding,
+  type TokenUsage,
+  type TurnDiagnosis,
+  type TurnObservation,
+  type TurnShapeClass,
+  type VerdictRecord as MetricsVerdictRecord,
 } from "../src/metrics/types.js";
 import { createCitationChecker, naiveCitationCheck } from "../src/typesafe/verdict-check.js";
 import { createJevPrioritizer, naivePrioritize } from "../src/typesafe/prioritize.js";
@@ -573,12 +579,6 @@ async function runAgentTurn(input: {
   return { text: reply.text, tokens, usage };
 }
 
-/**
- * Reviewer turn inside a durable step: fresh session → fence persisted with
- * THIS step's decision (0(g)) → prompt with the diff by value → verdict
- * extracted, validated, and mapped onto the metrics shapes. Any failure
- * throws so dex retries the whole turn on a fresh session.
- */
 export interface ReviewTurnDiff {
   raw: string;
   doc: DiffDocument;
@@ -586,7 +586,73 @@ export interface ReviewTurnDiff {
   bodyLineOffset: number;
 }
 
-async function runReviewTurn(input: {
+/**
+ * Tier-1 evidence-only diagnosis at an ambiguous-shape throw site (US-003).
+ * The assessor is the INJECTED seam (flows/runtime-hooks.ts) — this module
+ * never imports the turn-health implementation (import-boundary, AC-B2).
+ * Fail-open end to end: no assessor, an assessor error, or a null diagnosis
+ * all leave the failure path EXACTLY as it was (AC-B3). The diagnosis, when
+ * produced, reaches the telemetry stream as a record-role event via the
+ * existing publisher path; the throwing attempt cannot persist anything
+ * durably (0(g)) — the successor attempt's re-record is the durable surface.
+ */
+async function diagnoseAmbiguousThrow(input: {
+  ctx: Context;
+  file: string;
+  round: number;
+  reviewerId: string;
+  stepId: string;
+  attempt: number;
+  usage: TokenUsage | null;
+  text: string;
+  shape: TurnShapeClass;
+  errorMessage: string;
+}): Promise<void> {
+  const assessor = portTurnHealthAssessor();
+  if (assessor === null) return; // Tier-1 unavailable -> no-diagnosis (fail-open)
+  const observation: TurnObservation = {
+    shape: input.shape,
+    output_tokens: input.usage?.output_tokens ?? null,
+    reasoning_tokens: input.usage?.reasoning_tokens ?? null,
+    text_chars: input.text.length,
+    error: input.errorMessage,
+  };
+  try {
+    const diagnosis = await assessor.assess({
+      file: input.file,
+      stepId: input.stepId,
+      turn: `${input.stepId}@${markerKeyOf(input.file, input.round)}`,
+      reviewer: input.reviewerId,
+      attempt: input.attempt,
+      prior_failed_attempts: Math.max(0, input.attempt - 1),
+      lane: input.attempt >= 2 ? "demoted" : "default",
+      shape: observation,
+      recordedAtUtc: new Date().toISOString(),
+    });
+    if (diagnosis !== null) publishTurnDiagnosisEvent(input.ctx, diagnosis);
+  } catch {
+    // Swallowed deliberately: diagnosis is evidence-only and must never
+    // alter the step's failure path (AC-B3).
+  }
+}
+
+/**
+ * Reviewer turn inside a durable step: fresh session → fence persisted with
+ * THIS step's decision (0(g)) → prompt with the diff by value → verdict
+ * extracted, validated, and mapped onto the metrics shapes. Any failure
+ * throws so dex retries the whole turn on a fresh session.
+ *
+ * Turn-health (US-003, evidence-only):
+ * - an ambiguous-shape throw (text present, verdict extraction failed /
+ *   validation discarded) runs the injected Tier-1 assessor and publishes the
+ *   diagnosis to the stream — fire-and-forget, zero control-flow effect;
+ * - a SUCCESS on attempt n >= 2 re-records the prior attempts' diagnosis
+ *   context DETERMINISTICALLY (attempt count is visible here; the throwing
+ *   attempt cannot persist — 0(g)) on the returned record, which the review
+ *   step piggybacks onto its completion envelope. A first-attempt success
+ *   records nothing (healthy turns are shape-trivial: zero Jev, zero records).
+ */
+export async function runReviewTurn(input: {
   ctx: Context;
   reviewerId: string;
   file: string;
@@ -596,7 +662,9 @@ async function runReviewTurn(input: {
   /** Dex attempt (1-based). Retries get a cache-busting suffix (live finding:
    *  identical retry prompts replayed IDENTICAL truncated provider turns). */
   attempt?: number;
-}): Promise<{ tuple: ReviewTuple; tokens: number | TokenUsage | null }> {
+  /** The durable step's id (diagnosis turn identity: `<stepId>@<identity>`). */
+  stepId?: string;
+}): Promise<{ tuple: ReviewTuple; tokens: number | TokenUsage | null; turnDiagnosis: TurnDiagnosis | null }> {
   const harness = requireHarness();
   const label = fenceLabel(input.file, input.round, input.epoch);
   const session = await harness.createSession(label);
@@ -633,6 +701,9 @@ async function runReviewTurn(input: {
   // fallback lane automatically.
   const agent = reviewerAgentOverride();
   const model = demoteReviewerLane(attemptNo, reviewerModelOverride(), reviewerModelFallback());
+  // Lane LABEL from the same f(attempt) policy (generic instantiation) — used
+  // only in diagnosis records, never for decisions (AC-B2).
+  const lane = demoteReviewerLane<"default" | "demoted">(attemptNo, "default", "demoted");
   const result = await runAgentTurn({
     def: REVIEWER,
     sessionId: session.id,
@@ -643,7 +714,51 @@ async function runReviewTurn(input: {
     ...(model !== undefined ? { model } : {}),
   });
 
-  const parsed = extractJsonObject(result.text);
+  // Deterministic successor re-record (US-003): on attempt n >= 2 the prior
+  // attempt(s) left NO durable trace (0(g) — a throwing attempt cannot
+  // persist), so THIS successful attempt records the deterministic context:
+  // attempt count + resulting lane. NO Jev call — a parsed verdict is
+  // shape-trivial and the battery must never fire on it (AC-B1).
+  const turnDiagnosis =
+    attemptNo >= 2
+      ? buildRetryContextDiagnosis({
+          file: input.file,
+          stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+          identity: markerKeyOf(input.file, input.round),
+          reviewer: input.reviewerId,
+          attempt: attemptNo,
+          shape: {
+            shape: "parsed",
+            output_tokens: result.usage?.output_tokens ?? null,
+            reasoning_tokens: result.usage?.reasoning_tokens ?? null,
+            text_chars: result.text.length,
+            error: null,
+          },
+          recordedAtUtc: new Date().toISOString(),
+        })
+      : null;
+
+  let parsed: unknown;
+  try {
+    parsed = extractJsonObject(result.text);
+  } catch (err) {
+    // Ambiguous shape: parseable-length text that fails verdict extraction
+    // (the 885-token case). Evidence-only Tier-1 assessment; the original
+    // error still drives the retry (AC-B2/B3).
+    await diagnoseAmbiguousThrow({
+      ctx: input.ctx,
+      file: input.file,
+      round: input.round,
+      reviewerId: input.reviewerId,
+      stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+      attempt: attemptNo,
+      usage: result.usage,
+      text: result.text,
+      shape: "unparseable-text",
+      errorMessage: (err as Error).message,
+    });
+    throw err;
+  }
   const mapped = mapVerdictToMetrics({
     raw: parsed,
     file: input.file,
@@ -661,11 +776,26 @@ async function runReviewTurn(input: {
       ).find((c) => c.finding_id === finding.finding_id)?.p_cited ?? 0,
   });
   if (!mapped.ok) {
-    throw new Error(
+    // Extracted but invalid: the discard-class trigger (explicit enforcement
+    // arrives with US-006; today it is diagnosed and thrown as before).
+    const err = new Error(
       `reviewer ${input.reviewerId} verdict failed validation: ${mapped.errors.join("; ")}`,
     );
+    await diagnoseAmbiguousThrow({
+      ctx: input.ctx,
+      file: input.file,
+      round: input.round,
+      reviewerId: input.reviewerId,
+      stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+      attempt: attemptNo,
+      usage: result.usage,
+      text: result.text,
+      shape: "discarded-verdict",
+      errorMessage: err.message,
+    });
+    throw err;
   }
-  return { tuple: { agent: mapped.agentRecord, metrics: mapped.record }, tokens: result.usage ?? result.tokens };
+  return { tuple: { agent: mapped.agentRecord, metrics: mapped.record }, tokens: result.usage ?? result.tokens, turnDiagnosis };
 }
 
 /** Single-finding metrics record scoping for the naive fallback citation. */

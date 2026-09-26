@@ -1,0 +1,22 @@
+{
+  "_id": "discard-persona-prose-31out",
+  "_expected": "discard_class",
+  "info": {
+    "tokens": {
+      "input": 61234,
+      "output": 31,
+      "reasoning": 0,
+      "cache": {
+        "read": 88000,
+        "write": 512
+      }
+    },
+    "cost": 0
+  },
+  "parts": [
+    {
+      "type": "text",
+      "text": "As a meticulous reviewer, I shall now examine the diff with great care."
+    }
+  ]
+}

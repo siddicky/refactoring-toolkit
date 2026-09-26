@@ -1,0 +1,151 @@
+{
+  "task": "Build the harness to presentation-ready state: new system lands AND is verified live (kill+resume witnessed on the final code), demo artifacts captured \u2014 the refactor serves presentation-readiness, not vice versa",
+  "sourcePlan": ".omc/plans/2026-09-26-post-wave5-consensus.md",
+  "createdAt": "2026-09-26T19:42:00Z",
+  "branchName": "main",
+  "stories": [
+    {
+      "id": "US-001",
+      "subject": "Stage 0 gate: worker-1d handoff, watcher disarm, baseline",
+      "priority": 1,
+      "passes": true,
+      "acceptanceCriteria": [
+        "worker-1d completion report received and its final commit audited (git log vs report claims)",
+        "Tier-1 polish items from worker-1d's assignment verified landed or absence recorded in progress.txt (skip-dupes note)",
+        "Any live watch-kill watcher processes killed: pgrep -f watch-kill returns empty, watcher state files removed, and the watcher script's non-exiting terminal branch (:36-44) is fixed before any re-arm",
+        "bun test fully green and bun run typecheck clean at the baseline commit (fresh run, output recorded in progress.txt)"
+      ],
+      "verifiedAt": "2026-09-26T20:55:00Z",
+      "evidence": "commit audit fcfc7df..cedce86 (11 commits match report); pgrep watch-kill empty + state files removed; script superseded by US-007 stream subscriber (no re-arm); bun test 204/0; tsc clean"
+    },
+    {
+      "id": "US-002",
+      "subject": "Stage 1: Tier-0 predicate + f(attempt) demotion + history gate + stream publish hook",
+      "priority": 2,
+      "passes": true,
+      "acceptanceCriteria": [
+        "degenerateReply guard (usage present AND textOut.length===0 AND not aborted) placed before BOTH src/harness/opencode.ts prompt() exits; aborted-no-text excluded (handled at flows/port-project.ts:563)",
+        "modelOverride threaded runReviewTurn -> runAgentTurn; policy f(attempt): attempt>=2 on review steps demotes from OPENCODE_REVIEWER_MODEL default; no env mutation",
+        "Lead-layer dispatch gate: reads dexcli flow history only (typed parser reuse), stale = newest relevant event age >10min, 5s query timeout, fail-open with 'gate: degraded' surfaced in runner output",
+        "Envelope factory WriteStream publish to port/<flowId>/events with try/catch-swallow at every call site; Step-0 probe confirms WriteStream callable from worker step context (else publish moves to runner-side, deviation recorded)",
+        "Unit tests: degenerate fixtures route retryable; healthy negatives pass; demotion policy = pure f(shape, attempt); WriteStream outage cannot fail a step"
+      ],
+      "verifiedAt": "2026-09-26T22:55:00Z",
+      "evidence": "commit 68b1577 (guard in seam +52, demotion threading, scripts/dispatch-gate.ts 212 lines, envelope stream hook +110); bun test 216/0; tsc clean (fresh)",
+      "criterionAmendments": [
+        {
+          "kind": "superseded",
+          "original": "LIVE: Tier-0 detection + demotion + gate exercised on a real dex flow (not unit-replay only) \u2014 a degenerate-shaped failure or forced fallback observed and recorded in flow history",
+          "replacement": "LIVE observation deferred to and satisfied at the US-009 presentation run (same validation window; evidence recorded in flow history there)",
+          "reason": "Avoids a duplicate token-burning flow purely for observation; US-009 runs on the final code where all Stage-1/2 behaviors are observed together",
+          "evidence": "PRD user directive 21:05Z (presentation-ready goal); US-009 added as the single live-validation gate",
+          "authority": "ralph-lead-session",
+          "timestamp": "2026-09-26T22:55:00Z"
+        }
+      ]
+    },
+    {
+      "id": "US-003",
+      "subject": "Stage 1b: Tier-1 evidence-only turn-health + fixture set + tests",
+      "priority": 3,
+      "passes": false,
+      "acceptanceCriteria": [
+        "src/typesafe/turn-health.ts: Jev nouls fire ONLY on shape-ambiguous turns and discarded verdicts; healthy/shape-trivial turns make zero Jev calls; diagnosis re-recorded by successor attempt on Tier-0 retry (no intra-throwing-step write)",
+        "tests/fixtures/turn-health/ contains ten degenerate + >=3 healthy negatives in raw SDK message shapes, each with expected outcome (incl. NON-Tier-0 for 885-token and persona cases) in the fixture header",
+        "tests/turn-health.test.ts: AC-B1 (all retry-class fixtures -> retryable, >=1 demoted, zero Jev on shape-trivial), AC-B2 (routing = f(shape, attempt), no Tier-1 input), AC-B3 (gate fail-open on missing/stale/query-failure, <=5s)",
+        "Import-boundary assertion: control-flow modules import no judgment modules; Tier-1 unread-by-control-flow verified",
+        "LIVE: Tier-1 diagnosis record observed on the stream/envelope for at least one ambiguous-shape event in a real run"
+      ]
+    },
+    {
+      "id": "US-004",
+      "subject": "Stage 2a: vitest triage as declared Lane-B gate",
+      "priority": 4,
+      "passes": false,
+      "acceptanceCriteria": [
+        "QueueVerifyStep persists parsed failure records into the durable vitest queue attribute (beyond totals)",
+        "classifyMany at queue-build writes {failureClass, attributedFile, reason} per record; unknown attribution -> port-caused (documented); Jev usage via recordJevUsage pattern; FailureClassification extended with attributedFile",
+        "Fix-round feed = existing per-file fix loop reading queue state; consumer test asserts classified records reach the feed and route to attributedFile",
+        "Jev unavailability -> naive classifier fallback (fail-open test); consumer registered in src/judgment-registry.ts with threshold + provenance",
+        "AC-T manifest at tests/fixtures/vitest-triage/manifest.json (id/evidence-path/label/adjudication-note); promotion only if >=20 cases AND >=5/class AND >=90% overall AND >=80% per class, else stays non-default with shortfall recorded"
+      ]
+    },
+    {
+      "id": "US-005",
+      "subject": "Stage 2b: symbol-type uncertain band",
+      "priority": 5,
+      "passes": false,
+      "acceptanceCriteria": [
+        "uncertain_band check label for cascade nouls in [0.30,0.70] (reported separately from <0.8 strong-fail)",
+        "choice_confidence <0.9 -> structured escalation record",
+        "Calibration from /tmp/jev-spot-check-after.json recorded; precedence vs 0.8 cascade documented in symbol-types.ts",
+        "scripts/jev-spot-check.ts re-run (n=36): >=90% maintained; band/strong-fail/escalation rates reported in BUILD_NOTES"
+      ]
+    },
+    {
+      "id": "US-006",
+      "subject": "Stage 2c: verdict repair-or-discard + exhaustion tombstones",
+      "priority": 6,
+      "passes": false,
+      "acceptanceCriteria": [
+        "Deterministic suspicion predicate (span-outside-diff; all-blockers>5; in-step verbatim-repeat vs repaired reply) \u2014 no Tier-1 input (Lane A)",
+        "Tombstone variant {reviewer, discarded, reason, attempt, tokens} tolerated by BOTH VerdictCheckStep (:1029-1034) and PrepVerdictCheckStep (:1629-1632); discarded reviewer -> zero kept findings; surviving reviewer proceeds; round surfaces unreviewed; prep-loop termination verified against PrepLoopDecisionStep",
+        "Attempt exhaustion (deterministic) -> both reviewers tombstoned -> degraded round -> flow reaches terminal-success; degraded marker asserted on metrics render + /api/state + dashboard headline + AC1/AC2 report surfaces",
+        "Tombstoned tokens carried on tombstone + envelope tokens return; AC2 under-count (attempts 1..n-1 lost per 0(g)) stated explicitly in the report",
+        "tests/verdict-repair.test.ts covers: triggered repair, repair success, repair-fail->tombstone, single-reviewer-discard, zero-reviewer degraded round; agreement.ts untouched"
+      ]
+    },
+    {
+      "id": "US-007",
+      "subject": "Stage 2d: stream consumers (dashboard + watcher)",
+      "priority": 7,
+      "passes": false,
+      "acceptanceCriteria": [
+        "src/dashboard/queries.ts gains ReadStream subscriber with poll fallback retained and ENGAGED on subscriber failure (asserted)",
+        "Kill watcher subscribes for pp-queue-verify:start with 30-min bounded wait + 60s poll fallback, fires exactly once, exits cleanly (no-duplicate + clean-exit tests)",
+        "AC-D end-to-end: published event reaches subscriber and appears in /api/state feed payload; no correctness path reads the stream (import/usage assertion)",
+        "LIVE: dashboard renders from the ReadStream subscriber during a real run with >=1 event observed arriving via subscription (not poll fallback), poll fallback demonstrated on forced failure"
+      ]
+    },
+    {
+      "id": "US-008",
+      "subject": "Stage 3: closure \u2014 verifier-gated push, report, demo record, Chris package",
+      "priority": 8,
+      "passes": false,
+      "acceptanceCriteria": [
+        "src/judgment-registry.ts complete (every Lane-B consumer with threshold + effect + provenance surface); AC-R import-boundary AND seam-construction assertions green",
+        "Verifier pass runs per-AC with named evidence; ONLY on verifier PASS: push origin/develop..main (lead line-reviewed) and rewrite PR #1 body; on FAIL, fix or revert stage and re-verify (push blocked)",
+        "Final AC1/AC2 report delivered (inputs /tmp/metrics-*, BUILD_NOTES; exhausted-step under-count stated)",
+        "Demo video re-recorded during a live run showing lifecycle headline + cost columns + stream-fed feed",
+        "Chris-package: one-pager + video + metrics/report.md assembled"
+      ],
+      "criterionAmendments": [
+        {
+          "kind": "superseded",
+          "original": "Final AC1/AC2 report delivered (inputs /tmp/metrics-*, BUILD_NOTES; exhausted-step under-count stated)",
+          "replacement": "Final AC1/AC2 report delivered from the US-009 live validation run (inputs /tmp/metrics-cx6 or successor, BUILD_NOTES; exhausted-step under-count stated)",
+          "reason": "User directive: presentation-readiness is the goal; a second fixture family (php-sample) adds no presentational value over one live validated run \u2014 evidence pivots to the single final-code run",
+          "evidence": "User message: 'We want the new system to land and changes verified before completing. The goal here is to build the harness so it's ready to present rather than the refactor itself'",
+          "authority": "ralph-lead-session",
+          "timestamp": "2026-09-26T21:05:00Z"
+        }
+      ]
+    },
+    {
+      "id": "US-009",
+      "subject": "Presentation-ready gate: live validated run + demo package",
+      "priority": 9,
+      "passes": false,
+      "acceptanceCriteria": [
+        "One full CreatorPay live run executed on the FINAL code (all Stage-1/2 changes landed): completes through kill+resume with AC1 battery ALL PASS regenerated from THIS run",
+        "AC2 report regenerated from THIS run: provenance_ok=true, all envelopes dispatch-anchored, degraded/unreviewed semantics visible if triggered",
+        "Demo video re-recorded during this run: lifecycle headline (running->killed->resumed->completed), cost columns, stream-fed live feed all visible",
+        "Chris package assembled: one-pager (what the harness is, what it proved, costs) + video + metrics/report.md",
+        "Codex reviewer verification of US-002..US-008 code changes against PRD criteria (Step 7) PASSED before this story",
+        "php-sample Phase 7 run DESCOPED (amended criterion, recorded below) unless explicitly re-requested"
+      ],
+      "criterionAmendments": []
+    }
+  ],
+  "criterionAmendments": []
+}

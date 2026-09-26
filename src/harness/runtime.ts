@@ -187,12 +187,17 @@ export function reviewerModelFallback(): { providerID: string; modelID: string }
  * reads, no durable state, no clock — the dex attempt count is the durable
  * signal (intra-step writes do not survive a kill; 0(g)). A failed attempt
  * re-enters the step with attempt+1, so every Tier-0 retry lands here.
+ *
+ * Generic over the lane type so the SAME policy also labels the lane in the
+ * US-003 successor diagnosis record (demoteReviewerLane(attempt, "default",
+ * "demoted")) — one policy source, no duplicated attempt rule. NO Tier-1
+ * input: the attempt count is a deterministic dex signal (AC-B2).
  */
-export function demoteReviewerLane(
+export function demoteReviewerLane<L>(
   attempt: number | undefined,
-  defaultLane: { providerID: string; modelID: string } | undefined,
-  fallbackLane: { providerID: string; modelID: string } | undefined,
-): { providerID: string; modelID: string } | undefined {
+  defaultLane: L,
+  fallbackLane: L,
+): L {
   return (attempt ?? 1) >= 2 ? fallbackLane : defaultLane;
 }
 

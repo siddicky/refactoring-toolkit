@@ -1,0 +1,22 @@
+{
+  "_id": "generic-885-token-unparseable",
+  "_expected": "generic_retry",
+  "info": {
+    "tokens": {
+      "input": 61234,
+      "output": 885,
+      "reasoning": 40211,
+      "cache": {
+        "read": 88000,
+        "write": 512
+      }
+    },
+    "cost": 0
+  },
+  "parts": [
+    {
+      "type": "text",
+      "text": "I cannot comply with this format request because ...I cannot comply with this format request because ...I cannot comply with this format request because ...I cannot comply with this format request because ...I cannot comply with this format request because ...I cannot comply with this format request because ...I cannot comply with this format request because ...I cannot comply with this format request because ...I cannot comply with this format request because ...I cannot comply with this format request because ...I cannot comply with this format request because ...I cannot comply with this format request because ..."
+    }
+  ]
+}

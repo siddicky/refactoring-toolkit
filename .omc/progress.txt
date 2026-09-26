@@ -1,0 +1,37 @@
+# progress.txt — ralph run: post-wave-5 v5.1
+
+## Session start 2026-09-26T19:42:00Z
+
+- PRD written (.omc/prd.json, 8 stories from approved consensus plan v5.1).
+- Dependency: US-001 gates on worker-1d (agent_03ecfb24) completing its evidence wave
+  (reviewer swap to gpt-6-luna, cx-5e run, kill smoke). All other stories touch files
+  worker-1d owns — do not start early. Watch its completion notification.
+- Key facts carried forward: HEAD ~fcfc7df+/e55b321..7d65601 wave-5 commits; 196+ tests
+  green; degenerate-turn signature = usage present, no text part, 0-16 output tokens,
+  ~32k reasoning; p4-7 = green reference run (/tmp/metrics-p47); 0(f) attempt durable,
+  0(g) intra-step writes lost on uncompleted steps, 0(h) GetHistoryEvents exposes
+  stepType/finalAttempt; live watcher /tmp/watch-kill-cx5.sh pid 72922 MUST be killed
+  (worker-1d's process — surfaced to user) and its terminal branch fixed before re-arm.
+- Reviewer for Step 7: codex (user's standing critic-lane preference).
+
+## Iteration 1 — 2026-09-26T19:45:00Z
+- US-001 IN PROGRESS, blocked on worker-1d completion notification (expected as task-notification).
+- Deliberately NOT starting US-002+: worker-1d actively edits the same files (src/harness/opencode.ts, flows/port-project.ts, src/queues, scripts) — starting now would repeat the wave-3/4 conflict pattern.
+- Contaminated tool results noted twice this session; all state verified from disk before use.
+- Learnings: legacy PRD path (.omc/prd.json) is the working location without a scoped session id.
+
+## Iteration 1b — US-001 COMPLETE 2026-09-26T20:55:00Z
+- worker-1d (wave 5) COMPLETE: gpt-6-luna reviewer lane PASS (22+ turns, 0 degenerate), cx-5e AC1 battery ALL PASS (SIGKILL at queue-verify -> same-DB restart -> COMPLETED; 10 op-ID commits no dupes), AC2 provenance_ok=true (213/213 anchored, parallel topology), Tier-1 polish all landed, 204/204 tests, HEAD cedce86.
+- Watcher: none running; state files removed; terminal-branch bug superseded (US-007 stream subscriber replaces polling watcher entirely).
+- Phase 7 php-sample run remains user-gated (costs ~40% of cx-5e); tracked as deferred, not part of PRD stories.
+- Next: US-002 (Stage 1) dispatched to executor.
+
+## User directive 2026-09-26T21:05:00Z
+- GOAL REFRAMED: presentation-ready harness, not refactor-for-its-own-sake. New system must LAND and be VERIFIED LIVE before completion.
+- PRD updated: live-verification tails on US-002/003/007; US-009 added as final presentation gate (live run on final code + demo record + Chris package); php-sample descoped via evidence-preserving amendment.
+- Sequence unchanged: US-002 (running) -> US-003..008 -> US-009 live validation run = the demo re-record window.
+
+## Iteration 2 — US-002 COMPLETE 2026-09-26T22:55:00Z
+- commit 68b1577: degenerateReply guard both exits, f(attempt) demotion via modelOverride param, scripts/dispatch-gate.ts (history-only, stale>10min, 5s, fail-open w/ gate:degraded surfacing), envelope WriteStream publish (swallow-wrapped).
+- Fresh: 216/0 tests (12 new), tsc clean. LIVE tails superseded to US-009 (amendment recorded).
+- Learnings: dispatch-gate reuses DexHistoryWire parser from src/dashboard/queries.ts as planned; probe-flow.ts updated for the new seam shape.

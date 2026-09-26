@@ -1,0 +1,17 @@
+{
+  "_id": "deg-08-cx-4-review-a-4out",
+  "_expected": "retry",
+  "info": {
+    "tokens": {
+      "input": 61234,
+      "output": 4,
+      "reasoning": 2877,
+      "cache": {
+        "read": 88000,
+        "write": 512
+      }
+    },
+    "cost": 0
+  },
+  "parts": []
+}

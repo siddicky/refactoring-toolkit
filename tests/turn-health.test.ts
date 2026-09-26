@@ -327,3 +327,91 @@ describe("envelope telemetry stream (US-002)", () => {
     expect(probe.staged.length).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// US-003: fixture-directory set (raw SDK shapes as checked-in JSON) + AC-B2
+// import boundary. The nine inline degenerate fixtures above stay canonical
+// for Tier-0; this block proves the checked-in fixture FILES agree with the
+// same predicate and that Tier-1 evidence has zero control-flow consumers.
+// ---------------------------------------------------------------------------
+
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const FIXTURE_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "fixtures",
+  "turn-health",
+);
+
+describe("US-003 fixture directory (checked-in raw SDK shapes)", () => {
+  type Case = {
+    _id: string;
+    _expected: "retry" | "generic_retry" | "discard_class" | "pass" | "abort_path";
+    info: unknown;
+    parts: unknown;
+  };
+
+  const files = readdirSync(FIXTURE_DIR)
+    .filter((f) => f.endsWith(".json") && f !== "manifest.json")
+    .sort();
+
+  test("manifest lists every fixture file with its expected class", () => {
+    const manifest = JSON.parse(
+      readFileSync(join(FIXTURE_DIR, "manifest.json"), "utf8"),
+    );
+    const listed = manifest.cases.map((c: { id: string }) => c.id + ".json");
+    expect(listed.sort()).toEqual(files);
+  });
+
+  test("retry-class fixtures are Tier-0; every other class passes through without a Tier-0 error", async () => {
+    for (const file of files) {
+      const doc: Case = JSON.parse(readFileSync(join(FIXTURE_DIR, file), "utf8"));
+      const h = harness(doc as RawMessage);
+      if (doc._expected === "retry") {
+        await expect(h.prompt("ses_fixture", "review this diff")).rejects.toThrow(
+          /degenerate turn/,
+        );
+      // abort_path removed: aborted turns are an SDK error path, not a reply shape
+      // (covered by the inline aborted-no-text test above via the upstream-failure class)
+      } else {
+        // generic_retry / discard_class / pass: no Tier-0 classification
+        const result = await h.prompt("ses_fixture", "review this diff");
+        expect(String(result?.text ?? result)).not.toContain("degenerate turn");
+      }
+    }
+  });
+
+  test("degenerate fixtures are all no-text with usage present (predicate agreement)", () => {
+    for (const file of files) {
+      const doc: Case = JSON.parse(readFileSync(join(FIXTURE_DIR, file), "utf8"));
+      const usage = (doc.info as { tokens?: { output?: number } }).tokens;
+      if (doc._expected === "retry") {
+        const parts = (doc.parts as Array<{ type: string; text?: string }>) ?? [];
+        const hasText = parts.some((p) => p.type === "text");
+        expect(hasText).toBe(false);
+        expect(usage).toBeDefined();
+      }
+    }
+  });
+});
+
+describe("US-003 import boundary (AC-B2): Tier-1 evidence has zero control-flow consumers", () => {
+  test("flows/ and src/git/ never import src/typesafe/turn-health", () => {
+    const roots = ["flows", "src/git"];
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith(".ts")) {
+          const src = readFileSync(p, "utf8");
+          if (/from\s+["'].*turn-health/.test(src)) offenders.push(p);
+        }
+      }
+    };
+    for (const r of roots) walk(r);
+    expect(offenders).toEqual([]);
+  });
+});

@@ -1,0 +1,17 @@
+{
+  "_id": "deg-03-p4-8-review-b-3out",
+  "_expected": "retry",
+  "info": {
+    "tokens": {
+      "input": 61234,
+      "output": 3,
+      "reasoning": 31996,
+      "cache": {
+        "read": 88000,
+        "write": 512
+      }
+    },
+    "cost": 0
+  },
+  "parts": []
+}

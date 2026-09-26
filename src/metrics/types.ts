@@ -68,6 +68,160 @@ export interface TokenUsage {
   readonly cost_usd?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Turn diagnosis (US-003, Stage 1b) — evidence-only Tier-1 records
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministic shape class of one agent turn. Classification consumes ONLY
+ * the observed reply shape (usage / text / abort / verdict outcome) — never a
+ * judgment result (AC-B2: routing decisions read deterministic signals only).
+ */
+export type TurnShapeClass =
+  /** Usage-present, no text, not aborted — the US-002 Tier-0 signature. */
+  | "tier0-degenerate"
+  /** Upstream abort — the recovery path (flows/port-project.ts runAgentTurn). */
+  | "aborted"
+  /** Completed reply with no provider usage — provenance class, never zero. */
+  | "no-usage"
+  /** Text present and verdict extraction succeeded. */
+  | "parsed"
+  /** Parseable-length text that FAILS verdict extraction (885-token case). */
+  | "unparseable-text"
+  /** Verdict extracted but discarded (US-006 repair-or-discard lands later). */
+  | "discarded-verdict";
+
+/** The observed shape of one turn — data only, no behavior. */
+export interface TurnObservation {
+  shape: TurnShapeClass;
+  output_tokens: number | null;
+  reasoning_tokens: number | null;
+  text_chars: number;
+  error: string | null;
+}
+
+/** What triggered a diagnosis record. */
+export type TurnDiagnosisTrigger =
+  /** Tier-1 noul battery fired on a shape-ambiguous turn. */
+  | "ambiguous-shape"
+  /** Tier-1 noul battery fired on a discarded verdict (US-006 trigger). */
+  | "discarded-verdict"
+  /**
+   * Deterministic successor re-record after a Tier-0/failed attempt: the
+   * throwing attempt cannot persist (0(g)), so the succeeding attempt records
+   * what is deterministically knowable — the attempt count. No Jev call.
+   */
+  | "retry-context";
+
+/** One answered question of the Tier-1 battery (noul probability of "yes"). */
+export interface TurnDiagnosisQuestion {
+  name: string;
+  /** null for deterministic records that ran no Jev battery. */
+  p: number | null;
+}
+
+/**
+ * A turn-health diagnosis RECORD — evidence only. No control-flow consumer may
+ * branch on any field (AC-B2); the record surfaces on the telemetry stream and
+ * the report's §Turn-diagnosis table, disposition always `recorded-evidence`.
+ */
+export interface TurnDiagnosis {
+  /** Lease file key (prep reviews use the spec file). */
+  file: string;
+  /** Turn identity `<stepId>@<sanitized file#round>` (report "file/turn"). */
+  turn: string;
+  reviewer: string | null;
+  /** Attempt that RECORDED this diagnosis — a successful turn (0(g)). */
+  attempt: number;
+  /** Failed attempts this recording attempt succeeded after. */
+  prior_failed_attempts: number;
+  /** Reviewer lane of the recording attempt (f(attempt) demotion policy). */
+  lane: "default" | "demoted";
+  trigger: TurnDiagnosisTrigger;
+  /** The recording turn's own observed shape. */
+  shape: TurnObservation;
+  /** Battery answers; empty for deterministic retry-context records. */
+  questions: TurnDiagnosisQuestion[];
+  /** Jev model when the battery ran; null = deterministic record. */
+  model: string | null;
+  /** Jev's own token usage for the battery; null when it did not run. */
+  jev_usage: { input_tokens: number; output_tokens: number } | null;
+  disposition: "recorded-evidence";
+  recorded_at_utc: string;
+}
+
+/** Assessment input handed to the Tier-1 assessor (data only). */
+export interface TurnHealthAssessmentInput {
+  file: string;
+  stepId: string;
+  turn: string;
+  reviewer: string | null;
+  attempt: number;
+  prior_failed_attempts: number;
+  lane: "default" | "demoted";
+  shape: TurnObservation;
+  recordedAtUtc: string;
+}
+
+/**
+ * Tier-1 assessor seam. IMPLEMENTED in src/typesafe/turn-health.ts (a judgment
+ * module); control-flow modules may hold this interface and the data above but
+ * MUST NEVER import the implementation (import-boundary test, US-003 AC).
+ * Every failure mode is fail-open: `assess` returns null (no-diagnosis) and
+ * must never throw into the caller's failure path.
+ */
+export interface TurnHealthAssessor {
+  assess(input: TurnHealthAssessmentInput): Promise<TurnDiagnosis | null>;
+}
+
+/** Shape classes the Tier-1 noul battery may fire on (shape-ambiguous). */
+export const AMBIGUOUS_SHAPE_CLASSES: readonly TurnShapeClass[] = [
+  "unparseable-text",
+  "discarded-verdict",
+];
+
+export function isShapeAmbiguous(shape: TurnShapeClass): boolean {
+  return AMBIGUOUS_SHAPE_CLASSES.includes(shape);
+}
+
+/**
+ * Deterministic successor re-record (US-003): when a retry succeeds on
+ * attempt n, the prior attempt(s) left no durable trace (0(g) — a throwing
+ * attempt's staged writes never persist), so the succeeding turn's envelope
+ * records what IS deterministically knowable: the attempt count and the
+ * resulting lane. NO Jev call — the battery fires only on shape-ambiguous
+ * turns, and a turn whose verdict parsed is shape-trivial.
+ *
+ * `lane` mirrors the demotion policy f(attempt) (demoteReviewerLane: attempt
+ * >= 2 → demoted) — deliberate data-only mirror, same rule as
+ * src/metrics/dispatch-anchor.ts's step table.
+ */
+export function buildRetryContextDiagnosis(input: {
+  file: string;
+  stepId: string;
+  identity: string | null;
+  reviewer: string | null;
+  attempt: number;
+  shape: TurnObservation;
+  recordedAtUtc: string;
+}): TurnDiagnosis {
+  return {
+    file: input.file,
+    turn: `${input.stepId}@${input.identity ?? "flow"}`,
+    reviewer: input.reviewer,
+    attempt: input.attempt,
+    prior_failed_attempts: Math.max(0, input.attempt - 1),
+    lane: (input.attempt ?? 1) >= 2 ? "demoted" : "default",
+    trigger: "retry-context",
+    shape: input.shape,
+    questions: [],
+    model: null,
+    jev_usage: null,
+    disposition: "recorded-evidence",
+    recorded_at_utc: input.recordedAtUtc,
+  };
+}
+
 /**
  * One envelope-wrapped step execution — the ATTRIBUTE-VIEW mirror of the live
  * factory's durable event (flows/steps/envelope.ts), so the flow's envelope
@@ -107,6 +261,13 @@ export interface EnvelopeEvent {
   wall_clock_ms: number | null;
   /** Sanitized `file#round` target identity (M2); null for flow-level steps. */
   identity: string | null;
+  /**
+   * Turn-health diagnosis piggybacked on THIS envelope write (US-003, Stage
+   * 1b) — never a separate mini-step. Present only on envelopes whose step
+   * recorded a diagnosis (e.g. the successor attempt of a Tier-0 retry);
+   * evidence-only: no control-flow consumer may read it (AC-B2).
+   */
+  turn_diagnosis?: TurnDiagnosis | null;
 }
 
 /** True for M4 start markers (attempt 0, record-semantics under the target role). */

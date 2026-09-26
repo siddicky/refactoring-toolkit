@@ -1,0 +1,17 @@
+{
+  "_id": "deg-02-p4-6-review-a-identical-replay",
+  "_expected": "retry",
+  "info": {
+    "tokens": {
+      "input": 61234,
+      "output": 0,
+      "reasoning": 31996,
+      "cache": {
+        "read": 88000,
+        "write": 512
+      }
+    },
+    "cost": 0
+  },
+  "parts": []
+}

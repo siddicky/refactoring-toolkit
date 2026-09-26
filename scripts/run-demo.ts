@@ -67,10 +67,12 @@ import {
 import {
   configurePortFault,
   configurePortJudgment,
+  configureTurnHealthAssessor,
 } from "../flows/runtime-hooks.js";
 import { createOfflineJevClient } from "../src/harness/runtime.js";
 import { createRealJevClient, isTypesafeOffline } from "../src/typesafe/client.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
+import { createTurnHealthAssessor } from "../src/typesafe/turn-health.js";
 import { dexCliQueries } from "../src/dashboard/queries.js";
 import {
   evaluateDispatchGate,
@@ -637,6 +639,17 @@ async function main(): Promise<number> {
       configureProbe(harness, fault);
       configurePortJudgment(await resolveJudgment());
       configurePortFault(process.env.PORTING_KIT_FAULT);
+      // US-003 Tier-1 turn-health (evidence-only, fail-open): a real client
+      // when TYPESAFE_API_KEY is present, the scripted in-memory double under
+      // TYPESAFE_OFFLINE=1, and NO assessor (no-diagnosis degradation) when
+      // neither is available. Never throws; never affects control flow.
+      const turnHealth = await createTurnHealthAssessor();
+      configureTurnHealthAssessor(turnHealth);
+      console.log(
+        turnHealth === null
+          ? "[worker] turn-health: Tier-1 unavailable — ambiguous turns run with no diagnosis (fail-open)"
+          : "[worker] turn-health: Tier-1 assessor configured (evidence-only; control flow never reads it)",
+      );
       const handle = await startDexWorker(flows, config);
       // US-002 stream publish (runner-side deviation, see envelope.ts): the
       // worker process mirrors every durable envelope write onto the dex

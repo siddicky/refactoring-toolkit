@@ -1,0 +1,17 @@
+{
+  "_id": "deg-06-p4-10-review-b-1out",
+  "_expected": "retry",
+  "info": {
+    "tokens": {
+      "input": 61234,
+      "output": 1,
+      "reasoning": 31204,
+      "cache": {
+        "read": 88000,
+        "write": 512
+      }
+    },
+    "cost": 0
+  },
+  "parts": []
+}

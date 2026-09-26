@@ -1,0 +1,22 @@
+{
+  "_id": "healthy-verdict-235out",
+  "_expected": "pass",
+  "info": {
+    "tokens": {
+      "input": 61234,
+      "output": 235,
+      "reasoning": 1024,
+      "cache": {
+        "read": 88000,
+        "write": 512
+      }
+    },
+    "cost": 0
+  },
+  "parts": [
+    {
+      "type": "text",
+      "text": "{\"findings\":[]}"
+    }
+  ]
+}

@@ -43,7 +43,10 @@ import {
   sessionFenceMap,
   type SessionFence,
 } from "../../src/harness/opencode.js";
-import type { TokenUsage } from "../../src/metrics/types.js";
+import type {
+  TokenUsage,
+  TurnDiagnosis,
+} from "../../src/metrics/types.js";
 
 // ---------------------------------------------------------------------------
 // Envelope event contract
@@ -85,6 +88,14 @@ export interface EnvelopeEvent {
   wall_clock_ms: number | null;
   /** Per-target identity (sanitized file#round) appended to the event key. */
   identity: string | null;
+  /**
+   * Turn-health diagnosis piggybacked on THIS envelope write (US-003, Stage
+   * 1b) — never a separate mini-step. Present only on envelopes whose step
+   * recorded a diagnosis (e.g. the successor attempt of a Tier-0 retry);
+   * evidence-only: no control-flow consumer may read it (AC-B2). Mirrors
+   * src/metrics/types.ts EnvelopeEvent.
+   */
+  turn_diagnosis?: TurnDiagnosis | null;
 }
 
 /**
@@ -193,12 +204,53 @@ function publishEnvelopeEvent(context: Context, eventKey: string, event: Envelop
   }
 }
 
+/**
+ * STREAM-ONLY turn-health diagnosis record (US-003, Stage 1b). Emits one
+ * record-role event carrying the diagnosis through the SAME publish path as
+ * every envelope write. Fired at an ambiguous-shape throw site, where the
+ * assessment happens INSIDE a throwing attempt: 0(g) means staged writes
+ * cannot persist, so the durable envelope-event store is deliberately NOT
+ * written here — the DURABLE diagnosis is the successor attempt's re-record
+ * (buildRetryContextDiagnosis) piggybacked on its completion envelope. The
+ * stream copy is best-effort telemetry: same swallow contract as
+ * publishEnvelopeEvent, and absent entirely when no publisher is configured.
+ */
+export function publishTurnDiagnosisEvent(context: Context, diagnosis: TurnDiagnosis): void {
+  const eventKey = envelopeEventKey(TURN_HEALTH_STEP_ID, context.attempt, diagnosis.turn);
+  const event: EnvelopeEvent = {
+    stepId: TURN_HEALTH_STEP_ID,
+    role: "record",
+    file: null,
+    round: null,
+    attempt: context.attempt,
+    started_at: diagnosis.recorded_at_utc,
+    ended_at: diagnosis.recorded_at_utc,
+    outcome: "completed",
+    tokens: null,
+    wall_clock_ms: 0,
+    identity: diagnosis.turn,
+    turn_diagnosis: diagnosis,
+  };
+  publishEnvelopeEvent(context, eventKey, event);
+}
+
 /** Roles whose steps call a model: tokens are REQUIRED, never null. */
 const MODEL_CALLING_ROLES: readonly EnvelopeRole[] = [
   "agent",
   "review",
   "judgment",
 ];
+
+/**
+ * Step id of the turn-health diagnosis record event (US-003). NOT a dex step:
+ * the record exists on the TELEMETRY STREAM only when an assessment fires
+ * inside a throwing attempt (0(g) — a throwing attempt cannot persist staged
+ * writes), and DURABLY as the `turn_diagnosis` field piggybacked on the
+ * successor attempt's completion envelope. Kept out of
+ * src/metrics/dispatch-anchor.ts's step table on purpose: the stream event
+ * never enters the durable attribute store, so AC2 anchoring never sees it.
+ */
+export const TURN_HEALTH_STEP_ID = "pp-turn-health";
 
 export function requiresTokens(role: EnvelopeRole): boolean {
   return MODEL_CALLING_ROLES.includes(role);
@@ -244,12 +296,19 @@ export interface EnvelopeSpec<I, O> {
    * Inner handler. Returns the step output plus the token usage observed by
    * the model call — a bare total (number) or the full provider split
    * (TokenUsage object; wave-5 cost honesty). null for non-model work.
-   * Throwing triggers dex retry.
+   * Throwing triggers dex retry. `turnDiagnosis` (US-003) piggybacks a
+   * turn-health record on THIS step's existing completion envelope write —
+   * never a separate mini-step.
    */
   inner: (
     context: Context,
     input: I,
-  ) => Promise<{ output: O; tokens: number | TokenUsage | null; outcome?: EnvelopeOutcome }>;
+  ) => Promise<{
+    output: O;
+    tokens: number | TokenUsage | null;
+    outcome?: EnvelopeOutcome;
+    turnDiagnosis?: TurnDiagnosis | null;
+  }>;
   /**
    * Optional routing decision after a successful inner run. Defaults to
    * gracefulComplete(output). Chain with goTo(nextClass, input) for linear
@@ -329,6 +388,7 @@ async function executeEnvelope<I, O>(
     tokens: null,
     wall_clock_ms: null,
     identity,
+    turn_diagnosis: null,
   };
   // Staged with the decision; see the 0(g) note in the header.
   envelopeEvents.set(context, eventKey, base);
@@ -336,7 +396,7 @@ async function executeEnvelope<I, O>(
 
   const heartbeat = heartbeatLoop(context, eventKey);
   try {
-    const { output, tokens, outcome } = await spec.inner(context, input);
+    const { output, tokens, outcome, turnDiagnosis } = await spec.inner(context, input);
     if (requiresTokens(spec.role) && tokens === null) {
       // Throw BEFORE staging a completed event: a model-calling step without
       // token usage is a provenance failure, never zero.
@@ -351,6 +411,9 @@ async function executeEnvelope<I, O>(
       outcome: outcome ?? "completed",
       tokens,
       wall_clock_ms: endedMs - startedMs,
+      // US-003 piggyback: the diagnosis rides THIS existing envelope write
+      // (and its stream mirror) — never a separate mini-step.
+      turn_diagnosis: turnDiagnosis ?? null,
     };
     envelopeEvents.set(context, eventKey, completedEvent);
     publishEnvelopeEvent(context, eventKey, completedEvent);
