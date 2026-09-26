@@ -1137,7 +1137,7 @@ const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   stepOptions: {
     ...MODEL_STEP_OPTIONS,
-    executeLoadAttributeMaps: [ppKept, ppOut],
+    executeLoadAttributeMaps: [ppKept, ppOut, ppPrep],
   },
   inner: async (ctx, fri) => {
     const kept = ppKept.get(ctx, keptKeyOf(fri.file, fri.round));
@@ -1146,9 +1146,15 @@ const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
       // Clean review (verdict-check kept nothing): skip the fixer entirely.
       return { output: fri, tokens: null, outcome: "skipped" as EnvelopeOutcome };
     }
+    // Fix rounds (round >= 2) enter via the queue-fix path which does NOT
+    // run the implement step, so ppOut is never set for them — resolve the
+    // output path with the prep source-map fallback exactly like the
+    // queue-fix and integrate steps (live finding cx-5d fix wave).
     const out = ppOut.get(ctx, outKeyOf(fri.file, fri.round));
-    if (out === undefined) throw new Error(`output path missing for ${fri.file}#${fri.round}`);
-    const current = await readFile(join(fri.worktreePath, out.outPath), "utf8");
+    const outPath =
+      out?.outPath ?? ppPrep.get(ctx, "prep")?.sourceMap[fri.file]?.outPath;
+    if (outPath === undefined) throw new Error(`output path missing for ${fri.file}#${fri.round}`);
+    const current = await readFile(join(fri.worktreePath, outPath), "utf8");
 
     // Fresh fenced session for the fixer turn (fence staged with this
     // step's decision; enumeration fallback covers a mid-fix kill).
@@ -1166,7 +1172,7 @@ const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
     const turn = composeFixerTurn({
       currentContent: current,
       findings: kept.findings,
-      outputPath: out.outPath,
+      outputPath: outPath,
     });
     const result = await runAgentTurn({
       def: FIXER,
@@ -1176,7 +1182,7 @@ const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
       round: fri.round,
     });
     const code = extractCodeFence(result.text, ".ts");
-    await writeOutFile(fri.worktreePath, out.outPath, code);
+    await writeOutFile(fri.worktreePath, outPath, code);
     return { output: fri, tokens: result.usage ?? result.tokens };
   },
   route: (_ctx, _input, fri) => goTo(CommitStep, fri),
