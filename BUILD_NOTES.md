@@ -304,3 +304,117 @@ worker let it proceed; retry/backoff behaved as designed.
 
 - `bun run typecheck` → clean.
 - `bun test` → 150 pass / 0 fail (18 files; includes 8 new verify-fix tests).
+
+---
+
+# PHASES 3+4 — prep-analysis, Jev swap-in, queues (evidence record)
+
+Completed 2026-09-26 by worker-1c, resuming after worker-1b was force-cancelled
+mid-Phase-4 and the ZCode app restart killed ALL infra (dex server, worker,
+opencode serve, dashboard). All code through Phase 5 was already committed
+(HEAD `4cf8fa1`); this section records the live evidence for Phases 3–4 from
+worker-1b's runs (recovered from the durable dex DB + sidecars + worker logs)
+plus worker-1c's own runs. Infra was brought back EXACTLY as documented:
+dex on the EXISTING trial-gate DB (`dexcli dev -open=false -sqlite-db-filename
+~/.dex/dev/7233/dex.sqlite.db -blob-store-dir ~/.dex/dev/7233/dex.blobs` —
+flow history survived), worker (`run-demo.ts worker --flows port --harness
+auto`, `OPENCODE_REVIEWER_AGENT=plan`), `opencode serve --port 4096`,
+dashboard (`scripts/serve-status.ts`, :4646). Worker log confirms `Jev: REAL
+client` post-restart.
+
+## Phase 3 — what the durable record shows (flows p3-1…p3-4, `dexcli flow search`)
+
+- **p3-4 COMPLETED** (runId `01a0db87…` continued-as-new → `7910ea71…`,
+  closed 04:07:15Z) — the Phase 3 gate run, full pipeline on the 2-file seed
+  (`src/Money.php`, `src/Pricing/FlatRateDiscount.php`, project `/tmp/pk-p3`,
+  maxRounds 1):
+  - Real prep: symbol table via LIVE-harness recall + selection
+    (`pp-symtab/symtab`, 15 rows for the seed), implementer-generated spec map
+    (`pp-prep-generate#1`, agent), artifact-diff prep review (`pp-prep-diff`:
+    stub vs generated, rendered as a diff per the reviewer rule) with TWO
+    independent reviewers per iteration (`pp-prep-verdict/*#reviewer-A|B`,
+    citation_check probabilities recorded), findings looped back capped at
+    `prepMaxRounds 2` (`pp-prep-state: prepIteration 2`, rev 4 spec:
+    "REVIEWED SPEC — binding for this leg").
+  - Per-file loop for BOTH files: implement → capture-diff (by value) →
+    review-A → review-B (separate verdict attributes, citation probabilities
+    in `pp-verdict/…`) → verdict-check (drops: wontfix, p_cited=0 finding) →
+    prioritize → fixer → keyed commit → integrate → release. Completion
+    markers: `committed:src/Money.php#1` (sha `e5d463b`) and
+    `committed:src/Pricing/FlatRateDiscount.php#1` (sha `f4debae`).
+  - Session fences for every agent/reviewer turn (`session-fence/*`, epoch
+    1); attempt-0 start markers present (M4).
+- **Jev swap-in**: worker logs for p3+ runs say `Jev: REAL client (billed
+  System One calls)`. The symbol-table step emits `role: "judgment"`
+  envelopes (`pp-symbol-table#n`).
+- **Spot-check (worker-1b, live Jev)**: n=36 graded symbols from
+  `fixtures/php-sample`; strict v1 rubric 61.1% (22/36); corrected v2 rubric
+  (accessor-method join + literal equivalents; recorded in
+  `scripts/jev-spot-check.ts` GROUND_TRUTH) 86.1% (31/36). Residual 5 misses
+  = Jev ABSTENTIONS (NONE) on methods with Money-typed params — exactly the
+  5 ground-truth rows accepting only `["Money"]` (`Money#add`,
+  `Money#subtract`, `DiscountPolicy#apply`, `FlatRateDiscount#apply`,
+  `PercentageDiscount#apply`). Live corroboration in flow history: p4-2's
+  symbol-table payload shows `selected: "NONE", flagged: true` for
+  `FlatRateDiscount::__construct(Money $amountPerUnit)` and
+  `apply(Money $subtotal, $units = 1)`. Fix and re-measure: see Phase 3/4
+  continuation below (worker-1c).
+- **Kill smokes FIRED (Phase 3 exit = kill during a Jev call + reviewer-turn
+  kill)**:
+  1. *Jev-point kill (in-memory era)* — `PORTING_KIT_FAULT=symbol-table:post:seed`
+     crashed the worker inside the symbol-table step on p3-1 (worker-p3c.log,
+     pid 61467). p3-1/2/3 were then CANCELED deliberately: dex freezes step
+     options at startFlow, and each was superseded by a code fix (missing
+     attribute-load declarations; prep-loopback cap runaway) — stop+relaunch
+     beat hot-patching a frozen snapshot.
+  2. *Reviewer-turn chaos kill (external SIGKILL of dex server + worker)* —
+     3 records in `/tmp/kill-events-p3.jsonl` (01:07:20Z, 01:37:58Z, 02:30:22Z,
+     "during prep reviewer turn"), intent-before-kill ordering intact. The
+     02:30:22Z kill hit p3-4 mid-run; p3-4 RECOVERED and completed at
+     04:07:15Z (reviewer step retried on the restarted worker; retry trail:
+     `pp-prep-review-a#2/#3`, `pp-prep-review-b#2` completed at later
+     attempts after the kill).
+  3. *Live-Jev kill (REAL network client)* — p4-1 (runId `01a0dbec…`,
+     started 04:14:32Z): worker-p4a with `fault=symbol-table:post:seed` + REAL
+     Jev computed 15 rows, then SIGKILLed itself (worker-p4a.log, pid 52796).
+     `PpSymbolTable-1` completed at **finalAttempt 6** (fault kill → dial
+     failures against the dead worker → clean worker) — kill during a live
+     Jev call, resumed, no duplicate.
+
+## Phase 4 — what the durable record shows
+
+- **p3-4 already exercised the wired queues end-to-end**: after the port
+  queue exhausted, `QueueVerifyStep` ran tsc + vitest against the INTEGRATED
+  checkout, published burn-down (`queue-burndown/tsc-1: 2 errors`,
+  `vitest-1: 0`; per-file `tsc-1-src__pricing__flat-rate-discount.ts: 2`),
+  stored grouped errors (`pp-verify`: TS2307 ×2,
+  `src/pricing/flat-rate-discount.ts`), and applied the TERMINATION RULE:
+  with `maxRounds 1` the fixable file hit the round cap → moved to
+  `pp-queue.blocked` ("round cap reached with 2 queue error(s) remaining") →
+  Final. Flow COMPLETED with an honest blocked-file record (the demo-green
+  gate is explicitly NOT an acceptance criterion; the block is the designed
+  cap behavior).
+- **p4-1** (maxRounds 2, project `/tmp/pk-p4`): survived the live-Jev kill
+  (above), then ran the FULL prep review loop — generate (agent, 283s,
+  63,926 tok) → review A/B → verdict-check → loop decision → revise → review
+  A/B → verdict-check → revise (prepIteration 2) → diff-capture-3 → review
+  A-3 IN FLIGHT when the ZCode app restart killed the worker (~04:42Z).
+  Dial-failures (`FLOW_ERROR_TYPE_WORKER_API_FAIL`, connection refused
+  127.0.0.1:8803) exhausted `PpPrepReviewA-3`'s maximumAttempts 3 →
+  FLOW_STATUS_FAILED 04:44:25Z. **Infra death, not a code defect** — the
+  same failure mode Phase 0(b/c) proved recoverable when the worker is
+  actually restarted.
+- **p4-2** (worker-1b's re-dispatch, 04:45:53Z): PpPrep → PpSymbolTable
+  (LIVE Jev, symbol rows in history incl. the Money-param abstentions) →
+  died at `PpPrepGenerate` attempt 3 the same way (worker still dead) →
+  FAILED 04:47:18Z. No durable state was lost (nothing had committed).
+
+## Checkpoint A (this commit)
+
+- BUILD_NOTES §PHASES 3+4 (this section) — evidence hand-off recorded.
+- Worker-2's CreatorPay fixture (`fixtures/creatorex-middleware/**` +
+  `fixtures/generate-creatorex.ts` + FIXTURES.md section): committed AS
+  DELIVERED; determinism re-verified by worker-1c (generator re-run digest
+  `b692f358…` == FIXTURES.md recorded digest; tree unchanged).
+
+## Phases 3/4 continuation (worker-1c) — see the next section for outcomes.
