@@ -2266,7 +2266,10 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
   stepId: "pp-child-lease",
   role: "record",
   stepOptions: {
-    executeLoadAttributeMaps: [ppPrep, ppVerify],
+    // ppLease is READ through bindLeaseStore (lease reclaim/put); live
+    // finding cx-5c: the child's first step failed 3 attempts with
+    // "AttributeMap instance was not loaded: pp-lease/pool" until declared.
+    executeLoadAttributeMaps: [ppPrep, ppVerify, ppLease],
     executeRetry: { maximumAttempts: 3 },
   },
   inner: async (ctx, input) => {
