@@ -324,6 +324,13 @@ export class WorktreePool {
     const lease = this.#store.get(file);
     if (lease === undefined) return;
     const runner = git(this.#repoRoot);
+    // Cleanup ordering (Tier-1, takeaways-synthesis #4; verified empirically
+    // against git 2.x): `worktree remove --force` DEREGISTERS the worktree
+    // even when its directory is already gone — so this single call is the
+    // deregister step, it runs BEFORE the lease record is dropped, `git
+    // worktree prune` is NEVER used (blanket prune can sweep registrations of
+    // live concurrent worktrees), and lease branches are deliberately kept
+    // for keyed-commit reachability (quarantine/dedup scans all branches).
     await runner.tryRun(["worktree", "remove", "--force", lease.worktreePath]);
     // The branch is kept: keyed-commit lookup scans all branches (shared
     // object store), and quarantined-lease commits must remain reachable.

@@ -50,10 +50,22 @@ export function isModelCallingRole(role: EnvelopeRole): role is ModelCallingRole
   return (MODEL_CALLING_ROLES as readonly string[]).includes(role);
 }
 
-/** Token usage for one model call. Field names match the TypeSafe SDK. */
+/**
+ * Token usage for one model call. Field names match the TypeSafe SDK; the
+ * optional split fields (wave-5 cost honesty, takeaways-synthesis #2) carry
+ * the provider-reported cache/reasoning split and USD cost when available
+ * (the opencode seam collects them from the assistant message `info`).
+ * `cost_usd` absent/0 on a lane that reports tokens means the provider did
+ * not report per-token cost (e.g. plan-authed models) — renderers flag such
+ * totals as estimated (`~`), never silently as exact.
+ */
 export interface TokenUsage {
   readonly input_tokens: number;
   readonly output_tokens: number;
+  readonly reasoning_tokens?: number;
+  readonly cache_read_tokens?: number;
+  readonly cache_write_tokens?: number;
+  readonly cost_usd?: number;
 }
 
 /**
@@ -112,7 +124,16 @@ export function tokenTotalOf(tokens: number | TokenUsage | null): number | null 
   if (tokens !== null && typeof tokens === "object") {
     const input = tokens.input_tokens;
     const output = tokens.output_tokens;
-    if (typeof input === "number" && typeof output === "number") return input + output;
+    if (typeof input !== "number" || typeof output !== "number") return null;
+    // Wave-5: the usage object may carry the full provider split; the total
+    // matches the opencode seam's tokenTotal (input+output+reasoning+cache).
+    return (
+      input +
+      output +
+      (tokens.reasoning_tokens ?? 0) +
+      (tokens.cache_read_tokens ?? 0) +
+      (tokens.cache_write_tokens ?? 0)
+    );
   }
   return null;
 }

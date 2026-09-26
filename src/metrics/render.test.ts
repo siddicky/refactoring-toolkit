@@ -360,3 +360,61 @@ describe("runProvenanceCrossCheck (combined AC2 entry)", () => {
     expect(cross.failures).toEqual(sorted);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Wave-5 cost honesty: per-role usage split + USD + ~estimated flag
+// ---------------------------------------------------------------------------
+
+describe("renderReport usage_by_role (cost honesty)", () => {
+  const baseEnv = (tokens: EnvelopeEvent["tokens"], role: EnvelopeEvent["role"] = "review"): EnvelopeEvent => ({
+    stepId: "pp-review-a",
+    role,
+    file: null,
+    round: 1,
+    attempt: 1,
+    started_at: "2026-09-26T10:00:00Z",
+    ended_at: "2026-09-26T10:01:00Z",
+    outcome: "completed",
+    tokens,
+    wall_clock_ms: 1000,
+    identity: "src__a.php#1",
+  });
+
+  test("split carried per role; plan-authed cost flagged estimated, totals via tokenTotalOf", () => {
+    const rendered = renderReport({
+      envelopes: [
+        baseEnv({ input_tokens: 4000, output_tokens: 100, reasoning_tokens: 32, cache_read_tokens: 3500, cache_write_tokens: 8, cost_usd: 0 }),
+        baseEnv({ input_tokens: 6000, output_tokens: 200, reasoning_tokens: 0, cache_read_tokens: 5000, cache_write_tokens: 0, cost_usd: 0.03 }),
+        baseEnv(123, "agent"),
+      ],
+      verdicts: [],
+      burnDown: [],
+      generatedAt: "2026-09-26T12:00:00Z",
+    });
+    const review = rendered.json.usage_by_role.find((u) => u.role === "review");
+    expect(review?.calls).toBe(2);
+    expect(review?.input_tokens).toBe(10000);
+    expect(review?.cache_read_tokens).toBe(8500);
+    expect(review?.cost_usd).toBeCloseTo(0.03);
+    const agent = rendered.json.usage_by_role.find((u) => u.role === "agent");
+    expect(agent?.input_tokens).toBeNull(); // bare-total envelope: no split
+    expect(agent?.calls).toBe(1);
+    expect(rendered.json.cost_estimated).toBe(false);
+    // token totals normalize the object form across ALL split fields.
+    expect(rendered.json.summary.tokens_model_roles).toBe(4000 + 100 + 32 + 3500 + 8 + 6000 + 200 + 5000 + 123);
+    expect(rendered.markdown).toContain("## Cost per role (provider-reported split)");
+    expect(rendered.markdown).toContain("cache-read");
+  });
+
+  test("all-zero provider costs mark the total estimated with the ~ footnote", () => {
+    const rendered = renderReport({
+      envelopes: [baseEnv({ input_tokens: 100, output_tokens: 5, cost_usd: 0 })],
+      verdicts: [],
+      burnDown: [],
+    });
+    expect(rendered.json.cost_estimated).toBe(true);
+    expect(rendered.json.cost_total_usd).toBe(0);
+    expect(rendered.markdown).toContain("`~` = estimated");
+    expect(rendered.markdown).toContain("~$0");
+  });
+});

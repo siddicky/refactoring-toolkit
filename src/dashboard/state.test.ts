@@ -10,11 +10,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  aggregateAgentUsage,
   buildDashboardState,
   burnDownSeries,
   deriveGridRows,
   feedFromState,
   killTimeline,
+  lifecycleHeadline,
   normalizeTokens,
   parseEnvelope,
   parseQueueState,
@@ -504,5 +506,102 @@ describe("kill-event / burn-down file readers", () => {
     const resJsonl = await readBurnDownFile(jsonl);
     expect(resJsonl.ok && resJsonl.value).toHaveLength(1);
     expect(resJsonl.ok && resJsonl.value[0]?.queue).toBe("vitest");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave-5: cost honesty (aggregateAgentUsage) + lifecycle headline
+// ---------------------------------------------------------------------------
+
+describe("aggregateAgentUsage (wave-5 cost honesty)", () => {
+  const feedEntry = (over: Partial<import("./types.js").FeedEntry>): import("./types.js").FeedEntry => ({
+    flowId: "f",
+    ts: "2026-09-26T10:00:00Z",
+    startedAt: "2026-09-26T10:00:00Z",
+    endedAt: "2026-09-26T10:01:00Z",
+    stepId: "pp-review-a",
+    role: "review",
+    file: null,
+    round: null,
+    attempt: 1,
+    outcome: "completed",
+    tokens: 100,
+    usage: null,
+    wallClockMs: 1000,
+    tokensRequired: true,
+    ...over,
+  });
+
+  test("splits cache/fresh per role; plan-authed lanes flag estimated", () => {
+    const rows = aggregateAgentUsage([
+      feedEntry({
+        tokens: 300,
+        usage: { input: 200, output: 10, reasoning: 20, cacheRead: 60, cacheWrite: 10, costUsd: 0 },
+      }),
+      feedEntry({ tokens: 90 }),
+      feedEntry({ role: "agent", tokensRequired: true, tokens: 500, usage: { input: 400, output: 40, reasoning: 0, cacheRead: 20, cacheWrite: 40, costUsd: 0.012 } }),
+    ]);
+    expect(rows).toHaveLength(2);
+    const review = rows.find((r) => r.role === "review");
+    expect(review?.calls).toBe(2);
+    expect(review?.input).toBe(200);
+    expect(review?.cacheRead).toBe(60);
+    expect(review?.estimated).toBe(true);
+    expect(review?.costUsd).toBe(0);
+    const agent = rows.find((r) => r.role === "agent");
+    expect(agent?.costUsd).toBeCloseTo(0.012);
+    expect(agent?.estimated).toBe(false);
+  });
+
+  test("attempt-0 markers and non-model roles are excluded", () => {
+    const rows = aggregateAgentUsage([
+      feedEntry({ attempt: 0, usage: { input: 5, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 } }),
+      feedEntry({ role: "commit", tokensRequired: false, tokens: null }),
+    ]);
+    expect(rows).toHaveLength(0);
+  });
+});
+
+describe("lifecycleHeadline (wave-5 lifecycle flip)", () => {
+  const flow = (over: Partial<import("./types.js").FlowView>): import("./types.js").FlowView => ({
+    flowId: "cx-5",
+    flowType: "port.Project",
+    status: "running",
+    startTime: "2026-09-26T10:00:00Z",
+    closeTime: null,
+    runId: "r1",
+    ...over,
+  });
+  const kill = (utc: string): import("./types.js").NormalizedKillEvent => ({
+    source: "s", kind: "intent", runId: "r", utc, monotonicMs: 1, pids: [1],
+    signal: "SIGKILL", reason: null, note: null, resumed: null,
+  });
+
+  test("running without kills", () => {
+    const h = lifecycleHeadline({ flow: flow({}), filesDone: 2, filesTotal: 5, killEvents: [], dexAvailable: true, feed: [] });
+    expect(h).toBe("◆ cx-5: 2/5 files · running");
+  });
+
+  test("kill while dex down -> killed; feed activity after kill -> resumed", () => {
+    const kills = [kill("2026-09-26T10:30:00Z")];
+    const down = lifecycleHeadline({ flow: flow({}), filesDone: 3, filesTotal: 5, killEvents: kills, dexAvailable: false, feed: [] });
+    expect(down).toContain("killed");
+    const feed = [{ flowId: "cx-5", startedAt: "2026-09-26T10:35:00Z" } as import("./types.js").FeedEntry];
+    const up = lifecycleHeadline({ flow: flow({}), filesDone: 3, filesTotal: 5, killEvents: kills, dexAvailable: true, feed });
+    expect(up).toContain("resumed");
+  });
+
+  test("completed with a survived kill", () => {
+    const h = lifecycleHeadline({
+      flow: flow({ status: "completed", closeTime: "2026-09-26T11:00:00Z" }),
+      filesDone: 5, filesTotal: 5,
+      killEvents: [kill("2026-09-26T10:30:00Z")],
+      dexAvailable: true, feed: [],
+    });
+    expect(h).toBe("◆ cx-5: 5/5 files · completed (survived kill)");
+  });
+
+  test("no flow found", () => {
+    expect(lifecycleHeadline({ flow: undefined, filesDone: 0, filesTotal: 0, killEvents: [], dexAvailable: true, feed: [] })).toBe("no port flow found");
   });
 });

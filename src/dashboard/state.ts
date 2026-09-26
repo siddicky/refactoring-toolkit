@@ -31,6 +31,8 @@ import type {
   NormalizedKillEvent,
   QueueSummaryView,
   SourceStatus,
+  AgentUsageView,
+  UsageSplitView,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -55,6 +57,7 @@ export interface ParsedEnvelope {
   ended_at: string | null;
   outcome: string;
   tokens: number | null;
+  usage: UsageSplitView | null;
   wall_clock_ms: number | null;
   tokensRequired: boolean;
 }
@@ -79,21 +82,51 @@ export function parseEnvelope(value: unknown): ParsedEnvelope | null {
     ended_at: typeof rec.ended_at === "string" ? rec.ended_at : null,
     outcome: typeof rec.outcome === "string" ? rec.outcome : "unknown",
     tokens: normalizeTokens(rec.tokens),
+    usage: parseUsageSplit(rec.tokens),
     wall_clock_ms: typeof rec.wall_clock_ms === "number" ? rec.wall_clock_ms : null,
     tokensRequired: MODEL_ROLES.has(role),
   };
 }
 
-/** Token TOTAL; accepts a number or the metrics {input_tokens, output_tokens}. */
+/** Token TOTAL; accepts a number or the metrics TokenUsage object. */
 export function normalizeTokens(raw: unknown): number | null {
   if (typeof raw === "number") return raw;
   if (raw !== null && typeof raw === "object") {
     const rec = raw as Record<string, unknown>;
     const input = rec.input_tokens;
     const output = rec.output_tokens;
-    if (typeof input === "number" && typeof output === "number") return input + output;
+    if (typeof input === "number" && typeof output === "number") {
+      return (
+        input +
+        output +
+        numOr(rec.reasoning_tokens, 0) +
+        numOr(rec.cache_read_tokens, 0) +
+        numOr(rec.cache_write_tokens, 0)
+      );
+    }
   }
   return null;
+}
+
+/** Wave-5 cost honesty: the provider usage split, when the envelope carries it. */
+export function parseUsageSplit(raw: unknown): UsageSplitView | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const rec = raw as Record<string, unknown>;
+  const input = rec.input_tokens;
+  const output = rec.output_tokens;
+  if (typeof input !== "number" || typeof output !== "number") return null;
+  return {
+    input,
+    output,
+    reasoning: numOr(rec.reasoning_tokens, 0),
+    cacheRead: numOr(rec.cache_read_tokens, 0),
+    cacheWrite: numOr(rec.cache_write_tokens, 0),
+    costUsd: numOr(rec.cost_usd, 0),
+  };
+}
+
+function numOr(v: unknown, dflt: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : dflt;
 }
 
 /** Human stage label for a step id / dex step type. */
@@ -246,6 +279,7 @@ function collectUpsert(
       attempt: parsed.attempt,
       outcome: parsed.outcome,
       tokens: parsed.tokens,
+      usage: parsed.usage,
       wallClockMs: parsed.wall_clock_ms,
       tokensRequired: parsed.tokensRequired,
     });
@@ -650,6 +684,98 @@ export function statusOf(available: boolean, error: string | null, detail: strin
   return { available, error, detail };
 }
 
+// ---------------------------------------------------------------------------
+// Wave-5 cost honesty: per-role agent usage aggregate (takeaways-synthesis #2)
+// ---------------------------------------------------------------------------
+
+/** Aggregates the provider usage split per role over real-attempt feed entries. */
+export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[] {
+  const aggs = new Map<
+    string,
+    { role: string; calls: number; splitCalls: number; input: number; cacheRead: number; output: number; reasoning: number; cost: number; costReported: boolean }
+  >();
+  for (const e of feed) {
+    if (e.attempt === 0 || !e.tokensRequired) continue;
+    let agg = aggs.get(e.role);
+    if (!agg) {
+      agg = { role: e.role, calls: 0, splitCalls: 0, input: 0, cacheRead: 0, output: 0, reasoning: 0, cost: 0, costReported: false };
+      aggs.set(e.role, agg);
+    }
+    agg.calls += 1;
+    if (e.usage === null) continue;
+    agg.splitCalls += 1;
+    agg.input += e.usage.input;
+    agg.cacheRead += e.usage.cacheRead;
+    agg.output += e.usage.output;
+    agg.reasoning += e.usage.reasoning;
+    if (e.usage.costUsd > 0) {
+      agg.cost += e.usage.costUsd;
+      agg.costReported = true;
+    }
+  }
+  return [...aggs.values()]
+    .map((agg) => ({
+      role: agg.role,
+      calls: agg.calls,
+      input: agg.splitCalls > 0 ? agg.input : null,
+      cacheRead: agg.splitCalls > 0 ? agg.cacheRead : null,
+      output: agg.splitCalls > 0 ? agg.output : null,
+      reasoning: agg.splitCalls > 0 ? agg.reasoning : null,
+      costUsd: agg.costReported ? agg.cost : agg.splitCalls > 0 ? 0 : null,
+      estimated: agg.splitCalls > 0 && !agg.costReported,
+    }))
+    .sort((a, b) => a.role.localeCompare(b.role));
+}
+
+// ---------------------------------------------------------------------------
+// Wave-5 lifecycle headline (takeaways-synthesis #3): the one-line run status
+// with the live running → killed → resumed → completed flip.
+// ---------------------------------------------------------------------------
+
+/**
+ * Derives the headline for the newest port flow. Status comes from dex; the
+ * killed/resumed overlay comes from the kill sidecar ordering (UTC only):
+ * - running + a kill after the flow started + feed activity after the kill
+ *   → "resumed" (dex was restarted on the same DB and the flow is alive);
+ * - running + a kill after start + NO post-kill activity + dex unreachable
+ *   → "killed (dex down)";
+ * - completed/failed → terminal wording with the file count.
+ */
+export function lifecycleHeadline(input: {
+  flow: FlowView | undefined;
+  filesDone: number;
+  filesTotal: number;
+  killEvents: readonly NormalizedKillEvent[];
+  dexAvailable: boolean;
+  feed: readonly FeedEntry[];
+}): string {
+  const { flow, filesDone, filesTotal } = input;
+  if (flow === undefined) return "no port flow found";
+  const files = `${filesDone}/${filesTotal} files`;
+  const killAfterStart = input.killEvents
+    .filter((e) => tsMs(e.utc) > tsMs(flow.startTime))
+    .sort((a, b) => tsMs(b.utc) - tsMs(a.utc))[0];
+  const status = flow.status;
+  if (status === "completed" || status === "failed") {
+    const killedNote = killAfterStart !== undefined ? " (survived kill)" : "";
+    return `◆ ${flow.flowId}: ${files} · ${status}${killedNote}`;
+  }
+  if (killAfterStart !== undefined) {
+    const killMs = tsMs(killAfterStart.utc);
+    const activityAfterKill = input.feed.some(
+      (e) => e.flowId === flow.flowId && tsMs(e.startedAt) > killMs,
+    );
+    if (activityAfterKill) {
+      return `◆ ${flow.flowId}: ${files} · resumed (killed ${killAfterStart.utc.slice(11, 19)}Z)`;
+    }
+    if (!input.dexAvailable) {
+      return `◆ ${flow.flowId}: ${files} · killed (dex down since ${killAfterStart.utc.slice(11, 19)}Z)`;
+    }
+    return `◆ ${flow.flowId}: ${files} · running (kill at ${killAfterStart.utc.slice(11, 19)}Z, awaiting resume)`;
+  }
+  return `◆ ${flow.flowId}: ${files} · running`;
+}
+
 /** Sorts flows newest-first (startTime desc, flowId as tiebreak). */
 export function sortFlowsNewestFirst(
   flows: readonly DexFlowSummaryWire[],
@@ -733,8 +859,21 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     contentHash: c.contentHash,
   }));
 
+  // Wave-5 lifecycle headline: newest flow + its queue progress + kill overlay.
+  const headlineFlow = flowViews[0];
+  const headlineQueue = headlineQueueFor(headlineFlow, queueSummaries);
+  const headline = lifecycleHeadline({
+    flow: headlineFlow,
+    filesDone: headlineQueue.done + headlineQueue.blocked,
+    filesTotal: headlineQueue.total,
+    killEvents: input.killEvents.events,
+    dexAvailable: input.dex.available,
+    feed,
+  });
+
   return {
     generatedAt: input.now,
+    headline,
     sources: {
       dex: statusOf(input.dex.available, input.dex.error, input.dex.detail),
       git: { ...statusOf(input.git.available, input.git.error, null), repoRoot: input.git.repoRoot },
@@ -756,5 +895,21 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
       clean: w.clean,
     })),
     killTimeline: killTimeline(input.killEvents.events),
+    agentUsage: aggregateAgentUsage(feed),
+  };
+}
+
+/** Queue progress for the headline flow: done+blocked vs total entries. */
+function headlineQueueFor(
+  flow: FlowView | undefined,
+  summaries: readonly QueueSummaryView[],
+): { done: number; blocked: number; total: number } {
+  if (flow === undefined) return { done: 0, blocked: 0, total: 0 };
+  const q = summaries.find((s) => s.flowId === flow.flowId);
+  if (q === undefined) return { done: 0, blocked: 0, total: 0 };
+  return {
+    done: q.done.length,
+    blocked: q.blocked.length,
+    total: q.done.length + q.blocked.length + q.pending.length + (q.current !== null ? 1 : 0),
   };
 }

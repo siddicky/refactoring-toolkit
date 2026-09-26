@@ -38,6 +38,7 @@ import type {
 } from "../metrics/types.js";
 import type { PhpSymbol } from "../typesafe/symbol-types.js";
 import { createInMemoryJevClient, type InMemoryResponder, type JudgmentClient } from "../typesafe/client.js";
+import type { TokenUsage } from "../metrics/types.js";
 
 // ---------------------------------------------------------------------------
 // Effective permissions (config + plugin merge, deny authoritative)
@@ -121,6 +122,30 @@ export function reviewerAgentOverride(): string | undefined {
   const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
   const v = proc?.env?.OPENCODE_REVIEWER_AGENT?.trim();
   return v !== undefined && v !== "" ? v : undefined;
+}
+
+/**
+ * Wave-5 cost honesty (takeaways-synthesis #2): maps the opencode seam's
+ * TokenUsage onto the metrics event contract's TokenUsage split so envelope
+ * events can carry the full provider-reported cache/reasoning split + USD
+ * cost instead of a bare total. Pure field rename; no inference.
+ */
+export function toEnvelopeUsage(u: {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+}): TokenUsage {
+  return {
+    input_tokens: u.input,
+    output_tokens: u.output,
+    reasoning_tokens: u.reasoning,
+    cache_read_tokens: u.cacheRead,
+    cache_write_tokens: u.cacheWrite,
+    cost_usd: u.cost,
+  };
 }
 
 /**

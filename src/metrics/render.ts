@@ -103,6 +103,26 @@ export interface ReportJson {
     tokens: number | null;
     wall_clock_ms: number | null;
   }>;
+  /**
+   * Wave-5 cost honesty (takeaways-synthesis #2): per-role usage split over
+   * envelopes that carry the full TokenUsage object. Roles whose envelopes
+   * only carry bare totals appear with calls counted but split fields null.
+   * `cost_estimated` is true when at least one model call reported tokens
+   * without a provider-reported cost (plan-authed lane) — renderers prefix
+   * such totals with `~`.
+   */
+  usage_by_role: Array<{
+    role: EnvelopeRole;
+    calls: number;
+    input_tokens: number | null;
+    cache_read_tokens: number | null;
+    cache_write_tokens: number | null;
+    reasoning_tokens: number | null;
+    output_tokens: number | null;
+    cost_usd: number | null;
+  }>;
+  cost_total_usd: number | null;
+  cost_estimated: boolean;
   /** Retries = fixer (stepId pp-fixer) envelope events with attempt > 1, per file. */
   fixer_retries: Array<{ file: string; retries: number }>;
   queue_burn_down: Array<{
@@ -323,6 +343,71 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     }))
     .sort((p, q) => (p.file !== q.file ? compareStrings(p.file, q.file) : compareStrings(p.role, q.role)));
 
+  // ---- wave-5 cost honesty: per-role usage split (object-carrying envelopes)
+  interface UsageAgg {
+    role: EnvelopeRole;
+    calls: number;
+    splitCalls: number;
+    input: number;
+    cacheRead: number;
+    cacheWrite: number;
+    reasoning: number;
+    output: number;
+    cost: number;
+    costReported: boolean;
+  }
+  const usageAggs = new Map<EnvelopeRole, UsageAgg>();
+  for (const env of envelopes) {
+    if (env.attempt === 0 || !isModelCallingRole(env.role)) continue;
+    let agg = usageAggs.get(env.role);
+    if (!agg) {
+      agg = {
+        role: env.role,
+        calls: 0,
+        splitCalls: 0,
+        input: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 0,
+        output: 0,
+        cost: 0,
+        costReported: false,
+      };
+      usageAggs.set(env.role, agg);
+    }
+    agg.calls += 1;
+    if (env.tokens === null || typeof env.tokens === "number") continue;
+    agg.splitCalls += 1;
+    agg.input += env.tokens.input_tokens;
+    agg.output += env.tokens.output_tokens;
+    agg.reasoning += env.tokens.reasoning_tokens ?? 0;
+    agg.cacheRead += env.tokens.cache_read_tokens ?? 0;
+    agg.cacheWrite += env.tokens.cache_write_tokens ?? 0;
+    if (typeof env.tokens.cost_usd === "number" && env.tokens.cost_usd > 0) {
+      agg.cost += env.tokens.cost_usd;
+      agg.costReported = true;
+    }
+  }
+  const usageByRole = [...usageAggs.values()]
+    .map((agg) => ({
+      role: agg.role,
+      calls: agg.calls,
+      input_tokens: agg.splitCalls > 0 ? agg.input : null,
+      cache_read_tokens: agg.splitCalls > 0 ? agg.cacheRead : null,
+      cache_write_tokens: agg.splitCalls > 0 ? agg.cacheWrite : null,
+      reasoning_tokens: agg.splitCalls > 0 ? agg.reasoning : null,
+      output_tokens: agg.splitCalls > 0 ? agg.output : null,
+      cost_usd: agg.costReported ? agg.cost : agg.splitCalls > 0 ? 0 : null,
+    }))
+    .sort((p, q) => compareStrings(p.role, q.role));
+  const anySplit = [...usageAggs.values()].some((agg) => agg.splitCalls > 0);
+  const anyReportedCost = [...usageAggs.values()].some((agg) => agg.costReported);
+  const costTotalUsd = [...usageAggs.values()].reduce((sum, agg) => sum + agg.cost, 0);
+  // Estimated when tokens flowed on a lane the provider did not bill per-call
+  // (plan-authed): the honest total is "~$0", never a silent null.
+  const costEstimated = anySplit && !anyReportedCost;
+  const costTotal = anySplit ? costTotalUsd : null;
+
   // ---- totals over eligible (model-calling, real-attempt) steps ----------
   let modelTokens: number | null = null;
   let wallClockTotal = 0;
@@ -402,6 +487,9 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     },
     file_rounds: fileRounds,
     tokens_by_file_role: tokensByFileRole,
+    usage_by_role: usageByRole,
+    cost_total_usd: costTotal,
+    cost_estimated: costEstimated,
     fixer_retries: fixerRetries,
     queue_burn_down: burnDownJson,
     kill_events: input.killEvents ?? null,
@@ -417,6 +505,12 @@ function mdCell(text: string): string {
 
 function pFmt(p: number): string {
   return p.toFixed(2);
+}
+
+/** Cost cell: `~$0.0000` marks a plan-authed lane (tokens, no per-call cost). */
+function costCell(costUsd: number | null): string {
+  if (costUsd === null) return "n/a";
+  return costUsd > 0 ? `$${costUsd.toFixed(4)}` : "~$0";
 }
 
 function killEventLine(e: KillEvent): string {
@@ -497,6 +591,32 @@ function renderMarkdown(report: ReportJson): string {
       const tokensCell = agg.tokens === null ? "n/a" : String(agg.tokens);
       const wallCell = agg.wall_clock_ms === null ? "n/a" : String(agg.wall_clock_ms);
       lines.push(`| ${mdCell(agg.file)} | ${mdCell(agg.role)} | ${agg.steps} | ${tokensCell} | ${wallCell} |`);
+    }
+  }
+  lines.push("");
+
+  lines.push("## Cost per role (provider-reported split)");
+  if (report.usage_by_role.length === 0) {
+    lines.push("_no model-calling envelopes in the stream_");
+  } else {
+    lines.push("| role | calls | input | cache-read | cache-write | reasoning | output | cost USD |");
+    lines.push("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const u of report.usage_by_role) {
+      const cell = (v: number | null): string => (v === null ? "n/a" : String(v));
+      lines.push(
+        `| ${u.role} | ${u.calls} | ${cell(u.input_tokens)} | ${cell(u.cache_read_tokens)} | ${cell(u.cache_write_tokens)} | ${cell(u.reasoning_tokens)} | ${cell(u.output_tokens)} | ${costCell(u.cost_usd)} |`,
+      );
+    }
+    const total =
+      report.cost_total_usd === null
+        ? "n/a"
+        : `${report.cost_estimated ? "~" : ""}$${report.cost_total_usd.toFixed(4)}`;
+    lines.push("");
+    lines.push(`- total cost: ${total}`);
+    if (report.cost_estimated) {
+      lines.push(
+        "- `~` = estimated: tokens flowed on a lane whose provider reports no per-call cost (plan-authed); the USD total is not exact.",
+      );
     }
   }
   lines.push("");

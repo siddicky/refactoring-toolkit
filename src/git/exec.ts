@@ -38,15 +38,16 @@ export function git(cwd: string): GitRunner {
     GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? "porting-toolkit",
     GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? "toolkit@localhost",
   };
+  // Tier-1 hardening (takeaways-synthesis #4): every git exec is bounded by a
+  // 30s timeout so a hung git (e.g. credential prompt, locked index on a
+  // killed worktree) fails fast instead of silently burning step heartbeats
+  // until dex fails the attempt on the heartbeat timeout.
+  const execOpts = { cwd, env, maxBuffer: 64 * 1024 * 1024, timeout: 30_000 } as const;
   return {
     cwd,
     async run(args) {
       try {
-        const { stdout } = await execFileP("git", [...args], {
-          cwd,
-          env,
-          maxBuffer: 64 * 1024 * 1024,
-        });
+        const { stdout } = await execFileP("git", [...args], execOpts);
         return stdout;
       } catch (err) {
         const e = err as { stderr?: string; message: string };
@@ -55,11 +56,7 @@ export function git(cwd: string): GitRunner {
     },
     async tryRun(args) {
       try {
-        const { stdout } = await execFileP("git", [...args], {
-          cwd,
-          env,
-          maxBuffer: 64 * 1024 * 1024,
-        });
+        const { stdout } = await execFileP("git", [...args], execOpts);
         return { ok: true, stdout, stderr: "" };
       } catch (err) {
         const e = err as { stdout?: string; stderr?: string; message: string };

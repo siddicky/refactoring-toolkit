@@ -42,6 +42,7 @@ import {
   sessionFenceMap,
   type SessionFence,
 } from "../../src/harness/opencode.js";
+import type { TokenUsage } from "../../src/metrics/types.js";
 
 // ---------------------------------------------------------------------------
 // Envelope event contract
@@ -74,8 +75,12 @@ export interface EnvelopeEvent {
   started_at: string;
   ended_at: string | null;
   outcome: EnvelopeOutcome;
-  /** Total tokens for model-calling roles; null = not applicable. */
-  tokens: number | null;
+  /**
+   * Token TOTAL (number) or the full provider usage split (TokenUsage object,
+   * wave-5 cost honesty: cache/reasoning split + USD cost) for model-calling
+   * roles; null = not applicable. Consumers normalize via tokenTotalOf.
+   */
+  tokens: number | TokenUsage | null;
   wall_clock_ms: number | null;
   /** Per-target identity (sanitized file#round) appended to the event key. */
   identity: string | null;
@@ -147,13 +152,15 @@ export interface EnvelopeSpec<I, O> {
    */
   stepOptions?: StepOptions | undefined;
   /**
-   * Inner handler. Returns the step output plus the token count observed by
-   * the model call (null for non-model work). Throwing triggers dex retry.
+   * Inner handler. Returns the step output plus the token usage observed by
+   * the model call — a bare total (number) or the full provider split
+   * (TokenUsage object; wave-5 cost honesty). null for non-model work.
+   * Throwing triggers dex retry.
    */
   inner: (
     context: Context,
     input: I,
-  ) => Promise<{ output: O; tokens: number | null; outcome?: EnvelopeOutcome }>;
+  ) => Promise<{ output: O; tokens: number | TokenUsage | null; outcome?: EnvelopeOutcome }>;
   /**
    * Optional routing decision after a successful inner run. Defaults to
    * gracefulComplete(output). Chain with goTo(nextClass, input) for linear

@@ -217,9 +217,38 @@ export interface FeedEntry {
   outcome: string;
   /** Total tokens; null = not applicable (non-model step). */
   tokens: number | null;
+  /**
+   * Wave-5 cost honesty: provider-reported usage split for envelopes that
+   * carry the full TokenUsage object (null for bare-total envelopes).
+   */
+  usage: UsageSplitView | null;
   wallClockMs: number | null;
   /** True for model-calling roles (local mirror of the envelope contract). */
   tokensRequired: boolean;
+}
+
+/** Normalized provider usage split (metrics TokenUsage, flattened view). */
+export interface UsageSplitView {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+  costUsd: number;
+}
+
+/** Per-role agent usage aggregate for the dashboard grid (cost honesty). */
+export interface AgentUsageView {
+  role: string;
+  calls: number;
+  /** Sum over envelopes carrying the full split; null when none do. */
+  input: number | null;
+  cacheRead: number | null;
+  output: number | null;
+  reasoning: number | null;
+  costUsd: number | null;
+  /** True when tokens flowed without provider-reported per-call cost. */
+  estimated: boolean;
 }
 
 export interface BurnDownSeriesView {
@@ -257,6 +286,12 @@ export interface KillTimelineGroupView {
 
 export interface DashboardStateView {
   generatedAt: string;
+  /**
+   * Wave-5 lifecycle headline (takeaways-synthesis #3): one-line run status
+   * for the newest port flow with the live running → killed → resumed →
+   * completed flip (derived from flow status + kill sidecar ordering).
+   */
+  headline: string;
   sources: {
     dex: SourceStatus;
     git: SourceStatus & { repoRoot: string };
@@ -270,4 +305,5 @@ export interface DashboardStateView {
   commits: CommitView[];
   worktrees: Array<{ path: string; branch: string; head: string; clean: boolean | null }>;
   killTimeline: KillTimelineGroupView[];
+  agentUsage: AgentUsageView[];
 }

@@ -61,6 +61,10 @@
   .timeline .t { position: absolute; left: 0; width: 88px; text-align: right; color: var(--dim); }
   .runhead { padding: 6px 12px 2px; color: var(--violet); }
   svg text { font-family: var(--mono); }
+  #headline { margin-top: 10px; padding: 7px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 3px; font-size: 13px; color: var(--amber); }
+  #headline.completed { color: var(--green); }
+  #headline.killed { color: var(--red); }
+  #headline.resumed { color: var(--cyan); }
 </style>
 </head>
 <body>
@@ -75,6 +79,8 @@
     <span class="chip down" id="chip-git"><span class="dot"></span>GIT</span>
     <span class="chip down" id="chip-kill"><span class="dot"></span>KILL-EVENTS</span>
   </header>
+
+  <div id="headline" class="running">&mdash;</div>
 
   <section>
     <h2><span class="n">01</span>agents &times; worktrees &times; tasks</h2>
@@ -114,6 +120,13 @@
       <h2><span class="n">06</span>kill / resume timeline</h2>
       <div class="panel" id="kills"><div class="empty">no kill sidecars found — chaos evidence appears here (metrics/kill-events.json|jsonl)</div></div>
     </div>
+  </section>
+
+  <section>
+    <h2><span class="n">07</span>agent usage &amp; cost (provider-reported)</h2>
+    <div class="panel"><table id="usage"><thead>
+      <tr><th>role</th><th>calls</th><th>input (fresh)</th><th>cache-read</th><th>output</th><th>reasoning</th><th>cost usd</th></tr>
+    </thead><tbody></tbody></table><div class="empty" id="usage-empty" hidden></div></div>
   </section>
 
   <footer id="footer"></footer>
@@ -178,9 +191,12 @@ function renderFeed(entries) {
   $("feed-empty").hidden = entries.length > 0;
   $("feed-empty").textContent = entries.length ? "" : "no envelope events yet — the dex flow has not emitted any step";
   tb.innerHTML = entries.map((e) => {
+    const splitTip = e.usage
+      ? ` — in ${e.usage.input.toLocaleString("en-US")} (cache ${e.usage.cacheRead.toLocaleString("en-US")}) out ${e.usage.output.toLocaleString("en-US")}${e.usage.costUsd > 0 ? " $" + e.usage.costUsd.toFixed(4) : ""}`
+      : "";
     const tok = e.tokens == null
       ? (e.tokensRequired ? '<span class="red" title="model-calling step missing token usage: provenance failure">MISSING</span>' : '<span class="faint" title="non-model step: tokens not applicable">n/a</span>')
-      : `<span class="violet">${esc(e.tokens.toLocaleString("en-US"))}</span>`;
+      : `<span class="violet" title="${esc(splitTip)}">${esc(e.tokens.toLocaleString("en-US"))}</span>`;
     const fileCell = e.file ? esc(short(e.file, 34)) : '<span class="faint">flow-level</span>';
     return `<tr>
       <td class="dim">${utcTime(e.ts)}</td>
@@ -281,6 +297,43 @@ function renderKills(groups) {
   }).join("");
 }
 
+function renderHeadline(text) {
+  const el = $("headline");
+  const t = String(text || "");
+  el.textContent = t || "—";
+  el.classList.remove("completed", "killed", "resumed");
+  if (/\bcompleted\b|\bsurvived kill\b/.test(t)) el.classList.add("completed");
+  else if (/\bkilled\b/.test(t)) el.classList.add("killed");
+  else if (/\bresumed\b/.test(t)) el.classList.add("resumed");
+}
+
+function renderUsage(rows) {
+  const tb = $("usage").tBodies[0];
+  $("usage-empty").hidden = rows.length > 0;
+  $("usage-empty").textContent = rows.length
+    ? ""
+    : "no model-calling envelopes yet — usage split appears once agent turns report tokens";
+  const num = (v) => (v == null ? '<span class="faint">n/a</span>' : esc(Number(v).toLocaleString("en-US")));
+  tb.innerHTML = rows.map((u) => {
+    const fresh = u.input != null && u.cacheRead != null ? Math.max(0, u.input - u.cacheRead) : null;
+    const cost =
+      u.costUsd == null
+        ? '<span class="faint">n/a</span>'
+        : u.costUsd > 0
+          ? "$" + Number(u.costUsd).toFixed(4)
+          : '<span class="amber" title="tokens flowed but the provider reports no per-call cost (plan-authed) — estimate, not exact">~$0</span>';
+    return `<tr>
+      <td class="cyan">${esc(u.role)}</td>
+      <td>${esc(u.calls)}</td>
+      <td>${num(fresh)}</td>
+      <td>${num(u.cacheRead)}</td>
+      <td>${num(u.output)}</td>
+      <td>${num(u.reasoning)}</td>
+      <td>${cost}</td>
+    </tr>`;
+  }).join("");
+}
+
 function renderSources(st) {
   chip("chip-api", true);
   chip("chip-dex", st.sources.dex.available, st.sources.dex.error || st.sources.dex.detail || "");
@@ -296,12 +349,14 @@ function renderSources(st) {
 function render(st) {
   lastData = st;
   $("generated").textContent = "snapshot " + utcFull(st.generatedAt) + " (" + rel(st.generatedAt) + " ago)";
+  renderHeadline(st.headline);
   renderGrid(st.grid);
   renderFeed(st.feed);
   renderBurnDown(st.burnDown);
   renderFlows(st.flows);
   renderCommits(st.commits);
   renderKills(st.killTimeline);
+  renderUsage(st.agentUsage ?? []);
   renderSources(st);
 }
 

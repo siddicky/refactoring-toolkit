@@ -102,6 +102,7 @@ import type { JudgmentClient } from "../src/typesafe/client.js";
 import type {
   DiffDocument,
   Finding as MetricsFinding,
+  TokenUsage,
   VerdictRecord as MetricsVerdictRecord,
 } from "../src/metrics/types.js";
 import { createCitationChecker, naiveCitationCheck } from "../src/typesafe/verdict-check.js";
@@ -117,6 +118,7 @@ import {
   renderDiffForReview,
   reviewerAgentOverride,
   reviewerModelOverride,
+  toEnvelopeUsage,
   toolOverridesAllOff,
   toolPolicyBlock,
   DIFF_HEADER_LINES,
@@ -536,6 +538,8 @@ async function writeOutFile(worktreePath: string, outPath: string, content: stri
 interface AgentTurnResult {
   text: string;
   tokens: number | null;
+  /** Full provider usage split (metrics-shaped); null when usage was absent. */
+  usage: TokenUsage | null;
 }
 
 async function runAgentTurn(input: {
@@ -560,7 +564,10 @@ async function runAgentTurn(input: {
     throw new Error(`agent session aborted (file=${input.file} round=${input.round})`);
   }
   const tokens = reply.usage === null ? null : tokenTotal(reply.usage);
-  return { text: reply.text, tokens };
+  // Wave-5 cost honesty: prefer the full usage split over the bare total —
+  // the envelope contract accepts both; tokenTotalOf normalizes downstream.
+  const usage = reply.usage === null ? null : toEnvelopeUsage(reply.usage);
+  return { text: reply.text, tokens, usage };
 }
 
 /**
@@ -586,7 +593,7 @@ async function runReviewTurn(input: {
   /** Dex attempt (1-based). Retries get a cache-busting suffix (live finding:
    *  identical retry prompts replayed IDENTICAL truncated provider turns). */
   attempt?: number;
-}): Promise<{ tuple: ReviewTuple; tokens: number | null }> {
+}): Promise<{ tuple: ReviewTuple; tokens: number | TokenUsage | null }> {
   const harness = requireHarness();
   const label = fenceLabel(input.file, input.round, input.epoch);
   const session = await harness.createSession(label);
@@ -647,7 +654,7 @@ async function runReviewTurn(input: {
       `reviewer ${input.reviewerId} verdict failed validation: ${mapped.errors.join("; ")}`,
     );
   }
-  return { tuple: { agent: mapped.agentRecord, metrics: mapped.record }, tokens: result.tokens };
+  return { tuple: { agent: mapped.agentRecord, metrics: mapped.record }, tokens: result.usage ?? result.tokens };
 }
 
 /** Single-finding metrics record scoping for the naive fallback citation. */
@@ -914,7 +921,7 @@ const ImplementStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileR
     const code = extractCodeFence(result.text, ".ts");
     await writeOutFile(fri.worktreePath, outPath, code);
     ppOut.set(ctx, outKeyOf(fri.file, fri.round), { outPath });
-    return { output: fri, tokens: result.tokens };
+    return { output: fri, tokens: result.usage ?? result.tokens };
   },
   route: (_ctx, _input, fri) => goTo(CaptureDiffStep, fri),
 });
@@ -1170,7 +1177,7 @@ const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
     });
     const code = extractCodeFence(result.text, ".ts");
     await writeOutFile(fri.worktreePath, out.outPath, code);
-    return { output: fri, tokens: result.tokens };
+    return { output: fri, tokens: result.usage ?? result.tokens };
   },
   route: (_ctx, _input, fri) => goTo(CommitStep, fri),
 });
@@ -1447,7 +1454,7 @@ const PrepGenerateStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
     const result = await runAgentTurn({ def: IMPLEMENTER, sessionId: await prepSessionId(input.epoch), turn, file: PREP_SPEC_FILE, round: 0 });
     const specText = extractCodeFence(result.text);
     ppPrepDraft.set(ctx, "draft", { specText, iteration: 0 });
-    return { output: input, tokens: result.tokens };
+    return { output: input, tokens: result.usage ?? result.tokens };
   },
   route: (_ctx, _input, input) => goTo(PrepDiffCaptureStep, input),
 });
@@ -1720,7 +1727,7 @@ const PrepReviseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRu
     });
     const specText = extractCodeFence(result.text);
     ppPrepDraft.set(ctx, "draft", { specText, iteration: draft.iteration + 1 });
-    return { output: input, tokens: result.tokens };
+    return { output: input, tokens: result.usage ?? result.tokens };
   },
   route: (_ctx, _input, input) => goTo(PrepDiffCaptureStep, input),
 });
@@ -2006,7 +2013,7 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
     });
     const code = extractCodeFence(result.text, ".ts");
     await writeOutFile(fri.worktreePath, outPath, code);
-    return { output: fri, tokens: result.tokens };
+    return { output: fri, tokens: result.usage ?? result.tokens };
   },
   route: (_ctx, _input, fri) => goTo(CaptureDiffStep, fri),
 });
@@ -2373,7 +2380,7 @@ const ChildQueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<F
     });
     const code = extractCodeFence(result.text, ".ts");
     await writeOutFile(fri.worktreePath, outPath, code);
-    return { output: fri, tokens: result.tokens };
+    return { output: fri, tokens: result.usage ?? result.tokens };
   },
   route: (_ctx, _input, fri) => goTo(CaptureDiffStep, fri),
 });
