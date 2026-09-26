@@ -2132,6 +2132,12 @@ const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
   role: "record",
   stepOptions: {
     executeLoadAttributeMaps: [ppQueue, ppVerify, ppPrep, ppWave],
+    // Live finding (cx-5 first parallel dispatch): dex loads maps for the
+    // EXECUTE phase via executeLoadAttributeMaps, but the WAIT-FOR phase has
+    // its OWN load set — the join's waitFor reads pp-prep/pp-wave and failed
+    // 14 attempts with "AttributeMap instance was not loaded for this
+    // invocation: pp-prep/prep" until this declaration was added.
+    waitForLoadAttributeMaps: [ppPrep, ppWave],
     executeRetry: { maximumAttempts: 3 },
     // The wait spans two full per-file pipelines; generous method timeout.
     waitForMethodTimeoutMs: 4 * 60 * 60_000,
