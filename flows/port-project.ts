@@ -547,6 +547,9 @@ async function runReviewTurn(input: {
   round: number;
   epoch: number;
   diff: ReviewTurnDiff;
+  /** Dex attempt (1-based). Retries get a cache-busting suffix (live finding:
+   *  identical retry prompts replayed IDENTICAL truncated provider turns). */
+  attempt?: number;
 }): Promise<{ tuple: ReviewTuple; tokens: number | null }> {
   const harness = requireHarness();
   const label = fenceLabel(input.file, input.round, input.epoch);
@@ -570,11 +573,15 @@ async function runReviewTurn(input: {
     reviewerLabel: REVIEWER.name,
     diffBlock: diffBlock.block,
   });
+  const turnText =
+    (input.attempt ?? 1) > 1
+      ? `${turn}\n\n(retry attempt ${input.attempt}: a previous reply on this step was truncated or unparseable — respond with exactly one JSON object and nothing else)`
+      : turn;
   const agent = reviewerAgentOverride();
   const result = await runAgentTurn({
     def: REVIEWER,
     sessionId: session.id,
-    turn,
+    turn: turnText,
     file: input.file,
     round: input.round,
     ...(agent !== undefined ? { agent } : {}),
@@ -909,6 +916,7 @@ const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
       round: fri.round,
       epoch: fri.epoch,
       diff,
+      attempt: ctx.attempt,
     });
     ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-A"), tuple);
     return { output: fri, tokens };
@@ -940,6 +948,7 @@ const ReviewBStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
       round: fri.round,
       epoch: fri.epoch,
       diff,
+      attempt: ctx.attempt,
     });
     ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-B"), tuple);
     return { output: fri, tokens };
@@ -1494,6 +1503,7 @@ const PrepReviewAStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
       round: state.prepIteration,
       epoch: input.epoch,
       diff,
+      attempt: ctx.attempt,
     });
     ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-A"), tuple);
     return { output: input, tokens };
@@ -1528,6 +1538,7 @@ const PrepReviewBStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
       round: state.prepIteration,
       epoch: input.epoch,
       diff,
+      attempt: ctx.attempt,
     });
     ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-B"), tuple);
     return { output: input, tokens };
