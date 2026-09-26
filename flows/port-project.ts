@@ -116,6 +116,7 @@ import {
   parseUnifiedDiff,
   renderDiffForReview,
   reviewerAgentOverride,
+  reviewerModelOverride,
   toolOverridesAllOff,
   toolPolicyBlock,
   DIFF_HEADER_LINES,
@@ -544,6 +545,8 @@ async function runAgentTurn(input: {
   file: string;
   round: number;
   agent?: string;
+  /** Per-turn model override (reviewer lane swap; undefined = default lane). */
+  model?: { providerID: string; modelID: string };
 }): Promise<AgentTurnResult> {
   const harness = requireHarness();
   // Bridge mode: ALL server-side tools disabled for every agent turn; the
@@ -551,6 +554,7 @@ async function runAgentTurn(input: {
   const reply = await harness.prompt(input.sessionId, composeAgentTurn(input.def, input.turn), {
     tools: toolOverridesAllOff(),
     ...(input.agent !== undefined ? { agent: input.agent } : {}),
+    ...(input.model !== undefined ? { model: input.model } : {}),
   });
   if (reply.aborted) {
     throw new Error(`agent session aborted (file=${input.file} round=${input.round})`);
@@ -610,6 +614,7 @@ async function runReviewTurn(input: {
       ? `${turn}\n\n(retry attempt ${input.attempt}: a previous reply on this step was truncated or unparseable — respond with exactly one JSON object and nothing else)`
       : turn;
   const agent = reviewerAgentOverride();
+  const model = reviewerModelOverride();
   const result = await runAgentTurn({
     def: REVIEWER,
     sessionId: session.id,
@@ -617,6 +622,7 @@ async function runReviewTurn(input: {
     file: input.file,
     round: input.round,
     ...(agent !== undefined ? { agent } : {}),
+    ...(model !== undefined ? { model } : {}),
   });
 
   const parsed = extractJsonObject(result.text);

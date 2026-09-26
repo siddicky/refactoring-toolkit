@@ -123,6 +123,23 @@ export function reviewerAgentOverride(): string | undefined {
   return v !== undefined && v !== "" ? v : undefined;
 }
 
+/**
+ * Per-turn REVIEWER model override (wave-5 lane swap): when set, every
+ * reviewer turn (prep reviews + per-file review-A/B — all through
+ * runReviewTurn) runs on this provider/model instead of the harness default,
+ * so the reviewer lane can move independently of implementer/fixer (which
+ * stay on the default lane). Format: `OPENCODE_REVIEWER_MODEL=<providerID>/<modelID>`
+ * e.g. `openai/gpt-6-luna`. Invalid formats are ignored (undefined).
+ */
+export function reviewerModelOverride(): { providerID: string; modelID: string } | undefined {
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  const v = proc?.env?.OPENCODE_REVIEWER_MODEL?.trim();
+  if (v === undefined || v === "") return undefined;
+  const slash = v.indexOf("/");
+  if (slash <= 0 || slash >= v.length - 1) return undefined;
+  return { providerID: v.slice(0, slash), modelID: v.slice(slash + 1) };
+}
+
 // ---------------------------------------------------------------------------
 // Diff pass-by-value plumbing
 // ---------------------------------------------------------------------------

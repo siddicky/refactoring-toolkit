@@ -77,6 +77,13 @@ export interface PromptOptions {
   tools?: Record<string, boolean>;
   /** opencode agent name; defaults to OPENCODE_AGENT env or server default. */
   agent?: string;
+  /**
+   * Per-turn model override (lane swap, wave-5): when set, THIS turn runs on
+   * the given provider/model instead of the harness default — e.g. reviewer
+   * turns on `openai/gpt-6-luna` while implementer/fixer stay on the default
+   * zai lane. Takes precedence over the constructor model.
+   */
+  model?: { providerID: string; modelID: string };
 }
 
 /** How long prompt() polls for a completed assistant reply (0(g) provenance). */
@@ -219,11 +226,12 @@ export class OpencodeHarness {
    */
   async prompt(sessionId: string, text: string, opts?: PromptOptions): Promise<PromptResult> {
     const agent = opts?.agent ?? this.defaultAgent;
+    const model = opts?.model ?? this.#model;
     const res = await withCallTimeout(
       this.#client.session.prompt({
         path: { id: sessionId },
         body: {
-          ...(this.#model !== undefined ? { model: this.#model } : {}),
+          ...(model !== undefined ? { model } : {}),
           ...(agent !== undefined ? { agent } : {}),
           ...(opts?.tools !== undefined ? { tools: opts.tools } : {}),
           parts: [{ type: "text", text }],
