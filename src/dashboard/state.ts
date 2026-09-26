@@ -859,8 +859,10 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     contentHash: c.contentHash,
   }));
 
-  // Wave-5 lifecycle headline: newest flow + its queue progress + kill overlay.
-  const headlineFlow = flowViews[0];
+  // Wave-5 lifecycle headline: newest TOP-LEVEL flow (SubFlow children of the
+  // parallel wave join surface as their own flows; the run headline belongs
+  // to the parent port.Project flow) + its queue progress + kill overlay.
+  const headlineFlow = flowViews.find((f) => !f.flowId.startsWith("SubFlow:"));
   const headlineQueue = headlineQueueFor(headlineFlow, queueSummaries);
   const headline = lifecycleHeadline({
     flow: headlineFlow,
