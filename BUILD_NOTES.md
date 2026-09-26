@@ -455,6 +455,35 @@ re-dispatches; valuable for anyone building on opencode + zai-coding-plan:
   (per-turn server-side tools all-off + reviewer definition prefix), not by
   the vendor agent persona.
 
+## Phase 4 — final status (worker-1c)
+
+- **GREEN (clean path)**: p4-7 (runId `01a0dd01…`, epoch 6) COMPLETED
+  10:42:51Z end-to-end with the Sisyphus reviewer: prep loop (2 reviews per
+  iteration, all first-try) → Money loop (implement 56k tok → reviews → fixer
+  → commit `84b3fad`) → FlatRate loop (commit `334ed4c`) → QueueVerify on the
+  integrated checkout: **tsc 0 errors, vitest 0** → termination rule (queues
+  empty) → Final. Burn-down `tsc-1: 0`, `vitest-1: 0` published. Integrated
+  checkout carries `src/money.ts` + `src/pricing/flat-rate-discount.ts`.
+  **AC2 provenance on this real run: `provenance_ok=true`, 0 failures, 73/73
+  envelopes dispatch-anchored, 10 verdict records, 1,107,958 model tokens
+  reconciled** (`/tmp/metrics-p47/report.json` — first fully-green AC2 render
+  on live data; validates the identity fix, the `:start` self-envelope
+  anchor, and multi-run history merge).
+- **Fix-round kill smoke: BLOCKED-BY-PROVIDER after the bound.** The queue/
+  fix-round kill needs a run that survives to the fix round. Three window-
+  gated dispatches failed PRE-window to the degenerate-turn provider window
+  (see the infra finding above): p4-8 (10:46, 3/3 degenerate review-B),
+  p4-9 (11:33, died at prep review-A after 2 absorbed degenerates), p4-10
+  (13:16, dispatched by the 3-probe window gate; died 14:11 at prep review-B
+  — attempts produced 3, 885 (unparseable), 1 output tokens). **The chaos
+  kill never fired; per the max-2-attempts smoke bound this is documented,
+  not retried.** The fix-round machinery itself remains covered by: the
+  termination-rule live proof (p3-4's cap-block with 2 real tsc errors), the
+  deterministic fault `queue-verify:inject-error:seed` (de4bf4d, ready for a
+  future window), and unit suites. p4-7's kill-shaped evidence additionally
+  includes the earlier in-run kills on the same topology (p3-4 external
+  SIGKILL mid-reviewer + resume to COMPLETED; p4-1 live-Jev fault + resume).
+
 ## Phases 3/4 continuation (worker-1c)
 
 ### Jev prompt fix (spot-check re-measured, one prompt-iteration budget)

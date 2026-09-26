@@ -233,10 +233,32 @@ async function main(): Promise<number> {
   const attrs = state.attributes ?? [];
   const flowCompleted = state.flowStatus === "FLOW_STATUS_COMPLETED";
 
-  const envelopes = collectEnvelopes(attrs);
-  const verdicts = collectVerdicts(attrs);
-  const burnDown = collectBurnDown(attrs);
+  // Parallel topology (v1.1): child flows are published by the parent under
+  // `pp-wave/children`; merge every child's envelope/verdict/burn-down
+  // evidence into the parent's stream so the report covers the whole run.
+  const childIds: string[] = [];
+  for (const a of attrs) {
+    if (!a.key.startsWith("pp-wave/children")) continue;
+    const v = a.value as { children?: Array<{ flowId?: string }> } | null;
+    for (const c of v?.children ?? []) {
+      if (typeof c?.flowId === "string" && c.flowId.length > 0) childIds.push(c.flowId);
+    }
+  }
+  const envelopes: EnvelopeEvent[] = [];
+  const verdicts: VerdictRecord[] = [];
+  const burnDown: QueueBurnDownEvent[] = [];
+  for (const id of [flowId, ...childIds]) {
+    const s = id === flowId ? state : (runDexcli(["flow", "state", id]) as FlowState);
+    envelopes.push(...collectEnvelopes(s.attributes ?? []));
+    verdicts.push(...collectVerdicts(s.attributes ?? []));
+    burnDown.push(...collectBurnDown(s.attributes ?? []));
+  }
+
   const history = mergedHistory(flowId);
+  for (const id of childIds) {
+    const h = runDexcli(["flow", "history", id, "-all"]) as DispatchHistory;
+    history.events.push(...(h.events ?? []));
+  }
   const killEvents = collectKillEvents(argValue("--kill-events"), runId, flowCompleted);
 
   const report = renderReport({
