@@ -1540,7 +1540,11 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
   stepId: "pp-verdict-check",
   role: "verdict-check",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
-  stepOptions: { executeLoadAttributeMaps: [ppVerdict, ppDiff] },
+  // cx6 live finding: recordJevUsage READS pp-jev-usage when the live Jev
+  // citation loop spent tokens — an undeclared read throws (retried 46x,
+  // each retry re-billing the citation batch). Writes need no declaration
+  // (why pp-kept never surfaced this); READS do.
+  stepOptions: { executeLoadAttributeMaps: [ppVerdict, ppDiff, ppJevUsage] },
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
     if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
@@ -1624,7 +1628,8 @@ const PrioritizeStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<File
   stepId: "pp-prioritize",
   role: "prioritize",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
-  stepOptions: { executeLoadAttributeMaps: [ppKept] },
+  // cx6 live finding: ppJevUsage read via recordJevUsage (see pp-verdict-check).
+  stepOptions: { executeLoadAttributeMaps: [ppKept, ppJevUsage] },
   inner: async (ctx, fri) => {
     const kept = ppKept.get(ctx, keptKeyOf(fri.file, fri.round));
     if (kept === undefined) throw new Error(`kept findings missing for ${fri.file}#${fri.round}`);
@@ -2632,7 +2637,9 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
   stepId: "pp-queue-verify",
   role: "queue",
   stepOptions: {
-    executeLoadAttributeMaps: [ppVerify, ppQueue, ppConfig, ppPrep, ppMarker],
+    // ppJevUsage: vitest-triage live Jev tokens are recorded via
+    // recordJevUsage (read) — undeclared-read live finding, cx6.
+    executeLoadAttributeMaps: [ppVerify, ppQueue, ppConfig, ppPrep, ppMarker, ppJevUsage],
   },
   inner: async (ctx, input) => {
     const config = ppConfig.get(ctx, "config");
