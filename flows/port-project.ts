@@ -80,6 +80,11 @@ import {
 import { IMPLEMENTER } from "../harness/agents/implementer.js";
 import { REVIEWER } from "../harness/agents/reviewer.js";
 import { FIXER } from "../harness/agents/fixer.js";
+import {
+  executorPromptOpts,
+  plannerPromptOpts,
+  reviewLaneRouting,
+} from "../src/harness/lanes.js";
 import type { AgentDefinition } from "../harness/agents/types.js";
 import type {
   VerdictRecord as AgentVerdictRecord,
@@ -785,6 +790,8 @@ async function runAgentTurn(input: {
   agent?: string;
   /** Per-turn model override (reviewer lane swap; undefined = default lane). */
   model?: { providerID: string; modelID: string };
+  /** Per-turn reasoning variant (lane policy: src/harness/lanes.ts). */
+  variant?: string;
 }): Promise<AgentTurnResult> {
   const harness = requireHarness();
   // Bridge mode: ALL server-side tools disabled for every agent turn; the
@@ -793,6 +800,7 @@ async function runAgentTurn(input: {
     tools: toolOverridesAllOff(),
     ...(input.agent !== undefined ? { agent: input.agent } : {}),
     ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(input.variant !== undefined ? { variant: input.variant } : {}),
   });
   if (reply.aborted) {
     throw new Error(`agent session aborted (file=${input.file} round=${input.round})`);
@@ -1060,7 +1068,10 @@ async function runReviewTurnOnce(input: {
     // 0(g)). Tier-0 retries (degenerate no-text replies) therefore land on the
     // fallback lane automatically.
     const agent = reviewerAgentOverride();
-    const model = demoteReviewerLane(attemptNo, reviewerModelOverride(), reviewerModelFallback());
+    // Lane routing = f(attempt) (US-002) over the wave-5 lane table: attempt 1
+    // runs the reviewer lane (gpt-6-luna @ high), attempt >= 2 demotes to the
+    // fallback model or the executor lane. See src/harness/lanes.ts.
+    const routing = reviewLaneRouting(attemptNo);
     // Lane LABEL from the same f(attempt) policy (generic instantiation) — used
     // only in diagnosis records, never for decisions (AC-B2).
     const lane = demoteReviewerLane<"default" | "demoted">(attemptNo, "default", "demoted");
@@ -1071,7 +1082,7 @@ async function runReviewTurnOnce(input: {
       file: input.file,
       round: input.round,
       ...(agent !== undefined ? { agent } : {}),
-      ...(model !== undefined ? { model } : {}),
+      ...routing,
     });
     lastUsage = result.usage;
     // In-step verbatim memo (arm c): capture the PRIOR attempt's normalized
@@ -1189,7 +1200,7 @@ async function runReviewTurnOnce(input: {
       file: input.file,
       round: input.round,
       ...(agent !== undefined ? { agent } : {}),
-      ...(model !== undefined ? { model } : {}),
+      ...routing,
     });
     const burned = addUsage(result.usage, repair.usage);
     let repairedRaw: unknown;
@@ -1542,6 +1553,7 @@ const ImplementStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileR
       turn,
       file: fri.file,
       round: fri.round,
+      ...executorPromptOpts(),
     });
     const code = extractCodeFence(result.text, ".ts");
     await writeOutFile(fri.worktreePath, outPath, code);
@@ -1829,6 +1841,7 @@ const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
       turn,
       file: fri.file,
       round: fri.round,
+      ...executorPromptOpts(),
     });
     const code = extractCodeFence(result.text, ".ts");
     await writeOutFile(fri.worktreePath, outPath, code);
@@ -2112,7 +2125,7 @@ const PrepGenerateStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
       symbolTableText,
       stubPrepBaseline: seed.stubRaw,
     });
-    const result = await runAgentTurn({ def: IMPLEMENTER, sessionId: await prepSessionId(input.epoch), turn, file: PREP_SPEC_FILE, round: 0 });
+    const result = await runAgentTurn({ def: IMPLEMENTER, sessionId: await prepSessionId(input.epoch), turn, file: PREP_SPEC_FILE, round: 0, ...plannerPromptOpts() });
     const specText = extractCodeFence(result.text);
     ppPrepDraft.set(ctx, "draft", { specText, iteration: 0 });
     return { output: input, tokens: result.usage ?? result.tokens };
@@ -2399,6 +2412,7 @@ const PrepReviseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRu
       turn,
       file: PREP_SPEC_FILE,
       round: 0,
+      ...plannerPromptOpts(),
     });
     const specText = extractCodeFence(result.text);
     ppPrepDraft.set(ctx, "draft", { specText, iteration: draft.iteration + 1 });
@@ -3056,6 +3070,7 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
       turn,
       file: fri.file,
       round: fri.round,
+      ...executorPromptOpts(),
     });
     const code = extractCodeFence(result.text, ".ts");
     await writeOutFile(fri.worktreePath, outPath, code);
@@ -3471,6 +3486,7 @@ const ChildQueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<F
       turn,
       file: fri.file,
       round: fri.round,
+      ...executorPromptOpts(),
     });
     const code = extractCodeFence(result.text, ".ts");
     await writeOutFile(fri.worktreePath, outPath, code);

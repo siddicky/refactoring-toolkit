@@ -84,6 +84,13 @@ export interface PromptOptions {
    * zai lane. Takes precedence over the constructor model.
    */
   model?: { providerID: string; modelID: string };
+  /**
+   * Per-turn reasoning variant (opencode per-model effort ladder — server
+   * 1.18.32 accepts `variant` on the prompt body; the SDK type lags, hence
+   * the cast at the call site). e.g. glm models: "low" | "high" | "max".
+   * Lane policy lives in lanes.ts.
+   */
+  variant?: string;
 }
 
 /** How long prompt() polls for a completed assistant reply (0(g) provenance). */
@@ -271,6 +278,7 @@ export class OpencodeHarness {
           ...(model !== undefined ? { model } : {}),
           ...(agent !== undefined ? { agent } : {}),
           ...(opts?.tools !== undefined ? { tools: opts.tools } : {}),
+          ...(opts?.variant !== undefined ? { variant: opts.variant } : {}),
           parts: [{ type: "text", text }],
         },
       } as never),
