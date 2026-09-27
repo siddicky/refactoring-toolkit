@@ -24,6 +24,7 @@ import { join } from "node:path";
 import {
   bootstrapPlan,
   classifyVitestRecords,
+  errorCountsByOutput,
   findVitestTestFiles,
   parsePrepSourceMap,
   portedRootsFromSourceMap,
@@ -387,6 +388,65 @@ describe("US-010 ported-test-file fix routing", () => {
     );
     expect(fixable).toEqual([{ file: "tests/Support/LegacyHelpersTest.php", fromRound: 1 }]);
     expect(capped).toEqual([]);
+  });
+
+  test("cx6b regression: vitest-attributed failures count toward fix-round selection", () => {
+    // The live cx6b run completed with 2 failing ported tests and NO fix
+    // round: selectFixableFiles was fed tsc-only counts. The composed count
+    // must include vitest failures routed to the output.
+    const tscErrors: Array<{ file: string }> = [];
+    const vitestClassified = [
+      {
+        record: failureRecord(["test/support/legacy-helpers.test.ts:12:26"]),
+        classification: {
+          failureClass: "port-caused" as const,
+          attributedFile: "test/support/legacy-helpers.test.ts",
+          reason: "stack limited to a PORTED test file",
+        },
+      },
+      {
+        record: failureRecord(["test/moderation/chat-sentinel.test.ts:8:3"]),
+        classification: {
+          failureClass: "port-caused" as const,
+          attributedFile: "test/moderation/chat-sentinel.test.ts",
+          reason: "stack limited to a PORTED test file",
+        },
+      },
+      {
+        record: failureRecord(["tests/fixtures/harness/selfcheck.ts:3:1"]),
+        classification: {
+          failureClass: "fixture-problem" as const,
+          attributedFile: "tests/fixtures/harness/selfcheck.ts",
+          reason: "fixture stack",
+        },
+      },
+      {
+        record: failureRecord(["test/orphan.test.ts:1:1"]),
+        classification: { failureClass: "port-caused" as const, attributedFile: null, reason: "unknown" },
+      },
+    ];
+    const counts = errorCountsByOutput(tscErrors, vitestClassified);
+    expect(counts.get("test/support/legacy-helpers.test.ts")).toBe(1);
+    expect(counts.get("test/moderation/chat-sentinel.test.ts")).toBe(1);
+    expect(counts.has("tests/fixtures/harness/selfcheck.ts")).toBe(false);
+    expect(counts.has("test/orphan.test.ts")).toBe(false);
+    // And the selection loop now produces fix rounds for the attributed files.
+    const { fixable } = selectFixableFiles(
+      [
+        { file: "tests/Support/LegacyHelpersTest.php", round: 1 },
+        { file: "tests/Moderation/ChatSentinelTest.php", round: 1 },
+      ],
+      {
+        ...sourceMap,
+        "tests/Moderation/ChatSentinelTest.php": { outPath: "./test/moderation/chat-sentinel.test.ts" },
+      },
+      counts,
+      3,
+    );
+    expect(fixable.map((f) => f.file).sort()).toEqual([
+      "tests/Moderation/ChatSentinelTest.php",
+      "tests/Support/LegacyHelpersTest.php",
+    ]);
   });
 });
 

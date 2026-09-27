@@ -503,6 +503,32 @@ export function deriveNext(queue: PortQueueState, maxRounds: number): NextAction
 }
 
 /**
+ * US-010 (cx6b live finding): per-output error counts feeding fix-round
+ * selection — tsc errors PLUS vitest failures Lane-B-routed to the output
+ * (port-caused AND attributedFile set). Without the vitest half, failing
+ * ported tests complete the run unaddressed: the fix FEED saw them, the
+ * selection didn't. Counts derive from the durable classified records (same
+ * 80-record cap as the tsc error list).
+ */
+export function errorCountsByOutput(
+  tscErrors: ReadonlyArray<{ file: string }>,
+  vitestClassified: ReadonlyArray<ClassifiedVitestFailure> | undefined,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const e of tscErrors) {
+    const rel = e.file.replace(/^\.\//, "");
+    counts.set(rel, (counts.get(rel) ?? 0) + 1);
+  }
+  for (const c of vitestClassified ?? []) {
+    if (c.classification.failureClass !== "port-caused") continue;
+    if (c.classification.attributedFile === null) continue;
+    const rel = c.classification.attributedFile.replace(/^\.\//, "");
+    counts.set(rel, (counts.get(rel) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
  * Phase 4 termination rule (pure): from the done-set, the prep source map
  * (php→ts outPath), and the per-output error counts, select the files that
  * get a FIX ROUND (errors remain AND round+1 stays within the cap) versus
@@ -2782,11 +2808,7 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
       const outPath = prep?.sourceMap[d.file]?.outPath;
       if (outPath !== undefined) outPathToPhp.set(outPath.replace(/^\.\//, ""), { file: d.file, round: d.round });
     }
-    const errorCountByFile = new Map<string, number>();
-    for (const e of tscState.errors) {
-      const rel = e.file.replace(/^\.\//, "");
-      errorCountByFile.set(rel, (errorCountByFile.get(rel) ?? 0) + 1);
-    }
+    const errorCountByFile = errorCountsByOutput(tscState.errors, vitestState.classified);
     const { fixable, capped } = selectFixableFiles(
       queue.done,
       Object.fromEntries(

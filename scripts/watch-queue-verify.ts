@@ -31,6 +31,9 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import {
+  DexServiceError,
+} from "@superdurable/dex";
 import { openDexClient, dexConfigFromEnv } from "../src/dex/client.js";
 import { dexCliQueries } from "../src/dashboard/queries.js";
 import { envelopeStream } from "../flows/steps/envelope.js";
@@ -43,6 +46,22 @@ import {
 } from "../src/watcher/queue-verify-watcher.js";
 
 const execFileP = promisify(execFile);
+
+/**
+ * cx6b live finding: the readStream long-poll wake-up ("nothing arrived in
+ * the poll window") surfaces as a DexServiceError with the STABLE subStatus
+ * "longPollTimeout" — the watcher treated it as a subscription failure and
+ * always degraded to the 45 s poll, which then MISSED the short (~15 s)
+ * queue-verify window entirely (the run completed with no kill). Mirror the
+ * dashboard subscriber's rule: classify by subStatus, treat the wake-up as
+ * an empty read, keep the subscription alive.
+ */
+function isLongPollWakeUp(err: unknown): boolean {
+  return (
+    err instanceof DexServiceError &&
+    (err as { subStatus?: unknown }).subStatus === "longPollTimeout"
+  );
+}
 
 function argValue(flag: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(flag);
@@ -112,12 +131,18 @@ async function main(): Promise<number> {
       pollIntervalMs: pollSeconds * 1_000,
       nextStreamEvent: async (timeoutMs) => {
         if (runtime === undefined) return null; // poll-only degradation
-        const message = await runtime.client.readStream(
-          flowId,
-          envelopeStream,
-          resumeToken,
-          timeoutMs,
-        );
+        let message: Awaited<ReturnType<typeof runtime.client.readStream>>;
+        try {
+          message = await runtime.client.readStream(
+            flowId,
+            envelopeStream,
+            resumeToken,
+            timeoutMs,
+          );
+        } catch (err) {
+          if (isLongPollWakeUp(err)) return null; // empty long-poll wake-up
+          throw err; // genuine stream failure -> poll fallback (once)
+        }
         resumeToken = message.resumeToken;
         const envelope = message.value as { eventKey?: string; event?: { stepId?: unknown; ended_at?: unknown } };
         const event: WatcherStreamEvent = {
