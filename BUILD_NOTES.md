@@ -922,3 +922,93 @@ the parallel topology is now live-proven end-to-end. Awaiting user go/no-go.
 - Bootstrap commit evidence (temp fixture, injected no-op install): first run commits
   once under `bootstrap:integration` without node_modules; satisfied rerun is a pure
   skip; post-commit damage + replay rewrites but never duplicates the keyed commit.
+
+# Stage 3b — US-009 (2026-09-27): live validation runs cx6…cx6e (per-flow narrative)
+
+Config common to all: CreatorPay fixture, 10 port units (5 src + 5 PHPUnit test ports),
+parallel waves of 2, maxRounds 3, live Jev lane (startup line), reviewer luna/plan agent.
+Prep source map: fixtures/creatorex-middleware/prep-stub.md (5 explicit test rows, US-010).
+
+## Per-flow narrative (what each run contributed)
+
+- **cx6** (02:04-02:31, TERMINATED): first bootstrap run. Live finding #1
+  (`0fc9211`): recordJevUsage READS pp-jev-usage; VerdictCheck/Prioritize/
+  QueueVerify did not declare it — undeclared-AttributeMap-read threw and dex
+  retried (46+ attempts, each re-billing the live citation batch). Writes need
+  no declaration, which is why cx-5c/5e never surfaced it. Flow terminated;
+  fix + regression tests landed.
+- **cx6b** (03:25-04:33, COMPLETED, no kill): two silent failures. (a) vitest
+  RAN for real (41/2/43) but the 2 failing tests produced NO fix round —
+  selectFixableFiles was fed tsc-only counts (`0b429ad`, errorCountsByOutput).
+  (b) The US-007 watcher's stream lane degraded on the FIRST long-poll idle
+  window (`subStatus longPollTimeout` thrown as a failure) and the 45 s poll
+  missed the ~15 s queue-verify window — the run completed with NO kill
+  (`0b429ad` classifies the wake-up as an empty read; poll tightened to 10 s).
+- **cx6c** (04:4x-05:2x, TERMINATED after kill+resume): the kill/resume arc was
+  WITNESSED here — watcher fired at pp-queue-verify (05:20:16) with
+  intent-before-SIGKILL ordering (monotonic 2521766→2521819), sidecar anchored
+  (run_id cx6c-kill1, flow_run_id cx6c), all targets (server+worker) exited;
+  same-DB restart resumed the flow; queue-verify re-ran honestly; fix rounds
+  for 7 tsc-error files ran with zero new implementer invocations on done
+  files. THEN fix-loop NON-TERMINATION surfaced: selectFixableFiles iterated
+  every done entry, so a file's stale round-1 entry re-qualified it at round 2
+  forever (waves 6-15 re-fixing 3 tsc + 1 vitest errors) — terminated to stop
+  the bleed; cap now reads the LATEST round (`413ba53`). Also first sighting
+  of the vitest collection-failure misread (`Tests  no tests` → fake clean
+  ran 0/0/0; every ported test file failed to load on an invented import) —
+  parser now falls back to the Test Files line (`a7da1bb`).
+- **cx6d** (FAILED 06:09, no run): SELF-INFLICTED OPERATIONAL KILL — I
+  restarted the worker for the parser fix WHILE cx6d was in flight; the
+  PpPrepGenerateStart marker exhausted its 3 connection attempts
+  (`dial tcp 127.0.0.1:8803: connection refused`) and dex closed the flow.
+  **Operational rule for the record: worker-up-before-startFlow — never
+  restart the worker while a flow is in flight; mid-flight restarts also
+  cannot adopt code changes into already-running step executions (cx6
+  showed retries replay recorded step options), so any fix = stop + fresh
+  flow.**
+- **cx6e** (06:33-07:52, COMPLETED — the presentation run): all fixes in.
+  10/10 port units completed; bootstrap provisioned + committed
+  (op-ID bootstrap:integration, node_modules excluded); tsc 0 at final
+  iteration; **vitest RAN with real pass/fail from the PORTED tests:
+  39 passed / 4 failed of 43** (burn-down + report carry the state; the
+  typecheck-verified vs test-verified distinction is explicit in
+  report.md §Verification); 182 envelopes, 24 verdict records, 0 tombstones,
+  0 degraded rounds, provenance_ok=true (PpBootstrap registered in the
+  anchor table). The kill did NOT fire in this run: the watcher's stream lane
+  stayed healthy the whole run (fix confirmed) but the queue-verify window
+  (~5-10 s: cached tsc + fast vitest) closed before the trigger check — exit 1
+  "flow terminal before trigger". The 4 failing tests were additionally
+  unattributable (vitest assertion stacks contained no frame under src/ or
+  test/ — attributedFile null, documented deterministic visibility without
+  routing), so no fix wave was due and the flow went Final. The witnessed
+  kill+resume arc therefore remains cx6c's (sidecar + envelope timeline in
+  /tmp/metrics-final/ac1-killarc-cx6c.txt).
+
+## Evidence paths (US-009)
+
+- AC2 report (cx6e, provenance_ok=true): /tmp/metrics-final/report.{md,json}
+- AC1 battery (cx6e; kill rows honestly FAIL there): /tmp/metrics-final/ac1-battery-cx6e.txt
+- Kill+resume arc (cx6c): /tmp/metrics-final/ac1-killarc-cx6c.txt +
+  /tmp/metrics-final/kill-events-cx6c.jsonl (copy of /tmp/kill-events-cx6c.jsonl)
+- Project repos: /tmp/pk-cx6e (10 keyed commits + bootstrap:integration,
+  integration branch), /tmp/pk-cx6c (mid-loop state preserved)
+- Logs: /tmp/worker-cx6c.log, /tmp/worker-cx6c-resume.log, /tmp/dex-server-cx6c.log,
+  /tmp/watch-cx6c.log, /tmp/watch-cx6e.log, /tmp/demo-cx6e.log
+- Flows: cx6e (+ 10 SubFlow children), cx6c (+ children), cx6/cx6b/cx6d
+  (failure narrative above); dashboard :4646 tracked each run live
+- Token totals: cx6e alone 1,953,430 model-role tokens (report.json); whole
+  wave (cx6+cx6b+cx6c+cx6d+cx6e incl. fix waves and re-billed citation
+  batches) estimated ~4.5-5M — the cx6 undeclared-read retries re-billed
+  Jev citations 46+ times per child and cx6c's non-terminating loop burned
+  ~10 fix waves; both are the honest cost of the live findings.
+
+## Verification (fresh, at a7da1bb + anchor table commit)
+
+- `bun run typecheck` clean; `bun test` 329/0.
+- Deviations for the lead: (1) the single-run kill+resume+COMPLETED triple was
+  not witnessed on one flow — kill+resume is cx6c's, COMPLETED is cx6e's;
+  witnessing all three together needs one more run with the now-fixed code
+  (and a faster trigger or an armed fault to widen the queue-verify window).
+  (2) vitest attribution gap: assertion-only stacks (no matching frame) stay
+  visible-but-unrouted; a test-file-frame fallback (attribute to the reported
+  testFile) is the obvious next fix and was NOT improvised under the bound.

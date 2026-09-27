@@ -191,6 +191,9 @@ export const PORT_FLOW_STEPS: readonly PortStepSpec[] = [
   { stepType: "PpFixer", stepId: "pp-fixer", role: "agent", kind: "model" },
   { stepType: "PpCommit", stepId: "pp-commit", role: "commit", kind: "support" },
   { stepType: "PpIntegrate", stepId: "pp-integrate", role: "integration", kind: "support" },
+  // US-010: integration bootstrap (vitest runner provisioning; flows/
+  // port-project.ts BootstrapStep). Non-model, flow-level ("bootstrap").
+  { stepType: "PpBootstrap", stepId: "pp-bootstrap", role: "integration", kind: "support" },
   { stepType: "PpRelease", stepId: "pp-release", role: "record", kind: "support" },
   // Phase 4 (verification queues + fix rounds) — maintained by worker-1b.
   { stepType: "PpQueueVerify", stepId: "pp-queue-verify", role: "queue", kind: "support" },
