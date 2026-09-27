@@ -1012,3 +1012,62 @@ Prep source map: fixtures/creatorex-middleware/prep-stub.md (5 explicit test row
   (2) vitest attribution gap: assertion-only stacks (no matching frame) stay
   visible-but-unrouted; a test-file-frame fallback (attribute to the reported
   testFile) is the obvious next fix and was NOT improvised under the bound.
+
+# Stage 3c — US-009-final (2026-09-27): cx7, the correctly-armed kill run
+
+## What cx7 proves (and the one thing it still doesn't)
+
+- **The kill fired by the intended lane**: watcher armed BEFORE startFlow
+  (08:09:50 vs flow start 08:10:0x), stream lane healthy the whole run, and
+  the pp-queue-verify START envelope triggered exactly one kill — via the
+  STREAM subscription, exit 0 after 2470 s. Sidecar: intent BEFORE SIGKILL
+  (monotonic 2470031→2470084), anchored (run_id cx7-kill1, flow_run_id cx7,
+  targets = dex server + port worker), "all targets exited". The cx6e miss
+  was indeed arming order + delivery lag; with correct arming the watcher
+  works as designed.
+- **The kill landed mid-FIX-WAVE** (deeper than the AC1 ask): queue-verify
+  had recorded durably at 08:50:42 (tsc 6, vitest ran 0/5/5 — this cohort's
+  test files failed to collect; honest state carried in burn-down + verify),
+  the fix-wave children had leased and fenced (08:50:43), and SIGKILL hit at
+  08:51:00 with PpQueueFixStart in flight.
+- **Same-DB restart**: durable queue-verify record survived verbatim; run
+  rollover 01a0e1ea → 9f4c5bd4 on the same sqlite DB.
+- **The one thing still missing: resume-to-COMPLETED.** The resumed
+  PpQueueFixStart re-executed into the restart gap and burned its 3
+  connection attempts (dial 127.0.0.1:8803 refused → WORKER_API_ERROR,
+  finalAttempt 3, flow FAILED 08:59:18). Failure class = cx6d's, now
+  witnessed in the resume path: **the marker/model retry budget
+  (maximumAttempts 3, ~7 s of backoff) is shorter than any realistic
+  restart window (~60 s)**. Candidate fix (NOT improvised under the bound):
+  raise the connection-failure retry budget on marker/model steps, or make
+  the recovery pass tolerate ERROR_SUB_STATUS_WORKER_API_ERROR
+  connection-refused with a long-tail retry. Anchor fingerprint of the
+  resume: the retried PpWaveJoin (finalAttempt 3) shows as the report's ONE
+  provenance failure — the resume is visible in the evidence.
+
+## Final US-009 evidence position (split across runs, per lead's framework)
+
+- kill fired + anchored sidecar + same-DB restart: **cx7** (stream lane) and
+  **cx6c** (poll lane) — both witnessed.
+- resume + fix rounds + zero re-ports + COMPLETED: **cx6e** (un-killed) and
+  cx7's durable-state survival; a single flow carrying ALL THREE remains
+  blocked on the restart-window retry budget above.
+- Battery: /tmp/metrics-cx7/ac1-battery-cx7.txt (18 PASS / 2 honest FAIL:
+  flow completed = FAILED; parent-side post-kill envelopes — resume activity
+  lives in the child + run rollover, see ac1-killarc-cx7.txt).
+- AC2: /tmp/metrics-cx7/report.{md,json} — 70 envelopes, 10 verdict records,
+  kill events carried (resumed: false — honest), verification shows
+  tsc 6 / vitest ran 0/5/5; provenance has exactly the one resume
+  fingerprint failure above.
+
+## Token totals (cx7)
+
+989,701 model-role tokens through the failure (~53 min to the kill; fix wave
++ resume re-executions included).
+
+## Operational rule (repeated for the record)
+
+worker-up-before-startFlow, AND after a kill: bring the WORKER up before (or
+simultaneously with) the SERVER'S task dispatch — or raise the retry budget.
+The 3-attempt/7-connection-second budget is the single remaining blocker to
+witnessing kill+resume+COMPLETED in ONE flow.
