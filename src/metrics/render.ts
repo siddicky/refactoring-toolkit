@@ -40,6 +40,7 @@ import {
   type TokenUsage,
   type VerdictRecord,
   type VerdictTombstone,
+  type VitestRunAccounting,
   tokenTotalOf,
 } from "./types.js";
 
@@ -100,6 +101,17 @@ export interface ReportJson {
     /** Total over model-calling roles, real attempts only; null when none. */
     tokens_model_roles: number | null;
     wall_clock_ms_total: number;
+    /**
+     * US-010: what the run was actually verified BY. `tsc_verified` is the
+     * last burn-down iteration's typecheck result (null = no tsc samples);
+     * `vitest` is the last vitest accounting (null = no vitest samples — the
+     * run's evidence is typecheck-only at best).
+     */
+    verification: {
+      tsc_final_error_count: number | null;
+      tsc_verified: boolean | null;
+      vitest: VitestRunAccounting | null;
+    };
   };
   file_rounds: Array<{
     file: string;
@@ -146,6 +158,12 @@ export interface ReportJson {
     iterations: Array<{
       iteration: number;
       error_count: number;
+      /**
+       * US-010 vitest accounting for this iteration (vitest rows only): the
+       * count is vacuous when state is "not-run" — renderers must show the
+       * state + reason, never a bare 0.
+       */
+      vitest?: VitestRunAccounting;
       per_file: Array<{ file: string; error_count: number }>;
     }>;
   }>;
@@ -484,18 +502,23 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   interface QueueAgg {
     queue: QueueKind;
     iterations: Map<number, Array<{ file: string; error_count: number }>>;
+    /** US-010: vitest accounting per iteration (first sample with one wins). */
+    vitestByIteration: Map<number, VitestRunAccounting>;
   }
   const queueAggs = new Map<QueueKind, QueueAgg>();
   for (const sample of burnDown) {
     let agg = queueAggs.get(sample.queue);
     if (!agg) {
-      agg = { queue: sample.queue, iterations: new Map() };
+      agg = { queue: sample.queue, iterations: new Map(), vitestByIteration: new Map() };
       queueAggs.set(sample.queue, agg);
     }
     const list = agg.iterations.get(sample.iteration);
     const entry = { file: sample.file, error_count: sample.error_count };
     if (list) list.push(entry);
     else agg.iterations.set(sample.iteration, [entry]);
+    if (sample.vitest !== undefined && !agg.vitestByIteration.has(sample.iteration)) {
+      agg.vitestByIteration.set(sample.iteration, sample.vitest);
+    }
   }
   const burnDownJson: ReportJson["queue_burn_down"] = [...queueAggs.values()]
     .sort((p, q) => compareStrings(p.queue, q.queue))
@@ -506,9 +529,33 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
         .map(([iteration, perFile]) => ({
           iteration,
           error_count: perFile.reduce((sum, e) => sum + e.error_count, 0),
+          ...(agg.vitestByIteration.has(iteration)
+            ? { vitest: agg.vitestByIteration.get(iteration)! }
+            : {}),
           per_file: [...perFile].sort((p, q) => compareStrings(p.file, q.file)),
         })),
     }));
+
+  // ---- US-010 verification: what the run was verified BY --------------------
+  const tscAgg = queueAggs.get("tsc");
+  let tscFinalErrorCount: number | null = null;
+  if (tscAgg !== undefined && tscAgg.iterations.size > 0) {
+    const last = Math.max(...tscAgg.iterations.keys());
+    tscFinalErrorCount = (tscAgg.iterations.get(last) ?? []).reduce(
+      (sum, e) => sum + e.error_count,
+      0,
+    );
+  }
+  const vitAgg = queueAggs.get("vitest");
+  const vitestVerification =
+    vitAgg !== undefined && vitAgg.vitestByIteration.size > 0
+      ? (vitAgg.vitestByIteration.get(Math.max(...vitAgg.vitestByIteration.keys())) ?? null)
+      : null;
+  const verification: ReportJson["summary"]["verification"] = {
+    tsc_final_error_count: tscFinalErrorCount,
+    tsc_verified: tscFinalErrorCount === null ? null : tscFinalErrorCount === 0,
+    vitest: vitestVerification,
+  };
 
   return {
     generated_at: input.generatedAt ?? null,
@@ -527,6 +574,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
       ).length,
       tokens_model_roles: modelTokens,
       wall_clock_ms_total: wallClockTotal,
+      verification,
     },
     file_rounds: fileRounds,
     tokens_by_file_role: tokensByFileRole,
@@ -707,8 +755,45 @@ function renderMarkdown(report: ReportJson): string {
     lines.push("| --- | --- | --- |");
     for (const it of q.iterations) {
       const perFile = it.per_file.map((e) => `${e.file}:${e.error_count}`).join(", ");
-      lines.push(`| ${it.iteration} | ${it.error_count} | ${mdCell(perFile)} |`);
+      let total: string;
+      if (q.queue === "vitest" && it.vitest !== undefined) {
+        // US-010: a not-run vitest iteration NEVER presents as a bare count.
+        total =
+          it.vitest.state === "ran"
+            ? `${it.error_count} failed (${it.vitest.passed ?? "?"} passed / ${it.vitest.total ?? "?"} total)`
+            : `NOT RUN — ${mdCell(it.vitest.reason ?? "reason unrecorded")}`;
+      } else {
+        total = String(it.error_count);
+      }
+      lines.push(`| ${it.iteration} | ${total} | ${mdCell(perFile)} |`);
     }
+  }
+  lines.push("");
+
+  // US-010: typecheck-verified vs test-verified are DIFFERENT evidence claims.
+  lines.push("## Verification");
+  const verification = report.summary.verification;
+  if (verification.tsc_verified === null) {
+    lines.push("- typecheck (tsc): no queue samples — typecheck status unknown");
+  } else if (verification.tsc_verified) {
+    lines.push("- typecheck (tsc): PASS at final iteration (0 remaining errors)");
+  } else {
+    lines.push(
+      `- typecheck (tsc): ${verification.tsc_final_error_count} error(s) remain at final iteration — NOT typecheck-clean`,
+    );
+  }
+  if (verification.vitest === null) {
+    lines.push(
+      "- tests (vitest): no vitest samples in the stream — evidence is typecheck-only at best",
+    );
+  } else if (verification.vitest.state === "ran") {
+    lines.push(
+      `- tests (vitest): RAN — ${verification.vitest.passed ?? "?"} passed / ${verification.vitest.failed ?? "?"} failed of ${verification.vitest.total ?? "?"} total (test-verified only when failed = 0)`,
+    );
+  } else {
+    lines.push(
+      `- tests (vitest): NOT RUN — ${mdCell(verification.vitest.reason ?? "reason unrecorded")} (evidence is typecheck-only; a 0 here would be vacuous)`,
+    );
   }
   lines.push("");
 

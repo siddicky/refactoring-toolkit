@@ -33,7 +33,7 @@ import {
   SubFlow,
 } from "@superdurable/dex";
 import type { Context, Flow, StepDecision } from "@superdurable/dex";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFile } from "node:child_process";
@@ -101,10 +101,13 @@ import {
   buildClassifiedVitestQueueState,
   createNaiveClassifier,
   parseVitestOutput,
+  parseVitestSummary,
   VITEST_RECORD_CAP,
+  type ClassifierRoots,
   type ClassifiedVitestFailure,
   type VitestFailureRecord,
   type VitestQueueState,
+  type VitestRunState,
 } from "../src/queues/vitest-queue.js";
 import { portJevLive } from "./runtime-hooks.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
@@ -119,6 +122,7 @@ import {
   type TurnShapeClass,
   type VerdictRecord as MetricsVerdictRecord,
   type VerdictTombstone,
+  type VitestRunAccounting,
   isVerdictTombstone,
 } from "../src/metrics/types.js";
 import { evaluateSuspicion, normalizeVerdictText } from "../src/metrics/suspicion.js";
@@ -138,6 +142,7 @@ import {
   reviewerAgentOverride,
   reviewerModelFallback,
   reviewerModelOverride,
+  testPortScopeNote,
   toEnvelopeUsage,
   toolOverridesAllOff,
   toolPolicyBlock,
@@ -255,6 +260,14 @@ export interface QueueVerifyState {
     * this field — every consumer treats undefined like null.
     */
   vitestState: VitestQueueState | null;
+  /**
+    * US-010 honest run accounting: `ran` (pass/fail/total) or `not-run` with
+    * an explicit reason. NEVER a bare vitestTotal 0 when the runner did not
+    * execute — consumers read the state, not the count. null on states
+    * persisted before US-010 (treat like "unknown; state predates ran/not-run
+    * recording").
+    */
+  vitestRun: VitestRunState | null;
 }
 
 /** Phase 4: one burn-down sample (dashboard renders queue-burndown/*). */
@@ -264,6 +277,12 @@ export interface QueueBurnDownSample {
   error_count: number;
   file: string | null;
   recorded_at: string;
+  /**
+   * US-010: honest vitest accounting riding the sample (vitest rows only).
+   * A not-run iteration is never a bare error_count 0 — the state + explicit
+   * reason travel with the sample.
+   */
+  vitest?: VitestRunAccounting;
 }
 
 export interface PrepArtifact {
@@ -326,6 +345,8 @@ export interface PortRunResult {
     tscTotal: number;
     vitestTotal: number;
     vitestNote: string | null;
+    /** US-010: ran/not-run accounting (null on pre-US-010 states). */
+    vitestRun: VitestRunState | null;
   } | null;
 }
 
@@ -355,6 +376,18 @@ export const ppPrepState = new AttributeMap<{ prepIteration: number }>("pp-prep-
 // Phase 4 (verification queues) durable attributes.
 export const ppVerify = new AttributeMap<QueueVerifyState>("pp-verify", jsonCodec<QueueVerifyState>());
 export const ppBurndown = new AttributeMap<QueueBurnDownSample>("queue-burndown", jsonCodec<QueueBurnDownSample>());
+
+// US-010 (integration bootstrap) durable attribute.
+export interface BootstrapRecord {
+  bootstrappedAtUtc: string;
+  /** Files the bootstrap wrote or patched (empty when already satisfied). */
+  wrote: string[];
+  installRan: boolean;
+  /** Sole-committer commit landed for BOOTSTRAP_OP_ID. */
+  committed: boolean;
+  sha: string | null;
+}
+export const ppBootstrap = new AttributeMap<BootstrapRecord>("pp-bootstrap", jsonCodec<BootstrapRecord>());
 
 // v1.1 parallel dispatch durable attributes.
 export interface WaveEntry {
@@ -402,6 +435,7 @@ export function portPersistenceSchema(): {
       ppPrepState,
       ppVerify,
       ppBurndown,
+      ppBootstrap,
       ppWave,
       ppWaveChildren,
       ppJevUsage,
@@ -557,24 +591,31 @@ async function recordJevUsage(ctx: Context, stepId: string, tokens: number): Pro
  * otherwise; Jev failing MID-batch fails open to the naive classifier (the
  * whole batch re-runs naive — no half-Jev state persists). Usage tokens are
  * surfaced through hooks.onUsage as each Jev call completes, so tokens spent
- * before a failure are still accounted.
+ * before a failure are still accounted. `roots` (US-010) carries the ported
+ * source/test/fixture roots derived from the prep source map, so failures
+ * limited to a PORTED TEST file classify port-caused and route to that file.
  */
 export async function classifyVitestRecords(
   records: readonly VitestFailureRecord[],
   iteration: number,
   jev: JudgmentClient | undefined,
   hooks: { onUsage?: (tokens: number) => void } = {},
+  roots?: ClassifierRoots,
 ): Promise<VitestQueueState> {
-  const naive = createNaiveClassifier();
+  const naive = createNaiveClassifier(roots ?? {});
   let state: VitestQueueState;
   if (jev === undefined) {
     state = await buildClassifiedVitestQueueState(records, iteration, naive);
   } else {
+    const jevOptions: { onUsage?: (tokens: number) => void; roots?: ClassifierRoots } = {
+      ...(hooks.onUsage !== undefined ? { onUsage: hooks.onUsage } : {}),
+      ...(roots !== undefined ? { roots } : {}),
+    };
     try {
       state = await buildClassifiedVitestQueueState(
         records,
         iteration,
-        createJevFailureClassifier(jev, hooks.onUsage === undefined ? {} : { onUsage: hooks.onUsage }),
+        createJevFailureClassifier(jev, jevOptions),
       );
     } catch {
       // Fail-open (Lane-B rule): Jev unavailable/erroring degrades to the
@@ -588,6 +629,32 @@ export async function classifyVitestRecords(
     ...state,
     failures: state.failures.slice(0, VITEST_RECORD_CAP),
     classified: state.classified.slice(0, VITEST_RECORD_CAP),
+  };
+}
+
+/**
+ * US-010: ported output roots derived from the prep source map — the fix
+ * loop's classification must know which output trees are PORTED (including
+ * the ported test tree, whose failures belong to the port loop, not the
+ * fixture bucket). A root is a top-level directory of a normalized outPath;
+ * roots whose files end in `.test.ts` are ported TEST roots.
+ */
+export function portedRootsFromSourceMap(
+  sourceMap: Record<string, { outPath: string }>,
+): { portedRoots: string[]; portedTestRoots: string[] } {
+  const srcRoots = new Set<string>();
+  const testRoots = new Set<string>();
+  for (const row of Object.values(sourceMap)) {
+    const rel = row.outPath.replace(/^\.\//, "");
+    const slash = rel.indexOf("/");
+    if (slash <= 0) continue;
+    const root = rel.slice(0, slash);
+    if (rel.endsWith(".test.ts") || rel.endsWith(".test.tsx")) testRoots.add(root);
+    else srcRoots.add(root);
+  }
+  return {
+    portedRoots: [...srcRoots].sort(),
+    portedTestRoots: [...testRoots].sort(),
   };
 }
 
@@ -899,10 +966,13 @@ export async function runReviewTurn(input: {
       round: input.round,
       diffId: input.diff.diffId,
     });
+    // US-010: reviewers of a TEST-port diff review test code as test code.
+    const scopeNote = testPortScopeNote(input.file);
     const turn = composeReviewerTurn({
       reviewerId: input.reviewerId,
       reviewerLabel: REVIEWER.name,
       diffBlock: diffBlock.block,
+      ...(scopeNote !== null ? { scopeNote } : {}),
     });
     const turnText =
       attemptNo > 1
@@ -1351,12 +1421,15 @@ const ImplementStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileR
     }
     const phpSource = await readFile(join(fri.sourceRoot, fri.file), "utf8");
     const outPath = prep.sourceMap[fri.file]?.outPath ?? `src/${fri.file}.ts`;
+    // US-010: test-file ports (PHPUnit -> vitest) announce their scope.
+    const scopeNote = testPortScopeNote(fri.file);
 
     const turn = composeImplementerTurn({
       phpFileName: fri.file,
       phpSource,
       prepExcerpt: prep.raw,
       outputPath: outPath,
+      ...(scopeNote !== null ? { scopeNote } : {}),
     });
     const result = await runAgentTurn({
       def: IMPLEMENTER,
@@ -1772,7 +1845,10 @@ const ReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
     });
     return { output: baseInput(fri), tokens: null };
   },
-  route: (_ctx, _input, out) => goTo(DispatchStep, out),
+  // US-010 (sequential path): release routes through the bootstrap step
+  // before dispatch — the idempotent provisioning runs right after the first
+  // integration and is a no-op thereafter.
+  route: (_ctx, _input, out) => goTo(BootstrapStep, out),
 });
 
 const FinalStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunResult>({
@@ -1795,6 +1871,7 @@ const FinalStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInpu
                 tscTotal: verify.tscTotal,
                 vitestTotal: verify.vitestTotal,
                 vitestNote: verify.vitestNote,
+                vitestRun: verify.vitestRun ?? null,
               },
       },
       tokens: null,
@@ -2235,6 +2312,304 @@ const PrepFinalizeStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
 
 
 // ---------------------------------------------------------------------------
+// US-010 — integration bootstrap (deterministic, toolkit-owned): the integrated
+// checkout gets a REAL test runner so vitest evidence can never be vacuously
+// green. Agents never run installs: provisioning is its own durable step, the
+// slow command (bun install) happens OUTSIDE every agent turn, the runner
+// artifacts are committed by the sole-committer path under the dedicated
+// op-ID `bootstrap:integration`, and every part is idempotent
+// (skip-if-present), so kill-replay and re-runs converge.
+// ---------------------------------------------------------------------------
+
+/** Sole-committer op-ID for the bootstrap commit (dedup across kill/replay). */
+export const BOOTSTRAP_OP_ID = "bootstrap:integration";
+
+/** vitest devDependency version written into the bootstrapped package.json. */
+export const BOOTSTRAP_VITEST_PIN = "^3.2.4";
+
+/** What the runner inspected in the integration checkout (no decisions). */
+export interface BootstrapInspection {
+  /** package.json file text, or null when absent. */
+  packageJsonRaw: string | null;
+  tsconfigJson: boolean;
+  vitestConfig: boolean;
+  /** .gitignore file text, or null when absent. */
+  gitignoreRaw: string | null;
+  /** node_modules/.bin/vitest present (deps installed). */
+  vitestBin: boolean;
+}
+
+/** Pure decision over an inspection: what the bootstrap must do. */
+export interface BootstrapPlan {
+  /** False when the checkout already satisfies every artifact (pure skip). */
+  needed: boolean;
+  packageJson: "write" | "patch" | "satisfied";
+  tsconfig: boolean;
+  vitestConfig: boolean;
+  gitignore: boolean;
+  /** bun install needed (bin missing, or package.json changes to sync). */
+  install: boolean;
+}
+
+const BOOTSTRAP_TSCONFIG =
+  JSON.stringify(
+    {
+      compilerOptions: {
+        strict: true,
+        target: "ES2022",
+        module: "ESNext",
+        moduleResolution: "Bundler",
+        noEmit: true,
+        skipLibCheck: true,
+        types: [],
+      },
+      include: ["src/**/*.ts", "test/**/*.ts", "tests/**/*.ts"],
+    },
+    null,
+    2,
+  ) + "\n";
+
+const BOOTSTRAP_VITEST_CONFIG = [
+  'import { defineConfig } from "vitest/config";',
+  "",
+  "export default defineConfig({",
+  "  test: {",
+  '    include: ["test/**/*.test.ts", "tests/**/*.test.ts"],',
+  "  },",
+  "});",
+  "",
+].join("\n");
+
+const BOOTSTRAP_PACKAGE_JSON =
+  JSON.stringify(
+    {
+      name: "ported-project",
+      private: true,
+      type: "module",
+      scripts: { test: "vitest run" },
+      devDependencies: { vitest: BOOTSTRAP_VITEST_PIN },
+    },
+    null,
+    2,
+  ) + "\n";
+
+/** US-010 pure core: decide the bootstrap work from an inspection. */
+export function bootstrapPlan(insp: BootstrapInspection): BootstrapPlan {
+  let packageJson: BootstrapPlan["packageJson"] = "satisfied";
+  if (insp.packageJsonRaw === null) {
+    packageJson = "write";
+  } else {
+    try {
+      const parsed = JSON.parse(insp.packageJsonRaw) as {
+        type?: string;
+        scripts?: { test?: string };
+        devDependencies?: { vitest?: string };
+      };
+      const ok =
+        parsed.type === "module" &&
+        parsed.scripts?.test === "vitest run" &&
+        typeof parsed.devDependencies?.vitest === "string";
+      if (!ok) packageJson = "patch";
+    } catch {
+      packageJson = "patch";
+    }
+  }
+  const tsconfig = !insp.tsconfigJson;
+  const vitestConfig = !insp.vitestConfig;
+  const gitignore =
+    insp.gitignoreRaw === null || !/^node_modules\/?$/m.test(insp.gitignoreRaw);
+  const install = !insp.vitestBin || packageJson !== "satisfied";
+  const needed =
+    packageJson !== "satisfied" || tsconfig || vitestConfig || gitignore || install;
+  return { needed, packageJson, tsconfig, vitestConfig, gitignore, install };
+}
+
+/** The deterministic vitest runner artifacts the bootstrap writes. */
+export async function findVitestTestFiles(integrationWorktreePath: string): Promise<string[]> {
+  const out: string[] = [];
+  const walk = async (abs: string, rel: string): Promise<void> => {
+    const entries = await readdir(abs, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        await walk(join(abs, e.name), `${rel}/${e.name}`);
+      } else if (e.isFile() && /\.test\.tsx?$/.test(e.name)) {
+        out.push(`${rel}/${e.name}`);
+      }
+    }
+  };
+  for (const dir of ["test", "tests"]) {
+    const root = join(integrationWorktreePath, dir);
+    if (await pathExists(root)) await walk(root, dir);
+  }
+  return out.sort();
+}
+
+/**
+ * US-010 pure core: the honest vitest outcome from one queue attempt. The
+ * runner either RAN (counts from the vitest summary + parsed failure records)
+ * or did NOT run — with an explicit reason. A crashed runner (no parseable
+ * summary) is NOT-RUN, never a zero-failure ran.
+ */
+export function vitestOutcomeFromRun(
+  binExists: boolean,
+  testFiles: readonly string[],
+  run: { stdout: string } | null,
+): { vitestRun: VitestRunState; records: VitestFailureRecord[] } {
+  if (!binExists) {
+    return {
+      vitestRun: {
+        kind: "not-run",
+        reason: "runner unavailable: vitest not installed in the integrated checkout",
+      },
+      records: [],
+    };
+  }
+  if (testFiles.length === 0) {
+    return {
+      vitestRun: { kind: "not-run", reason: "no test files in the integrated checkout" },
+      records: [],
+    };
+  }
+  if (run === null) {
+    return { vitestRun: { kind: "not-run", reason: "runner produced no output" }, records: [] };
+  }
+  const summary = parseVitestSummary(run.stdout);
+  if (summary === null) {
+    return {
+      vitestRun: {
+        kind: "not-run",
+        reason: "runner produced no parseable summary (possible crash)",
+      },
+      records: [],
+    };
+  }
+  return {
+    vitestRun: {
+      kind: "ran",
+      passed: summary.tests.passed,
+      failed: summary.tests.failed,
+      total: summary.tests.total,
+    },
+    records: parseVitestOutput(run.stdout),
+  };
+}
+
+export interface BootstrapOutcome {
+  /** Any file write/patch or install happened on THIS invocation. */
+  changed: boolean;
+  wrote: string[];
+  installRan: boolean;
+  /** The sole-committer bootstrap commit landed on THIS invocation. */
+  committed: boolean;
+  sha: string | null;
+  alreadyBootstrapped: boolean;
+}
+
+/** Injectable deps (tests pass a no-op install; the step defaults to bun). */
+export interface BootstrapDeps {
+  install?: (cwd: string) => Promise<void>;
+}
+
+/**
+ * Provision the integrated checkout: package.json (type: module, test script
+ * vitest run, vitest devDep), strict tsconfig.json, vitest.config.ts, a
+ * node_modules gitignore, and the dependency install. Idempotent end to end:
+ * a satisfied checkout is a no-op, and the commit dedups on BOOTSTRAP_OP_ID,
+ * so kill-replay never duplicates the bootstrap commit.
+ */
+export async function runIntegrationBootstrap(
+  input: { repoRoot: string; integrationWorktreePath: string },
+  deps: BootstrapDeps = {},
+): Promise<BootstrapOutcome> {
+  const itg = input.integrationWorktreePath;
+  const readIfExists = async (p: string): Promise<string | null> => {
+    try {
+      return await readFile(p, "utf8");
+    } catch {
+      return null;
+    }
+  };
+  const pkgRaw = await readIfExists(join(itg, "package.json"));
+  const insp: BootstrapInspection = {
+    packageJsonRaw: pkgRaw,
+    tsconfigJson: await pathExists(join(itg, "tsconfig.json")),
+    vitestConfig: await pathExists(join(itg, "vitest.config.ts")),
+    gitignoreRaw: await readIfExists(join(itg, ".gitignore")),
+    vitestBin: await pathExists(join(itg, "node_modules", ".bin", "vitest")),
+  };
+  const plan = bootstrapPlan(insp);
+  const outcome: BootstrapOutcome = {
+    changed: false,
+    wrote: [],
+    installRan: false,
+    committed: false,
+    sha: null,
+    alreadyBootstrapped: !plan.needed,
+  };
+  if (!plan.needed) return outcome;
+
+  const write = async (name: string, content: string): Promise<void> => {
+    await writeFile(join(itg, name), content, "utf8");
+    outcome.wrote.push(name);
+    outcome.changed = true;
+  };
+  if (plan.packageJson === "write") {
+    await write("package.json", BOOTSTRAP_PACKAGE_JSON);
+  } else if (plan.packageJson === "patch") {
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(pkgRaw ?? "{}") as Record<string, unknown>;
+    } catch {
+      parsed = {};
+    }
+    const obj = parsed as {
+      type?: string;
+      scripts?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    obj.type = "module";
+    obj.scripts = { ...(obj.scripts ?? {}), test: "vitest run" };
+    obj.devDependencies = {
+      ...(obj.devDependencies ?? {}),
+      vitest: obj.devDependencies?.vitest ?? BOOTSTRAP_VITEST_PIN,
+    };
+    await write("package.json", `${JSON.stringify(obj, null, 2)}\n`);
+  }
+  if (plan.tsconfig) await write("tsconfig.json", BOOTSTRAP_TSCONFIG);
+  if (plan.vitestConfig) await write("vitest.config.ts", BOOTSTRAP_VITEST_CONFIG);
+  if (plan.gitignore) {
+    const base = (insp.gitignoreRaw ?? "").replace(/\n*$/, "\n");
+    await write(".gitignore", `${base}node_modules/\n`);
+  }
+
+  if (plan.install) {
+    const install =
+      deps.install ??
+      (async (cwd: string) => {
+        await execFileP("bun", ["install"], { cwd, timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+      });
+    await install(itg);
+    outcome.installRan = true;
+    outcome.changed = true;
+  }
+
+  // Sole-committer dedup: a kill after commit replays to no second commit.
+  const keyed = await findCommitByOpId(input.repoRoot, BOOTSTRAP_OP_ID);
+  if (keyed === undefined) {
+    const res = await commitLeaseChanges(
+      itg,
+      BOOTSTRAP_OP_ID,
+      "porting-toolkit: integration bootstrap (vitest runner scaffold)",
+    );
+    outcome.committed = res.disposition !== "no-op-empty-diff";
+    outcome.sha = res.sha;
+  } else {
+    outcome.sha = keyed.sha;
+  }
+  return outcome;
+}
+
+// ---------------------------------------------------------------------------
 // Phase 4 — verification queues on the integrated checkout + fix rounds
 // ---------------------------------------------------------------------------
 
@@ -2318,34 +2693,43 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     }
     const tscState = buildTscQueueState(parseTscOutput(tscOut), iteration);
 
-    // vitest queue: runs only when the integrated checkout carries its own
-    // runner; otherwise the burn-down records an honest unavailable note.
-    // Parsed failure RECORDS (not just totals) are persisted durably with
-    // their Lane-B triage classification (vitest-triage registry entry).
-    let vitestRecords: VitestFailureRecord[] = [];
-    let vitestNote: string | null = "vitest not installed in the integrated checkout";
+    // vitest queue (US-010 honest accounting): the runner either RAN — counts
+    // from the vitest summary plus parsed failure records — or did NOT run,
+    // with an explicit reason. Runner provisioning is the bootstrap step's job
+    // (pp-bootstrap); a missing runner here is an honest not-run, never a bare
+    // zero. Test-file discovery drives the not-run "no test files" reason and
+    // the classification roots come from the prep source map (ported test
+    // trees are port OUTPUT — their failures route to the port loop).
     const vitestBin = join(itg, "node_modules", ".bin", "vitest");
-    if (await pathExists(vitestBin)) {
+    const binExists = await pathExists(vitestBin);
+    const testFiles = await findVitestTestFiles(itg);
+    let vitestStdout: string | null = null;
+    if (binExists && testFiles.length > 0) {
       try {
-        const { stdout } = await execFileP(vitestBin, ["run", "--reporter", "default"], {
+        const res = await execFileP(vitestBin, ["run", "--reporter", "default"], {
           cwd: itg,
           timeout: 180_000,
           maxBuffer: 64 * 1024 * 1024,
         });
-        vitestRecords = parseVitestOutput(stdout);
-        vitestNote = null;
+        vitestStdout = res.stdout;
       } catch (err) {
-        const e = err as { stdout?: string };
-        vitestRecords = parseVitestOutput(e.stdout ?? "");
-        vitestNote = null;
+        // Non-zero exit = failing tests (still ran — output carries counts).
+        vitestStdout = (err as { stdout?: string }).stdout ?? null;
       }
     }
+    const { vitestRun, records: vitestRecords } = vitestOutcomeFromRun(
+      binExists,
+      testFiles,
+      vitestStdout === null ? null : { stdout: vitestStdout },
+    );
+    const vitestNote = vitestRun.kind === "not-run" ? vitestRun.reason : null;
     const jevUsageSink: number[] = [];
+    const roots = portedRootsFromSourceMap(prep?.sourceMap ?? {});
     const vitestState = await classifyVitestRecords(vitestRecords, iteration, liveJevClient(), {
       onUsage: (tokens) => {
         jevUsageSink.push(tokens);
       },
-    });
+    }, roots);
     const vitestJevTokens = jevUsageSink.reduce((sum, t) => sum + t, 0);
     if (vitestJevTokens > 0) {
       await recordJevUsage(ctx, "pp-queue-verify:vitest-triage", vitestJevTokens);
@@ -2363,9 +2747,15 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     ppBurndown.set(ctx, `vitest-${iteration}`, {
       queue: "vitest",
       iteration,
-      error_count: vitestTotal,
+      // US-010: the count is honest ONLY alongside the state — a not-run
+      // iteration is never read as "zero failures".
+      error_count: vitestRun.kind === "ran" ? vitestRun.failed : 0,
       file: null,
       recorded_at: recordedAt,
+      vitest:
+        vitestRun.kind === "ran"
+          ? { state: "ran", reason: null, passed: vitestRun.passed, failed: vitestRun.failed, total: vitestRun.total }
+          : { state: "not-run", reason: vitestRun.reason, passed: null, failed: null, total: null },
     });
     for (const group of tscState.byFile.slice(0, 8)) {
       ppBurndown.set(ctx, `tsc-${iteration}-${group.file.replace(/\//g, "__")}`, {
@@ -2421,6 +2811,7 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
         line: e.line,
       })),
       vitestState,
+      vitestRun,
     });
     ppQueue.set(ctx, "queue", {
       ...queue,
@@ -2450,6 +2841,44 @@ const QueueFixStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<Fil
   role: "agent",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
   route: (fri) => goTo(QueueFixStep, fri),
+});
+
+/**
+ * US-010 integration bootstrap (durable, deterministic, toolkit-owned): after
+ * the FIRST integration the checkout is provisioned with a REAL vitest runner
+ * (package.json, strict tsconfig, vitest.config.ts, bun install). Agents never
+ * run installs — provisioning is this step, so the slow command lives OUTSIDE
+ * every agent turn. Idempotent (skip-if-present; commit dedups on
+ * BOOTSTRAP_OP_ID), so re-entry after every wave join / sequential integrate
+ * is a cheap no-op and kill-replay converges. In parallel mode it sits between
+ * the parent's port-wave join and the next dispatch; in sequential mode
+ * between each integrate and the release.
+ */
+const BootstrapStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunInput>({
+  stepType: "PpBootstrap",
+  stepId: "pp-bootstrap",
+  role: "integration",
+  identityOf: () => "bootstrap",
+  stepOptions: { executeRetry: { maximumAttempts: 2 } },
+  inner: async (ctx, input) => {
+    const outcome = await runIntegrationBootstrap({
+      repoRoot: input.repoRoot,
+      integrationWorktreePath: input.integrationWorktreePath,
+    });
+    ppBootstrap.set(ctx, "bootstrap", {
+      bootstrappedAtUtc: new Date().toISOString(),
+      wrote: outcome.wrote,
+      installRan: outcome.installRan,
+      committed: outcome.committed,
+      sha: outcome.sha,
+    });
+    return { output: input, tokens: null, outcome: outcome.changed ? "completed" : "skipped" };
+  },
+  // Both wiring points converge back on dispatch: parallel mode enters from
+  // the port-wave join (before dispatch), sequential mode from Release
+  // (integrate -> release -> bootstrap -> dispatch). Fix-wave joins skip it —
+  // the idempotent skip keeps any unexpected re-entry a cheap no-op.
+  route: (_ctx, _input, out) => goTo(DispatchStep, out),
 });
 
 /**
@@ -2750,7 +3179,9 @@ const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
     return { output: input, tokens: null };
   },
   route: (_ctx, _input, out) =>
-    out.mode === "fix" ? goTo(QueueVerifyStep, baseInputOf(out)) : goTo(DispatchStep, baseInputOf(out)),
+    out.mode === "fix"
+      ? goTo(QueueVerifyStep, baseInputOf(out))
+      : goTo(BootstrapStep, baseInputOf(out)),
 });
 
 function baseInputOf(out: WaveDispatchOutput): PortRunInput {
@@ -2802,6 +3233,8 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
         failures: childVitest.map((c) => c.record),
         classified: childVitest,
       },
+      // By-value feed (not a run record): no ran/not-run claim here.
+      vitestRun: null,
     });
     const pool = new WorktreePool(
       input.repoRoot,
@@ -3045,6 +3478,7 @@ export class PortProjectFlow implements Flow<PortRunInput> {
   readonly fixer = new FixerStep();
   readonly commit = new CommitStep();
   readonly integrate = new IntegrateStep();
+  readonly bootstrap = new BootstrapStep();
   readonly release = new ReleaseStep();
   readonly queueVerify = new QueueVerifyStep();
   readonly queueFixStart = new QueueFixStart();
@@ -3089,6 +3523,7 @@ export class PortProjectFlow implements Flow<PortRunInput> {
       this.fixer,
       this.commit,
       this.integrate,
+      this.bootstrap,
       this.release,
       this.queueVerify,
       this.queueFixStart,

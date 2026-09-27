@@ -123,6 +123,23 @@ function collectBurnDown(attrs: StateAttribute[]): QueueBurnDownEvent[] {
       continue;
     }
     const queue = v.queue as QueueKind;
+    // US-010 honest vitest accounting: state travels with the sample when the
+    // flow wrote it (legacy rows keep the field absent).
+    let vitest: QueueBurnDownEvent["vitest"];
+    if (
+      v.vitest !== undefined &&
+      typeof v.vitest === "object" &&
+      v.vitest !== null &&
+      (v.vitest.state === "ran" || v.vitest.state === "not-run")
+    ) {
+      vitest = {
+        state: v.vitest.state,
+        reason: typeof v.vitest.reason === "string" ? v.vitest.reason : null,
+        passed: typeof v.vitest.passed === "number" ? v.vitest.passed : null,
+        failed: typeof v.vitest.failed === "number" ? v.vitest.failed : null,
+        total: typeof v.vitest.total === "number" ? v.vitest.total : null,
+      };
+    }
     const sample: QueueBurnDownEvent = {
       queue,
       // Renderer's QueueBurnDownEvent.file is a string; "(total)" marks the
@@ -131,6 +148,7 @@ function collectBurnDown(attrs: StateAttribute[]): QueueBurnDownEvent[] {
       iteration: v.iteration,
       error_count: v.error_count,
       recorded_at: v.recorded_at,
+      ...(vitest !== undefined ? { vitest } : {}),
     };
     if (typeof v.file === "string" && v.file !== "") {
       perFile.push(sample);

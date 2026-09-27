@@ -91,6 +91,87 @@ export interface VitestQueueState {
 }
 
 // ---------------------------------------------------------------------------
+// US-010 honest run accounting: ran (with counts) vs not-run (with reason).
+// A queue entry that did not run must NEVER present as a bare error_count 0 —
+// consumers render the state alongside the count.
+// ---------------------------------------------------------------------------
+
+/** US-010: the honest outcome of one vitest queue attempt. */
+export type VitestRunState =
+  | {
+      kind: "ran";
+      /** Tests that passed (vitest summary "Tests" line). */
+      passed: number;
+      /** Tests that failed (= the fix-loop feed's failure universe). */
+      failed: number;
+      /** Total tests executed (passed + failed + skipped as reported). */
+      total: number;
+    }
+  | {
+      kind: "not-run";
+      /** Explicit machine-honest reason the runner did not execute. */
+      reason: string;
+    };
+
+/** Per-suite/per-test counts parsed from a vitest default-reporter summary. */
+export interface VitestSummaryCounts {
+  passed: number;
+  failed: number;
+  total: number;
+}
+
+/** Both summary lines (`Test Files ...` and `Tests ...`), tests required. */
+export interface VitestSummary {
+  testFiles: VitestSummaryCounts | null;
+  tests: VitestSummaryCounts;
+}
+
+/**
+ * Parse a vitest default-reporter tail, e.g.
+ *
+ *   Test Files  2 failed | 3 passed (5)
+ *        Tests  4 failed | 41 passed (45)
+ *
+ * ANSI is expected pre-stripped (parseVitestOutput normalizes). Returns null
+ * when no parseable `Tests` summary exists (runner crash / no run happened) —
+ * the caller records that as not-run, never as a zero-failure ran.
+ */
+export function parseVitestSummary(output: string): VitestSummary | null {
+  let testFiles: VitestSummaryCounts | null = null;
+  let tests: VitestSummaryCounts | null = null;
+  for (const line of output.split("\n")) {
+    const files = parseSummaryLine(line, "Test Files");
+    if (files !== null) {
+      testFiles = files;
+      continue;
+    }
+    const t = parseSummaryLine(line, "Tests");
+    if (t !== null) tests = t;
+  }
+  return tests === null ? null : { testFiles, tests };
+}
+
+/** `Tests  4 failed | 41 passed (45)` → {passed: 41, failed: 4, total: 45}. */
+function parseSummaryLine(line: string, label: string): VitestSummaryCounts | null {
+  const idx = line.indexOf(label);
+  if (idx < 0) return null;
+  const rest = line.slice(idx + label.length);
+  const failed = /(\d+)\s+failed/.exec(rest);
+  const passed = /(\d+)\s+passed/.exec(rest);
+  const skipped = /(\d+)\s+skipped/.exec(rest);
+  const paren = /\((\d+)\)/.exec(rest);
+  const passedN = passed === null ? 0 : Number(passed[1]);
+  const failedN = failed === null ? 0 : Number(failed[1]);
+  const skippedN = skipped === null ? 0 : Number(skipped[1]);
+  // The parenthesized total is authoritative when present; otherwise the sum.
+  const total = paren === null ? passedN + failedN + skippedN : Number(paren[1]);
+  if (!Number.isFinite(passedN) || !Number.isFinite(failedN) || !Number.isFinite(total)) {
+    return null;
+  }
+  return { passed: passedN, failed: failedN, total };
+}
+
+// ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
@@ -264,22 +345,44 @@ export async function buildClassifiedVitestQueueState(
 }
 
 /**
- * Deterministic file attribution for an already-decided class: the first
+ * Root configuration shared by the naive and Jev classifiers. US-010: the
+ * port loop also ports the fixture's TEST files (test/*.test.ts are ported
+ * OUTPUT, not fixture property), so classification accepts a lower-priority
+ * `portedTestRoots` tier: a stack limited to a ported test file is
+ * port-caused and routes to THAT test file's fix round, while any frame in a
+ * ported source root still wins (the source module is the better fix target).
+ */
+export interface ClassifierRoots {
+  portedRoots?: readonly string[];
+  portedTestRoots?: readonly string[];
+  fixtureRoots?: readonly string[];
+}
+
+/** Deterministic file attribution for an already-decided class: the first
  * stack frame under the matching root set (ported roots for "port-caused",
  * fixture roots for "fixture-problem"); null for unknown/other classes.
  * Shared by the naive classifier and the Jev route so the ATTRIBUTION step is
  * always deterministic — only the CLASS is judgment-derived.
- */
+ *
+ * US-010: within "port-caused" the ported SOURCE roots are scanned across all
+ * frames FIRST, then the ported TEST roots — a src frame anywhere in the stack
+ * outranks a test-file frame (the assertion site is usually the innermost
+ * frame; the producer is the better fix target). */
 export function attributedFileOfClass(
   failure: VitestFailureRecord,
   failureClass: FailureClass,
-  roots?: { portedRoots?: readonly string[]; fixtureRoots?: readonly string[] },
+  roots?: ClassifierRoots,
 ): string | null {
   const frames = failure.frames;
   if (failureClass === "port-caused") {
     const portedRoots = roots?.portedRoots ?? DEFAULT_PORTED_ROOTS;
     for (const frame of frames) {
       const root = matchRoot(frame.file, portedRoots);
+      if (root !== null) return frame.file;
+    }
+    const portedTestRoots = roots?.portedTestRoots ?? DEFAULT_PORTED_TEST_ROOTS;
+    for (const frame of frames) {
+      const root = matchRoot(frame.file, portedTestRoots);
       if (root !== null) return frame.file;
     }
     return null;
@@ -299,11 +402,7 @@ export function attributedFileOfClass(
 // Naive classifier (code-only default behind the FailureClassifier seam)
 // ---------------------------------------------------------------------------
 
-export interface NaiveClassifierOptions {
-  /** Path prefixes that belong to the ported TS output. Default: ["src"]. */
-  portedRoots?: readonly string[];
-  /** Path prefixes belonging to fixture/test-harness files. */
-  fixtureRoots?: readonly string[];
+export interface NaiveClassifierOptions extends ClassifierRoots {
   /**
     * Class assigned when no frame matches any known root. Default:
     * "port-caused" — unattributable failures stay visible to the fix loop
@@ -313,6 +412,12 @@ export interface NaiveClassifierOptions {
 }
 
 export const DEFAULT_PORTED_ROOTS: readonly string[] = ["src"];
+/**
+ * US-010: empty by default (legacy behavior — test dirs belong to the fixture
+ * bucket). The flow passes the ported test roots derived from the prep source
+ * map so failures limited to a PORTED test file route to that file's fix round.
+ */
+export const DEFAULT_PORTED_TEST_ROOTS: readonly string[] = [];
 export const DEFAULT_FIXTURE_ROOTS: readonly string[] = [
   "tests",
   "test",
@@ -327,6 +432,11 @@ export const DEFAULT_FIXTURE_ROOTS: readonly string[] = [
  * a failure whose stack only contains fixture/test-harness files is a
  * fixture-problem. Walks frames in printed order and checks all roots.
  *
+ * Priority (US-010): ported SOURCE roots over frames in order, then ported
+ * TEST roots over frames in order, then fixture roots — so a src frame
+ * anywhere outranks a ported-test frame, and a ported-test frame outranks the
+ * fixture bucket (a ported test file is ported OUTPUT, not fixture property).
+ *
  * Attribution mirrors the class decision: the deciding frame's file becomes
  * attributedFile; the unknown case (no frame matched any root) keeps the
  * documented deterministic default — class "port-caused", attributedFile
@@ -336,6 +446,7 @@ export function createNaiveClassifier(
   options: NaiveClassifierOptions = {},
 ): FailureClassifier {
   const portedRoots = options.portedRoots ?? DEFAULT_PORTED_ROOTS;
+  const portedTestRoots = options.portedTestRoots ?? DEFAULT_PORTED_TEST_ROOTS;
   const fixtureRoots = options.fixtureRoots ?? DEFAULT_FIXTURE_ROOTS;
   const unknownClass = options.unknown ?? "port-caused";
 
@@ -348,6 +459,16 @@ export function createNaiveClassifier(
             failureClass: "port-caused",
             attributedFile: frame.file,
             reason: `stack frame in ported output: ${frame.file}:${frame.line}:${frame.column}`,
+          };
+        }
+      }
+      for (const frame of failure.frames) {
+        const portedTest = matchRoot(frame.file, portedTestRoots);
+        if (portedTest) {
+          return {
+            failureClass: "port-caused",
+            attributedFile: frame.file,
+            reason: `stack limited to a PORTED test file: ${frame.file}:${frame.line}:${frame.column}`,
           };
         }
       }

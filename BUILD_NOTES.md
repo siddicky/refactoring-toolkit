@@ -858,3 +858,67 @@ the parallel topology is now live-proven end-to-end. Awaiting user go/no-go.
   subscription-delivered event; poll fallback demonstrated on forced failure in a live
   server) remains for the US-009 final-code presentation run, consistent with the
   US-002/US-003 amendment pattern (single live-validation gate).
+
+# Stage 3a — US-010 (2026-09-27): honest vitest accounting
+
+## 1. Integration bootstrap (durable, toolkit-owned; vacuous-green eliminated structurally)
+
+- `BootstrapStep` (stepId `pp-bootstrap`, role `integration`, PortProjectFlow): after the
+  FIRST integration the checkout is provisioned with a real vitest runner — parallel mode
+  wired port-wave-join -> bootstrap -> dispatch; sequential mode release -> bootstrap ->
+  dispatch. Idempotent (`runIntegrationBootstrap` skip-if-present), so re-entry after
+  every wave join is a cheap no-op and kill-replay converges.
+- Artifacts (deterministic content): `package.json` (`type: "module"`,
+  `scripts.test = "vitest run"`, devDep vitest `^3.2.4`; existing file is PATCHED, not
+  overwritten), strict `tsconfig.json`, `vitest.config.ts` (test/** + tests/** globs),
+  `.gitignore` with `node_modules/` (install output never enters a commit).
+- Slow-command rule honored: `bun install` runs INSIDE the durable step, OUTSIDE every
+  agent turn, injectable for tests (`deps.install`). Sole-committer commit under the
+  dedicated op-ID `bootstrap:integration` (findCommitByOpId dedup — a kill after commit
+  replays to no duplicate). New durable attribute `pp-bootstrap` (BootstrapRecord).
+- QueueVerify keeps its tsconfig fallback for degenerate paths (e.g. zero-file runs);
+  ownership lives with the bootstrap.
+
+## 2. Test-file porting (the runner has REAL content)
+
+- `fixtures/creatorex-middleware/prep-stub.md`: the `tests/*.php` glob row is materialized
+  as 5 EXACT rows (one per PHPUnit test file -> `test/**/*.test.ts`); `parsePrepSourceMap`
+  accepts them, so test files flow through the SAME per-file SubFlow pipeline
+  (implement -> reviews -> verdict-check -> commit -> integrate).
+- `run-demo.ts demo --files creatorex` expands to the full 10 port units (5 src + 5 tests).
+- Scope awareness: `testPortScopeNote` (src/harness/runtime.ts) fires on PHPUnit test
+  paths; implementer AND reviewer turns carry it (PHPUnit->vitest translation, review as
+  test code). Source ports carry no note.
+- Classification (US-010 routing): `portedRootsFromSourceMap` derives ported source/test
+  roots from the prep map; both classifiers accept `portedTestRoots` — priority src >
+  ported test > fixture, so a failure limited to a PORTED test file is port-caused routed
+  to THAT file's fix feed, a src frame anywhere still outranks the test frame, and
+  non-ported fixture stacks stay fixture-problem (defaults unchanged: DEFAULT_PORTED_TEST_ROOTS
+  empty). Jev route threads `roots` into the deterministic attribution step only.
+
+## 3. QueueVerify ran | not-run semantics (never a bare 0 when not-run)
+
+- `VitestRunState` = `{kind:"ran", passed, failed, total}` | `{kind:"not-run", reason}`;
+  `parseVitestSummary` reads the vitest default-reporter tail (null summary => the runner
+  CRASHED => not-run, never a zero-failure ran). `vitestOutcomeFromRun` is the single
+  decision point: runner unavailable / no test files / no output / no parseable summary /
+  ran.
+- Durable state: `pp-verify.vitestRun` (+ vitestNote keeps the not-run reason);
+  burn-down vitest samples carry `vitest: {state, reason, passed, failed, total}`;
+  tsc rows unchanged ("tsc remains its own queue"). Child-flow by-value feeds record
+  `vitestRun: null` (a feed is not a run record).
+- Renderer (AC2): vitest burn-down iterations print `RAN — X passed / Y failed of Z total`
+  or `NOT RUN — <reason>`; new `summary.verification` + a "## Verification" section state
+  typecheck-verified vs test-verified explicitly (no vitest samples => "evidence is
+  typecheck-only at best"). `render-metrics.ts` passes the accounting through from the
+  attribute store.
+
+## Verification (fresh)
+
+- `bun run typecheck` clean; `bun test` 326/0 (304 baseline + 22 new:
+  bootstrap plan matrix, REAL temp-git bootstrap idempotency/dedup/node_modules-excluded,
+  ran/not-run matrix incl. crashed runner, ported-test fix routing (routed -> feed ->
+  fixable round), scope notes, report distinction, fixture stub rows for all 10 units).
+- Bootstrap commit evidence (temp fixture, injected no-op install): first run commits
+  once under `bootstrap:integration` without node_modules; satisfied rerun is a pure
+  skip; post-commit damage + replay rewrites but never duplicates the keyed commit.

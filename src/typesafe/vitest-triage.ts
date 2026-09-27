@@ -30,6 +30,7 @@ import type { JudgmentClient } from "./client.js";
 import {
   attributedFileOfClass,
   type AsyncFailureClassifier,
+  type ClassifierRoots,
   type FailureClassification,
   type VitestFailureRecord,
 } from "../queues/vitest-queue.js";
@@ -43,6 +44,12 @@ export interface JevTriageOptions {
   model?: string;
   /** Called with (input+output) tokens after EACH successful systemOne call. */
   onUsage?: (tokens: number) => void;
+  /**
+   * US-010: root configuration for the DETERMINISTIC attribution step (ported
+   * source/test/fixture roots). The class stays judgment-derived; only the
+   * file attribution consumes these.
+   */
+  roots?: ClassifierRoots;
 }
 
 /**
@@ -81,7 +88,7 @@ export function createJevFailureClassifier(
 
       const answer = response.answers[VITEST_TRIAGE_QUESTION];
       if (answer.choice === "fixture_problem") {
-        const file = attributedFileOfClass(failure, "fixture-problem");
+        const file = attributedFileOfClass(failure, "fixture-problem", options.roots);
         return {
           failureClass: "fixture-problem",
           attributedFile: file,
@@ -89,7 +96,7 @@ export function createJevFailureClassifier(
         };
       }
       if (answer.choice === "port_caused") {
-        const file = attributedFileOfClass(failure, "port-caused");
+        const file = attributedFileOfClass(failure, "port-caused", options.roots);
         return {
           failureClass: "port-caused",
           attributedFile: file,

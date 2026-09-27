@@ -459,10 +459,9 @@ async function startDemo(): Promise<number> {
   if (gateFlowId !== undefined) {
     await runDispatchGate(gateFlowId);
   }
-  const files = (argValue("--files") ?? "src/Money.php,src/Pricing/FlatRateDiscount.php")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const files = expandFilesArg(
+    argValue("--files") ?? "src/Money.php,src/Pricing/FlatRateDiscount.php",
+  );
   const prepPath = argValue("--prep") ?? join(process.cwd(), "fixtures/stub-prep.md");
   const sourceRoot = argValue("--source-root") ?? join(process.cwd(), "fixtures/php-sample");
   const epoch = Number.parseInt(argValue("--epoch", "1") as string, 10);
@@ -600,6 +599,31 @@ async function recoverPort(): Promise<number> {
 function argValue(flag: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? process.argv[i + 1] : fallback;
+}
+
+/**
+ * US-010: `--files creatorex` expands to the FULL CreatorPay fixture set —
+ * 5 src + 5 PHPUnit test ports (the test rows are exact rows in the fixture
+ * prep stub) — so the port loop ports the tests too and vitest verifies real
+ * content. Any other value keeps the comma-split list behavior.
+ */
+function expandFilesArg(value: string): string[] {
+  const trimmed = value.trim();
+  if (trimmed !== "creatorex") {
+    return trimmed.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  return [
+    "src/Access/EntitlementChecker.php",
+    "src/Billing/SubscriptionService.php",
+    "src/Moderation/ChatSentinel.php",
+    "src/Payouts/EarningsLedger.php",
+    "src/Support/legacy_helpers.php",
+    "tests/Access/EntitlementCheckerTest.php",
+    "tests/Billing/SubscriptionServiceTest.php",
+    "tests/Moderation/ChatSentinelTest.php",
+    "tests/Payouts/EarningsLedgerTest.php",
+    "tests/Support/LegacyHelpersTest.php",
+  ];
 }
 
 async function exists(p: string): Promise<boolean> {

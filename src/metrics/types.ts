@@ -437,9 +437,25 @@ export interface DiffDocument {
 export type QueueKind = "tsc" | "vitest";
 
 /**
+ * US-010 honest vitest accounting carried on vitest burn-down samples. A
+ * queue that did not RUN is never presented as a bare error_count 0: the
+ * state plus the explicit reason travel with the sample, and renderers show
+ * them. tsc rows carry no such field (tsc keeps its own semantics).
+ */
+export interface VitestRunAccounting {
+  state: "ran" | "not-run";
+  /** Explicit not-run reason (e.g. "runner unavailable"); null when ran. */
+  reason: string | null;
+  passed: number | null;
+  failed: number | null;
+  total: number | null;
+}
+
+/**
  * One queue burn-down sample (toolkit-owned queue steps against the integrated
  * checkout). `error_count` is the number of type errors (tsc) or failing tests
- * (vitest) at that iteration.
+ * (vitest) at that iteration. Vitest samples carry `vitest` accounting: when
+ * state is "not-run" the count is vacuous and consumers must render the state.
  */
 export interface QueueBurnDownEvent {
   queue: QueueKind;
@@ -448,6 +464,8 @@ export interface QueueBurnDownEvent {
   error_count: number;
   /** UTC ISO-8601 timestamp of the sample. */
   recorded_at: string;
+  /** US-010; absent on tsc rows and on legacy vitest rows (pre-US-010 runs). */
+  vitest?: VitestRunAccounting;
 }
 
 /**
