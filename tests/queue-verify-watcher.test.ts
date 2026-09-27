@@ -294,7 +294,8 @@ describe("queue-verify kill watcher (US-010a): drain-to-head before following", 
     expect(result.via).toBe("stream");
     expect(result.firings).toBe(1);
     expect(h.logs.some((l) => l.includes("drained 0 retained stream event(s) to head"))).toBe(true);
-    expect(h.logs.some((l) => l.includes("catch-up drained 21 follow event(s) — trigger inside"))).toBe(true);
+    expect(h.logs.some((l) => l.includes("catch-up drained 21 follow event(s) to exhaustion before checks"))).toBe(true);
+    expect(h.logs.some((l) => l.includes("trigger in follow batch: pp-queue-verify#1"))).toBe(true);
   });
 
   test("a trigger published AFTER arm is caught by the follow phase (cursor pinned at head by the drain)", async () => {
@@ -343,5 +344,46 @@ describe("queue-verify kill watcher (US-010a): drain-to-head before following", 
     // Exactly ONE backlog trigger recognized — the malformed entries and the
     // completion envelope were skipped, the START was found once.
     expect(h.logs.filter((l) => l.includes("trigger found in drained backlog")).length).toBe(1);
+  });
+
+  test("REGRESSION (fix-wave follow guard): armed on an EMPTY stream, a [OTHER, START, DONE] follow batch on a terminal flow NEVER fires — the arm-time stale-start guard mirrored", async () => {
+    // Pre-fix the follow loop fired on ANY queue-verify START the moment it
+    // was read — before its matching DONE (later in the SAME batch) or the
+    // terminal status was seen. The arm-time drain got the correlation +
+    // terminal check; the follow path now gets the same treatment: the batch
+    // is drained to exhaustion FIRST, correlated by event key, and gated on
+    // the flow status before any firing.
+    const statuses: Array<"running" | "completed"> = ["running", "completed"];
+    const h = harness({
+      events: [OTHER_EVENT, START_EVENT, DONE_EVENT, null],
+      polls: [false, false],
+      status: "running", // terminal only AFTER the batch has been consumed
+      deadlineMs: 5 * 60_000,
+    });
+    const result = await h.run({
+      drainBacklog: async () => [],
+      flowStatus: async () => statuses.shift() ?? "completed",
+    });
+
+    expect(result.outcome).toBe("terminal");
+    expect(result.firings).toBe(0);
+    expect(h.firings.length).toBe(0);
+    expect(h.logs.some((l) => l.includes("drained 0 retained stream event(s) to head"))).toBe(true);
+    expect(h.logs.some((l) => l.includes("catch-up drained 3 follow event(s) to exhaustion before checks"))).toBe(true);
+    expect(h.logs.some((l) => l.includes("skipped 1 stale queue-verify start(s) in the follow batch"))).toBe(true);
+  });
+
+  test("the follow guard keeps live triggers: an UNMATCHED start in a follow batch on a running flow still fires", async () => {
+    const h = harness({
+      events: [OTHER_EVENT, START_EVENT, null],
+      polls: [false],
+      status: "running",
+      deadlineMs: 5 * 60_000,
+    });
+    const result = await h.run({ drainBacklog: async () => [] });
+    expect(result.outcome).toBe("fired");
+    expect(result.via).toBe("stream");
+    expect(result.firings).toBe(1);
+    expect(h.logs.some((l) => l.includes("trigger in follow batch: pp-queue-verify#1"))).toBe(true);
   });
 });

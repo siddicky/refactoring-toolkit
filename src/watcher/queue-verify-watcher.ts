@@ -35,7 +35,10 @@
  *   attempt is still ACTIVE (no same-key completion appears later in the
  *   backlog — start/completion correlated by event key) AND the flow has
  *   not already gone terminal. A stale trigger never fires the kill; a
- *   terminal flow exits cleanly (outcome "terminal", firings 0).
+ *   terminal flow exits cleanly (outcome "terminal", firings 0). The SAME
+ *   correlation + terminal check guards the FOLLOW batch (fix-wave follow
+ *   guard): a [start, done] pair that arrives together post-arm is a
+ *   completed attempt, not a kill window, and never fires.
  *
  * Exactly-once: `fire` is called at most ONCE per watcher lifetime; every
  * later trigger (stream repeat, poll echo) is logged and suppressed.
@@ -215,17 +218,41 @@ export async function runQueueVerifyWatcher(
       try {
         let event = await options.nextStreamEvent(options.pollIntervalMs);
         if (event !== null) {
-          let drained = 0;
+          const batch: WatcherStreamEvent[] = [];
           while (event !== null) {
-            drained++;
-            if (isQueueVerifyStart(event)) {
-              log(`catch-up drained ${drained} follow event(s) — trigger inside`);
-              return await fireOnce("stream");
-            }
+            batch.push(event);
             if (now() - start >= options.deadlineMs) break; // bounded drain
             event = await options.nextStreamEvent(options.pollIntervalMs);
           }
-          log(`catch-up drained ${drained} follow event(s) to exhaustion before sleeping`);
+          // Follow-path stale-start guard (fix-wave, same correlation as the
+          // arm-time drain): fire only on a start whose attempt is UNMATCHED
+          // in the batch (no same-key completion after it) AND whose flow has
+          // not gone terminal — a [start, done] pair published together (or a
+          // finished flow) is a stale trigger and must never fire the kill.
+          log(`catch-up drained ${batch.length} follow event(s) to exhaustion before checks`);
+          const startsInBatch = batch.filter((e) => isQueueVerifyStart(e)).length;
+          const active = activeAttemptStarts(batch);
+          if (active.length > 0) {
+            let status: "running" | "completed" | "failed" | "unknown" = "unknown";
+            try {
+              status = await options.flowStatus();
+            } catch {
+              status = "unknown"; // query failure never suppresses a live attempt
+            }
+            if (status === "completed" || status === "failed") {
+              log(
+                `follow start is stale — flow ${status} before the trigger; exiting cleanly (no kill)`,
+              );
+              return { outcome: "terminal", firings: 0 };
+            }
+            log(`trigger in follow batch: ${active[0]!.eventKey}`);
+            return await fireOnce("stream");
+          }
+          if (startsInBatch > 0) {
+            log(
+              `skipped ${startsInBatch} stale queue-verify start(s) in the follow batch (matched by completion — no active attempt)`,
+            );
+          }
         }
       } catch (err) {
         // Stream failed: the poll fallback is now the ONLY source (ENGAGED),

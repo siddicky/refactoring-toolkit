@@ -607,6 +607,64 @@ describe("repair paths through runReviewTurn", () => {
     expect(tombstoneOf(outY2.verdict)).toBeNull();
     expect(harness.prompts.length).toBe(3); // still no repair
   });
+
+  test("REGRESSION (fix-wave memo keying, PENDING): a THROWING execution leaves its reply in the memo and another flow's execution on the same step+diff never sees it as a prior", async () => {
+    // The settlement test above cannot catch a key that lacks flow/run
+    // identity: X settles BEFORE Y runs, so the hygiene delete already
+    // emptied the map — step+diff-only keying passes it too. This case
+    // deletes nothing first: X's execution THROWS mid-attempt (repair turn
+    // degenerates after the reply was memoized), leaving its reply PENDING
+    // under X's key. Y (other flow/run, SAME step+diff) then replays the
+    // IDENTICAL reply text. Under step+diff-only keying Y inherits X's
+    // pending reply as its "prior" and its repair reason gains a FALSE
+    // verbatim-repeat; keyed, Y's repair is attributed to its OWN evidence
+    // (the wall of blockers) alone.
+    const ctxWith = (flowId: string, runId: string): Context =>
+      ({ ...fakeCtx().ctx, flowId, runId }) as unknown as Context;
+
+    // Flow X: suspect wall reply -> repair turn throws degenerate -> the
+    // execution rejects (attempt 1 < maxAttempts) with its reply PENDING.
+    const degenerate = new OpencodePromptError("degenerate turn (fixture)", true, SEAM_USAGE);
+    const harness = scriptedHarness([wallReply("W"), degenerate]);
+    configurePortHarness(harness);
+    await expect(
+      runReviewTurn({
+        ctx: ctxWith("flow-X", "run-X"),
+        reviewerId: "reviewer-A",
+        file: "src/Money.php",
+        round: 1,
+        epoch: 1,
+        diff: DIFF_TURN,
+        attempt: 1,
+      }),
+    ).rejects.toBeInstanceOf(OpencodePromptError);
+    expect(harness.prompts.length).toBe(2); // X: original + failed repair
+
+    // Flow Y: SAME step+diff, IDENTICAL reply text. Y repairs ONCE — for its
+    // OWN all-blockers evidence — and must NOT gain a cross-flow
+    // verbatim-repeat reason from X's pending reply.
+    harness.script.push(wallReply("W"), HEALTHY_REPLY);
+    const outY = await runReviewTurn({
+      ctx: ctxWith("flow-Y", "run-Y"),
+      reviewerId: "reviewer-A",
+      file: "src/Money.php",
+      round: 1,
+      epoch: 1,
+      diff: DIFF_TURN,
+      attempt: 1,
+    });
+    expect(harness.prompts.length).toBe(4); // +Y original +Y ONE repair
+    const repairTurn = harness.prompts[3]?.text ?? "";
+    expect(repairTurn).toContain("all-blockers-over-cap"); // Y's own arm (b)
+    expect(repairTurn).not.toContain("verbatim-repeat"); // never X's reply
+    expect(tombstoneOf(outY.verdict)).toBeNull();
+    const tupleY = outY.verdict as ReviewTuple;
+    expect(tupleY.metrics.findings.length).toBe(1);
+
+    // X's entry intentionally survives the throw (dex's NEXT X attempt reads
+    // it); clear it so the pending map never leaks past this test.
+    resetInStepVerdictMemo();
+  });
 });
 
 describe("attempt-exhaustion tombstones (deterministic ctx.attempt >= maxAttempts)", () => {
