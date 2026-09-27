@@ -1,0 +1,1 @@
+gate: degraded (no review-step events in cx8 history (nothing relevant to vouch on)) — dispatch protection NOT active (fail-open); proceeding WITHOUT lane-health protection

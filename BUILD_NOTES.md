@@ -1166,3 +1166,108 @@ typed dispatch-history trigger, or a widened verify window.
   budgets were live; both are story-owned processes.
 - Bounds used: ONE cx8 dispatch; ONE config retry (watcher re-arm); no cx9.
   329/0 tests, typecheck clean at the commit.
+
+# Stage 3c finale — cx9 (2026-09-27): the final validation run; US-002/003/007 live observations captured, the kill arc suppressed by design
+
+## The two pre-run fixes (commit 2ee82f3, 343/0, tsc clean)
+
+- **F2-follow guard**: the queue-verify watcher's post-arm catch-up fired on
+  ANY pp-queue-verify START the moment it was read — before its matching DONE
+  (later in the same batch) or the terminal status was seen. The follow batch
+  is now drained to exhaustion FIRST and gets the SAME activeAttemptStarts
+  event-key correlation + terminal-status gate as the arm-time drain.
+  Regression test ([OTHER, START, DONE] follow batch + terminal flow → clean
+  exit, 0 firings) verified FAILING on pre-fix code.
+- **Memo PENDING isolation test**: the cross-flow memo-keying test passed
+  even without flow/run key components (X settled — hygiene delete — before
+  Y ran). New case: X's execution THROWS mid-attempt (repair turn degenerate
+  after memoize), leaving its reply PENDING; Y on the same step+diff
+  replaying the identical text must repair for its OWN arm-(b) evidence only
+  — the repair turn must not gain a cross-flow verbatim-repeat reason.
+  Verified FAILING under step+diff-only keying.
+
+## What cx9 ran
+
+Full CreatorPay, 10 units (5 src + 5 test ports), watcher armed BEFORE
+startFlow (stream lane + 5 s follow cadence), dispatch gate surfaced
+pre-dispatch, restart-on-kill sentinel armed, dashboard subscriber live on
+:4646, LIVE Jev lane. Infra restarted per the operational rule (server on
+the 7233 DB up first, worker up BEFORE startFlow).
+
+Two dispatches, one of them the sanctioned config-miss retry: the first
+`cx9` startFlow used the DEFAULT prep stub and failed in 41 ms ("prep source
+map lacks rows for: <all 10 files>" — PpPrep maximumAttempts 1, fatal by
+design); the corrected dispatch (`--prep fixtures/creatorex-middleware/
+prep-stub.md --source-root fixtures/creatorex-middleware`) hit the
+duplicate-flow-id rejection and landed as **cx9b**
+(runId 01a0e304-b36d-7edc-b52a-397d5d3c5132 → CONTINUED_AS_NEW rollover →
+453b9435-91aa-4b10-91f2-294bc31ddd9f). **FLOW_STATUS_COMPLETED at
+17:48:52Z (4 h 30 min)** — 13 done rows = 10 units + 3 fix rounds, tsc 0,
+vitest RAN 39/4/43 honest at completion, keyed commits reachable, 13/13
+outputs at integration HEAD, no duplicate op-IDs, 15 skipped envelopes
+(dedup visible), a mid-run CONTINUED_AS_NEW rollover survived, ~1.32 M
+model-role tokens (the prep-generate degenerate-retry grind: attempts 1–4
+aborted at ~13 min each before attempt 5 succeeded — the fixture's known
+degenerate-provider window, ridden out entirely by the declared retry
+policies).
+
+## The deferred live observations (all captured, /tmp/metrics-cx9 + repo copies)
+
+- **US-002 gate**: `gate: degraded (…fail-open); proceeding WITHOUT
+  lane-health protection` — surfaced pre-dispatch AND in the runner output
+  (presentation/assets/dispatch-gate-cx9.txt). The fail-open-as-visible-
+  operator-decision requirement, witnessed.
+- **US-003 turn_diagnosis**: ONE durable record —
+  `pp-prep-review-b#2@prep0`, attempt 2, lane `demoted`,
+  prior_failed_attempts 1, disposition `recorded-evidence` (14:51:28Z): the
+  deterministic successor re-record fired live. Honest limit: the
+  prep-generate degenerate retries (Tier-0 throwing attempts) left no
+  durable trace (0(g)) and the succeeding agent-step envelope carries
+  `turn_diagnosis: null` — the re-record is implemented on review steps.
+- **US-007 subscriber**: `[serve-status] stream subscriber: up
+  (port/<flowId>/events live feed)`; **zero** fallback lines across the
+  whole run; the feed delivered every envelope from 13:14 to completion
+  (80-event window). Poll fallback never ENGAGED.
+- **Demo**: presentation/assets/demo.webm RE-RECORDED during the run
+  (88 s page capture at ~14:22 UTC — cx9b mid-flight, retry chain visible).
+- **AC2**: presentation/assets/report-final.md — **provenance_ok=true**
+  (77 envelopes final run, 16 start markers, 0 interrupted, 8 verdict
+  records, 0 tombstones, 0 degraded rounds, kill events honestly "none").
+- Battery: presentation/assets/ac1-battery.txt — **20 PASS / 6 FAIL**, the
+  six fails all the absent kill arc; every substance check PASSES.
+
+## What cx9 does NOT prove: the kill never fired — and WHY (new quantified finding)
+
+Three pp-queue-verify windows ran (17:24, 17:33, 17:48 UTC); all three were
+suppressed by the F2-follow guard with the log line `skipped 1 stale
+queue-verify start(s) in the follow batch (matched by completion — no active
+attempt)`. Each START arrived in the same batch drain as its DONE: the
+follow long-poll returns retained messages immediately, so a ~1.5–2 s window
+that closes within one read cycle is ALWAYS a matched pair before any firing
+decision. **Under the fix-wave semantics a ~2 s verify window is
+structurally unkillable via the stream lane** — that is the guard doing its
+job (zero false kills; exactly-once held; clean terminal exit), with a
+quantified cost. Remaining live-fire paths: the poll fallback phasing into a
+window (5 s cadence vs ~2 s ≈ 30 %/window — missed 3/3), or a cadence at the
+LOW end of the sanctioned 1–5 s range (a 1 s long-poll ends the batch BEFORE
+the DONE arrives → unmatched live start → fireable mid-attempt). Candidate
+paths forward, NOT improvised under the bound: a verify-window heartbeat
+(durably widen the window), a dispatch-history trigger, or a 1 s-cadence
+arm. Per bounds: documented, no cx10. kill+resume+COMPLETED in ONE flow
+remains unwitnessed; everything else the single-flow triple needed is now
+proven (COMPLETED with fix rounds, rollover survival, honest verify,
+dedup, raised budgets live through the 65-min prep grind).
+
+## Operational disclosures
+
+- Infra turnover before the run: the old serve-status and the leftover
+  temporal servers (7233–7236, story-owned children of past dexcli dev
+  runs) were stopped; dexcli dev restarted on the SAME 7233 DB, worker
+  started before startFlow, dashboard restarted with captured stdout.
+- Process note: an external (coordinator-side) watcher with the real runId
+  and a 90-min bound replaced the executor's 150-min instance at 16:54:38Z
+  (same sidecar path, single-watcher invariant held). Its bound covered the
+  final windows; the suppression was the guard, not the bound.
+- Bounds used: one corrected dispatch + the sanctioned config-miss retry;
+  watcher bound extension (no window was missed by it); no cx10.
+  343/0 tests, tsc clean at the commit.

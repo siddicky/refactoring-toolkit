@@ -1,0 +1,32 @@
+info: runs: 01a0e304-b36d-7edc-b52a-397d5d3c5132 -> 453b9435-91aa-4b10-91f2-294bc31ddd9f
+info: envelopes collected: 227 across 2 parent run(s), 13 child flow(s)
+PASS flow completed
+FAIL sidecar has intent + completed — intents=0 completions=0
+FAIL intent-before-kill ordering (monotonic)
+FAIL sidecar anchored to run id — run_id=undefined
+info: kill utc: null
+FAIL sidecar anchored to flow run id — flow_run_id=undefined
+FAIL post-kill activity exists (resume happened) — 0 envelopes
+FAIL flow closed after kill — closeTime=2026-09-27T17:48:52.432415Z
+PASS zero new implementer invocations on done files
+info: pre-kill implementer-completed identities: none
+PASS no duplicate op-ID commits
+PASS all 10 port units in done set
+PASS 5 test ports completed through the same pipeline
+PASS keyed commits reachable at integration HEAD
+info: integration content: 13/13 present (expected src/access/entitlement-checker.ts, src/billing/subscription-service.ts, src/moderation/chat-sentinel.ts, src/payouts/earnings-ledger.ts, src/support/legacy-helpers.ts, test/access/entitlement-checker.test.ts, test/billing/subscription-service.test.ts, test/moderation/chat-sentinel.test.ts, test/payouts/earnings-ledger.test.ts, test/support/legacy-helpers.test.ts, src/support/legacy-helpers.ts, test/access/entitlement-checker.test.ts, test/billing/subscription-service.test.ts)
+PASS completed-file content exists in integrated output
+PASS bootstrap record present
+PASS bootstrap vitest artifacts at integration HEAD
+PASS package.json contract (type:module, vitest run, devDep)
+PASS bootstrap commit excludes node_modules
+PASS vitest state recorded as ran or not-run-with-reason
+PASS vitest RAN with real pass/fail from the PORTED tests
+info: vitest: 39 passed / 4 failed of 43 total
+PASS vitest burn-down samples carry the state
+info: final queues: tsc=0 vitest={"failed":4,"kind":"ran","passed":39,"total":43} finalFixQueue=[] fixWaves=1 children=13
+PASS queued failures consumed by fix rounds OR queues honestly empty/blocked
+info: envelope outcomes (real attempts, all runs): {"completed":166,"skipped":15}
+PASS skipped-vs-redone evidence exists (resume dedup visible)
+
+6 FAILURE(S)
