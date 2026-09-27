@@ -482,9 +482,12 @@ export function composeImplementerTurn(input: {
   phpSource: string;
   prepExcerpt: string;
   outputPath: string;
+  /** US-010: appended scope context for TEST ports (tests/* -> vitest). */
+  scopeNote?: string;
 }): string {
   return [
     `Port the PHP file \`${input.phpFileName}\` to TypeScript.`,
+    ...(input.scopeNote !== undefined ? ["", input.scopeNote] : []),
     "",
     "## Output path (write target, worktree-relative)",
     input.outputPath,
@@ -508,16 +511,39 @@ export function composeReviewerTurn(input: {
   reviewerId: string;
   reviewerLabel: string;
   diffBlock: string;
+  /** US-010: appended scope context when the reviewed diff is a TEST port. */
+  scopeNote?: string;
 }): string {
   return [
     `Reviewer id: ${input.reviewerId} (use exactly this value as "reviewer" in your verdict).`,
     "Review the diff below and emit your verdict JSON per your standing instructions.",
+    ...(input.scopeNote !== undefined ? ["", input.scopeNote] : []),
     "",
     input.diffBlock,
     "",
     "Emit exactly one JSON object and nothing else.",
     `${input.reviewerLabel}: remember — evidence must literally appear in the diff above.`,
   ].join("\n");
+}
+
+/**
+ * US-010 test-port scope note (pure): the port loop also ports the fixture's
+ * PHPUnit TEST files, so implementer and reviewer turns say so explicitly.
+ * Returns null for source ports (no note).
+ */
+export function testPortScopeNote(phpFile: string): string | null {
+  const isTest =
+    phpFile.startsWith("tests/") ||
+    /(^|\/)[\w-]+Test\.php$/.test(phpFile) ||
+    phpFile.startsWith("test/");
+  if (!isTest) return null;
+  return (
+    "SCOPE: this is a TEST PORT (PHPUnit -> vitest). The output file is a vitest " +
+    "test module (`import { describe, it, expect } from \"vitest\"`); it exercises " +
+    "the corresponding ported source module under src/. Review it as test code: " +
+    "assertion quality and faithful translation of the PHP assertions matter more " +
+    "than production-hardening."
+  );
 }
 
 /**

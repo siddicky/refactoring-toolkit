@@ -1071,3 +1071,84 @@ worker-up-before-startFlow, AND after a kill: bring the WORKER up before (or
 simultaneously with) the SERVER'S task dispatch — or raise the retry budget.
 The 3-attempt/7-connection-second budget is the single remaining blocker to
 witnessing kill+resume+COMPLETED in ONE flow.
+
+# Stage 3c continued — cx8 (2026-09-27): the retry-budget fix, live and durable; the kill arc lost to a watcher-throughput finding
+
+## The fix (applied, verified live in durable dispatch records)
+
+`RESTART_WINDOW_RETRY` (flows/port-project.ts): `maximumAttempts 8,
+initialIntervalMs 5000, backoffCoefficient 2, maximumIntervalMs 30000` — waits
+5+10+20+30×4 ≈ **155 s of retry span across 8 attempts**, comfortably over the
+120 s target and a 60-90 s restart window. Applied to every marker/model/review
+surface: all 10 `envelopeStartMarker` specs (incl. both `PpQueueFixStart`s —
+cx7's killer), all 10 `MODEL_STEP_OPTIONS` sites (implement/reviews/fixer/
+queue-fix/prep loop), plus the two other dispatch surfaces cx7's resume
+fingerprinted (`PpWaveJoin`, child-entry `PpChildLease`). dex 0.12.1
+`RetryPolicy` has NO error-class filter (verified against dist/src/step.d.ts),
+so the longer SCHEDULE applies to all failures of these steps; exhaustion
+semantics are unchanged, and out-of-scope policies are untouched (PpPrep=1,
+PpBootstrap=2, in-step REVIEW_STEP_MAX_ATTEMPTS=3). **Verified live**: the
+durable dispatch history of cx8's fix-wave child records the raised policy on
+PpQueueFixStart/PpQueueFix/PpReviewA/B(+starts)/PpChildLease, and the parent's
+continued-run join carries it (/tmp/metrics-cx8/retry-policy-proof-{parent,
+child}.txt) — the exact step class that burned 3 attempts/~7 s in cx7 now
+carries ~155 s.
+
+## What cx8 ran
+
+Full CreatorPay, 10 units (5 src + 5 test ports), watcher armed BEFORE
+startFlow (09:49:25 UTC vs flow start 09:49:42), maxRounds 3, epoch 1,
+repo /tmp/pk-cx8. **FLOW_STATUS_COMPLETED at 10:31:53 (42 min)** — with a dex
+`CONTINUED_AS_NEW` run rollover mid-run at 10:22:12 (01a0e245 → 08c927e6,
+event 599): the new run re-executed bootstrap (SKIP — idempotent no-op),
+dispatch, wave-join (children already terminal), verify — **zero re-ports,
+durable state carried verbatim**. First witnessed rollover survival inside a
+run (weaker than kill+resume, same mechanism). Final: tsc 0, vitest RAN
+40/3/43 (3 ported-test failures honest at completion), done = 10 units +
+3 fix rounds, keyed commits reachable at integration HEAD, no duplicate
+op-IDs, skipped-vs-completed dedup visible (14 skipped / 173 completed).
+
+## What cx8 does NOT prove: the kill never fired
+
+NEW OPERATIONAL FINDING (cx6b delivery-lag family, now quantified): **the
+watcher's stream lane consumes the retained stream at ~1 message per
+pollInterval** (one `readStream` per cycle + sleep), so under the prep+wave
+backlog its cursor fell ~28 min behind reality (at 10:29:45 it read an
+envelope published 10:01:41). Both pp-queue-verify active windows in this run
+lasted only ~1.1-1.6 s (10:27:09.9→10:27:11.4, 10:31:52.3→10:31:53.5) — far
+below the 60 s poll cadence. Result: the round-1 trigger message was never
+reached in time; the flow completed before any firing. Both watchers exited
+on the TERMINAL branch (r1 fix) — exactly-once held (0 firings), no sidecar,
+no kill. The one allowed config retry (re-arm at `--poll-seconds 1`,
+10:35:25) landed after close. The resume half of the arc is therefore
+config-verified but NOT behaviorally exercised; kill+resume+COMPLETED in ONE
+flow remains unwitnessed. Candidate fixes, NOT improvised under the bound:
+drain-to-head stream reads per cycle (loop `readStream` until null), or a
+typed dispatch-history trigger, or a widened verify window.
+
+## Battery + AC2 (honest)
+
+- Battery: /tmp/metrics-cx8/ac1-battery-cx8.txt — **20 PASS / 6 FAIL**, all
+  six fails are the absent kill arc (sidecar presence/ordering/anchoring,
+  post-kill activity, close-after-kill); every substance check PASSES
+  (completion, zero re-ports, no dup op-IDs, 10 units / 5 test ports,
+  reachability, content, bootstrap, honest vitest, burn-down, dedup).
+  Battery adaptation: the done-set check now asserts DISTINCT round-1 units —
+  fix rounds APPEND entries (13 = 10 units + 3 fix rounds), which cx7's
+  strict `length === 10` check did not anticipate.
+- AC2: /tmp/metrics-cx8/report.{md,json} — **provenance_ok=true**, 116
+  envelopes (25 start markers, 0 interrupted, 0 degraded), 16 verdict
+  records, 0 tombstones, dispatch anchoring OK (240 entries, 0 unexplained),
+  kill events: none recorded (honest). Tokens: 1,320,554 model-role.
+- Evidence: /tmp/metrics-cx8/{watch-cx8-first-arm,watch-cx8b-rearm,
+  worker-cx8,demo-cx8}.log, retry-policy-proof-{parent,child}.txt; repo
+  /tmp/pk-cx8; battery script /tmp/ac1-battery-cx8.ts.
+
+## Operational disclosures
+
+- The pre-existing dex server/worker pair (cx7-arc leftovers, started BEFORE
+  the fix) was stopped and restarted on the same default sqlite DB
+  (~/.dex/dev/7233) before startFlow — a config-level turnover so the raised
+  budgets were live; both are story-owned processes.
+- Bounds used: ONE cx8 dispatch; ONE config retry (watcher re-arm); no cx9.
+  329/0 tests, typecheck clean at the commit.

@@ -1230,7 +1230,37 @@ function emptyRecordWith(
 // The flow steps
 // ---------------------------------------------------------------------------
 
-const MODEL_STEP_OPTIONS = { executeRetry: { maximumAttempts: 3 } } as const;
+/**
+ * US-009-final (cx7 live finding): the connection-failure retry budget. After
+ * a kill+resume, the dex server re-dispatches in-flight steps to the worker
+ * target (127.0.0.1:8803) while the worker is still coming up — a restart
+ * window of ~60s. The old budget (maximumAttempts 3, ~7s of backoff) was
+ * shorter than the window, so the resumed marker/model steps exhausted
+ * (dial refused → WORKER_API_ERROR, finalAttempt 3) and the flow FAILED
+ * before the worker ever came back (cx7 resume fingerprint). This schedule
+ * spans ~155s of exponential backoff (5s, 10s, 20s, then 30s-capped waits
+ * across 8 attempts total), so re-dispatch retries outlive the restart window
+ * with margin. dex 0.12.1 RetryPolicy has no error-class filter (verified
+ * against dist/src/step.d.ts), so non-connection failures on these steps get
+ * the same longer SCHEDULE — the exhaustion semantics are unchanged (the
+ * final attempt still fails the step/flow), and policies outside the
+ * marker/model/review scope keep their existing bounds (PpPrep stays at 1 —
+ * a bad run input is permanent; the in-step REVIEW_STEP_MAX_ATTEMPTS repair
+ * bound is untouched).
+ */
+const RESTART_WINDOW_RETRY = {
+  maximumAttempts: 8,
+  initialIntervalMs: 5_000,
+  backoffCoefficient: 2,
+  maximumIntervalMs: 30_000,
+} as const;
+
+/** Model/review/fixer step retry policy (dex executeRetry). */
+const MODEL_STEP_OPTIONS = { executeRetry: RESTART_WINDOW_RETRY } as const;
+
+/** Pre-start marker retry policy — markers are the FIRST re-dispatched steps
+ *  after a resume, so they carry the same restart-window budget. */
+const MARKER_STEP_OPTIONS = { executeRetry: RESTART_WINDOW_RETRY } as const;
 
 const PrepStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, PortRunInput>({
   stepType: "PpPrep",
@@ -1430,6 +1460,7 @@ const ImplementStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<Fi
   targetStepId: "pp-implement",
   role: "agent",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(ImplementStep, fri),
 });
 
@@ -1510,6 +1541,7 @@ const ReviewAStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<File
   targetStepId: "pp-review-a",
   role: "review",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(ReviewAStep, fri),
 });
 
@@ -1542,6 +1574,7 @@ const ReviewBStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<File
   targetStepId: "pp-review-b",
   role: "review",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(ReviewBStep, fri),
 });
 
@@ -1698,6 +1731,7 @@ const FixerStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<FileRo
   targetStepId: "pp-fixer",
   role: "agent",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(FixerStep, fri),
 });
 
@@ -1941,6 +1975,7 @@ const SymbolStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<PortRun
   stepType: "PpSymbolStart",
   targetStepId: "pp-symbol-table",
   role: "judgment",
+  stepOptions: MARKER_STEP_OPTIONS,
   route: (input) => goTo(SymbolTableStep, input),
 });
 
@@ -2001,6 +2036,7 @@ const PrepStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<PortRunIn
   stepType: "PpPrepGenerateStart",
   targetStepId: "pp-prep-generate",
   role: "agent",
+  stepOptions: MARKER_STEP_OPTIONS,
   route: (input) => goTo(PrepGenerateStep, input),
 });
 
@@ -2120,7 +2156,7 @@ const PrepReviewAStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<Po
   targetStepId: "pp-prep-review-a",
   role: "review",
   identityOf: prepIdentityOf,
-  stepOptions: { executeLoadAttributeMaps: [ppPrepState] },
+  stepOptions: { executeRetry: RESTART_WINDOW_RETRY, executeLoadAttributeMaps: [ppPrepState] },
   route: (input) => goTo(PrepReviewAStep, input),
 });
 
@@ -2157,7 +2193,7 @@ const PrepReviewBStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<Po
   targetStepId: "pp-prep-review-b",
   role: "review",
   identityOf: prepIdentityOf,
-  stepOptions: { executeLoadAttributeMaps: [ppPrepState] },
+  stepOptions: { executeRetry: RESTART_WINDOW_RETRY, executeLoadAttributeMaps: [ppPrepState] },
   route: (input) => goTo(PrepReviewBStep, input),
 });
 
@@ -2284,7 +2320,7 @@ const PrepReviseStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<Por
   targetStepId: "pp-prep-revise",
   role: "agent",
   identityOf: prepIdentityOf,
-  stepOptions: { executeLoadAttributeMaps: [ppPrepState] },
+  stepOptions: { executeRetry: RESTART_WINDOW_RETRY, executeLoadAttributeMaps: [ppPrepState] },
   route: (input) => goTo(PrepReviseStep, input),
 });
 
@@ -2877,6 +2913,7 @@ const QueueFixStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<Fil
   targetStepId: "pp-queue-fix",
   role: "agent",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(QueueFixStep, fri),
 });
 
@@ -3106,7 +3143,10 @@ const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
     // 14 attempts with "AttributeMap instance was not loaded for this
     // invocation: pp-prep/prep" until this declaration was added.
     waitForLoadAttributeMaps: [ppPrep, ppWave],
-    executeRetry: { maximumAttempts: 3 },
+    // US-009-final: the join re-executes into the restart gap after a
+    // kill+resume (cx7 resume fingerprint: finalAttempt 3 on the old 3-attempt
+    // budget); same raised schedule as the marker/model steps.
+    executeRetry: RESTART_WINDOW_RETRY,
     // The wait spans two full per-file pipelines; generous method timeout.
     waitForMethodTimeoutMs: 4 * 60 * 60_000,
   },
@@ -3245,7 +3285,10 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
     // finding cx-5c: the child's first step failed 3 attempts with
     // "AttributeMap instance was not loaded: pp-lease/pool" until declared.
     executeLoadAttributeMaps: [ppPrep, ppVerify, ppLease],
-    executeRetry: { maximumAttempts: 3 },
+    // US-009-final: child-entry re-dispatch after a resume faces the same
+    // restart-window connection budget (cx7: the resumed fix-wave child
+    // re-executed into the gap); raised with the marker/model schedule.
+    executeRetry: RESTART_WINDOW_RETRY,
   },
   inner: async (ctx, input) => {
     // Seed the child's OWN stores with the parent-provided prep + queue
@@ -3330,6 +3373,7 @@ const ChildQueueFixStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarke
   targetStepId: "pp-queue-fix",
   role: "agent",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(ChildQueueFixStep, fri),
 });
 
