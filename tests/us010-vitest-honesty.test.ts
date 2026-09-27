@@ -235,6 +235,28 @@ describe("US-010 vitest ran/not-run semantics", () => {
     expect(parseVitestSummary("some crash trace\nno summary here")).toBeNull();
   });
 
+  test("cx6c regression: 'Tests no tests' (collection failure) is NOT a clean 0/0/0 ran", () => {
+    // The live cx6c run: every ported test file failed to load (import of an
+    // unwritten module) and vitest printed `Tests  no tests`. The old parser
+    // read that as ran {passed:0, failed:0, total:0} — a fake clean run. The
+    // honest reading takes the Test Files line: 5 failing files.
+    const out = `
+ RUN  v3.2.4 /itg
+
+ FAIL  test/support/legacy-helpers.test.ts (transform failed)
+Error: Failed to load url ./php-semantics
+
+ Test Files  5 failed (5)
+      Tests  no tests
+    Duration  207ms
+`;
+    const summary = parseVitestSummary(out);
+    expect(summary).not.toBeNull();
+    expect(summary!.tests).toEqual({ passed: 0, failed: 5, total: 5 });
+    const outcome = vitestOutcomeFromRun(true, ["test/a.test.ts"], { stdout: out });
+    expect(outcome.vitestRun).toEqual({ kind: "ran", passed: 0, failed: 5, total: 5 });
+  });
+
   test("no runner -> not-run with reason (never a bare 0)", () => {
     const out = vitestOutcomeFromRun(false, ["test/a.test.ts"], null);
     expect(out.vitestRun).toEqual({

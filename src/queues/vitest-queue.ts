@@ -135,6 +135,13 @@ export interface VitestSummary {
  * ANSI is expected pre-stripped (parseVitestOutput normalizes). Returns null
  * when no parseable `Tests` summary exists (runner crash / no run happened) —
  * the caller records that as not-run, never as a zero-failure ran.
+ *
+ * cx6c live finding: when EVERY test file fails to COLLECT (e.g. a ported
+ * module imports a file the implementer never wrote), vitest prints
+ * `Tests  no tests` with `Test Files  5 failed (5)`. Reading that as a
+ * numeric summary yields a fake clean `ran 0/0/0` — the exact vacuous-green
+ * US-010 exists to kill. The `Test Files` line is the honest fallback:
+ * file-level failures ARE failures. Null only when neither line parses.
  */
 export function parseVitestSummary(output: string): VitestSummary | null {
   let testFiles: VitestSummaryCounts | null = null;
@@ -148,7 +155,25 @@ export function parseVitestSummary(output: string): VitestSummary | null {
     const t = parseSummaryLine(line, "Tests");
     if (t !== null) tests = t;
   }
-  return tests === null ? null : { testFiles, tests };
+  if (tests === null) {
+    if (testFiles !== null && testFiles.failed > 0) {
+      // Collection failure: no test executed, every failing file is a failure.
+      return { testFiles, tests: { passed: 0, failed: testFiles.failed, total: testFiles.total } };
+    }
+    return null;
+  }
+  // Guard the vacuous case numerically: a summary claiming a ran with ZERO
+  // tests while test files exist and some failed to collect is not a clean
+  // run — fall back to the file-level counts.
+  if (
+    tests.total === 0 &&
+    tests.failed === 0 &&
+    testFiles !== null &&
+    (testFiles.failed > 0 || testFiles.total === 0)
+  ) {
+    return { testFiles, tests: { passed: 0, failed: testFiles.failed, total: testFiles.total } };
+  }
+  return { testFiles, tests };
 }
 
 /** `Tests  4 failed | 41 passed (45)` → {passed: 41, failed: 4, total: 45}. */
