@@ -145,8 +145,6 @@ import {
   parseUnifiedDiff,
   renderDiffForReview,
   reviewerAgentOverride,
-  reviewerModelFallback,
-  reviewerModelOverride,
   testPortScopeNote,
   toEnvelopeUsage,
   toolOverridesAllOff,
@@ -1060,13 +1058,13 @@ async function runReviewTurnOnce(input: {
       attemptNo > 1
         ? `${turn}\n\n(retry attempt ${attemptNo}: a previous reply on this step was truncated or unparseable — respond with exactly one JSON object and nothing else)`
         : turn;
-    // Demotion policy = f(attempt) ONLY (US-002): attempt >= 2 on a review turn
-    // demotes the reviewer lane from OPENCODE_REVIEWER_MODEL to
-    // OPENCODE_REVIEWER_MODEL_FALLBACK (default: the implementer lane, i.e. no
-    // override). Pure policy over the durable dex attempt count — no env
-    // mutation, no durable flag substrate (intra-step writes don't survive;
-    // 0(g)). Tier-0 retries (degenerate no-text replies) therefore land on the
-    // fallback lane automatically.
+    // Lane routing = f(attempt) ONLY (US-002): attempt >= 2 on a review turn
+    // demotes the reviewer lane (gpt-6-luna @ high) to OPENCODE_REVIEWER_MODEL_
+    // FALLBACK or — when unset — the executor lane (glm-5.3-flash @ max).
+    // Pure policy over the durable dex attempt count — no env mutation, no
+    // durable flag substrate (intra-step writes don't survive; 0(g)). Tier-0
+    // retries (degenerate no-text replies) therefore land on the fallback
+    // lane automatically. Table: src/harness/lanes.ts reviewLaneRouting().
     const agent = reviewerAgentOverride();
     // Lane routing = f(attempt) (US-002) over the wave-5 lane table: attempt 1
     // runs the reviewer lane (gpt-6-luna @ high), attempt >= 2 demotes to the
