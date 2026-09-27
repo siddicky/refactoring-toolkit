@@ -448,6 +448,41 @@ describe("US-010 ported-test-file fix routing", () => {
       "tests/Support/LegacyHelpersTest.php",
     ]);
   });
+
+  test("cx6c regression: the round cap reads the LATEST round (loop terminates)", () => {
+    // The live cx6c run looped fix waves forever: a file's stale round-1 done
+    // entry kept re-qualifying it at round 2 (1+1 <= maxRounds) even after
+    // round-2 and round-3 entries existed. The cap must read the file's
+    // latest round: at round 3 with maxRounds 3 the file is CAPPED, not
+    // re-selected.
+    const sourceMap = {
+      "src/Support/legacy_helpers.php": { outPath: "./src/support/legacy-helpers.ts" },
+    };
+    const counts = new Map([["src/support/legacy-helpers.ts", 1]]);
+    const { fixable, capped } = selectFixableFiles(
+      [
+        { file: "src/Support/legacy_helpers.php", round: 1 },
+        { file: "src/Support/legacy_helpers.php", round: 2 },
+        { file: "src/Support/legacy_helpers.php", round: 3 },
+      ],
+      sourceMap,
+      counts,
+      3,
+    );
+    expect(fixable).toEqual([]);
+    expect(capped).toEqual([{ file: "src/Support/legacy_helpers.php", round: 3, count: 1 }]);
+    // A file at round 2 (latest) still has one fix round available.
+    const mid = selectFixableFiles(
+      [
+        { file: "src/Support/legacy_helpers.php", round: 1 },
+        { file: "src/Support/legacy_helpers.php", round: 2 },
+      ],
+      sourceMap,
+      counts,
+      3,
+    );
+    expect(mid.fixable).toEqual([{ file: "src/Support/legacy_helpers.php", fromRound: 2 }]);
+  });
 });
 
 // ---------------------------------------------------------------------------

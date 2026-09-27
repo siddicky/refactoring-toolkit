@@ -543,15 +543,23 @@ export function selectFixableFiles(
 ): { fixable: Array<{ file: string; fromRound: number }>; capped: Array<{ file: string; round: number; count: number }> } {
   const fixable: Array<{ file: string; fromRound: number }> = [];
   const capped: Array<{ file: string; round: number; count: number }> = [];
+  // cx6c live finding (loop non-termination): the cap decision must read the
+  // file's LATEST done round. Iterating EVERY done entry let a file's stale
+  // round-1 entry re-qualify it at round 2 forever (round cap never reached
+  // for maxRounds >= 2), so a persistent error looped fix waves without end.
+  const latestRound = new Map<string, number>();
   for (const entry of done) {
-    const outPath = sourceMap[entry.file]?.outPath;
+    latestRound.set(entry.file, Math.max(latestRound.get(entry.file) ?? 0, entry.round));
+  }
+  for (const [file, round] of latestRound) {
+    const outPath = sourceMap[file]?.outPath;
     if (outPath === undefined) continue;
     const count = errorCountByOutput.get(outPath.replace(/^\.\//, "")) ?? 0;
     if (count === 0) continue;
-    if (entry.round + 1 > maxRounds) {
-      capped.push({ file: entry.file, round: entry.round, count });
+    if (round + 1 > maxRounds) {
+      capped.push({ file, round, count });
     } else {
-      fixable.push({ file: entry.file, fromRound: entry.round });
+      fixable.push({ file, fromRound: round });
     }
   }
   return { fixable, capped };
