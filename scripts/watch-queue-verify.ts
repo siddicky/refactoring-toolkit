@@ -17,6 +17,15 @@
  * — so the stream sees the kill window that plain state polling could only
  * infer from an ACTIVE step execution (still the poll fallback's predicate).
  *
+ * US-010a drain-to-head (cx8 finding): on arm the retained stream is drained
+ * via listStreamMessages (all pages, newest-first, until exhausted), scanned
+ * for the trigger, and the follow cursor is pinned to the drained HEAD — the
+ * follow long-poll then sees post-arm messages ~immediately instead of
+ * consuming a stale backlog at ~1 message/pollInterval (cx8: cursor ~28 min
+ * behind; both ~1.1-1.6 s queue-verify windows missed). Keep the follow
+ * cadence SHORT (`--poll-seconds 1..5`) so a message published mid-cycle is
+ * read within seconds of its window, not after a full default interval.
+ *
  * Scope: kill only. The resume (dex server + worker restart on the same DB)
  * stays the documented operator procedure — this watcher never restarts
  * infrastructure it did not start.
@@ -61,6 +70,22 @@ function isLongPollWakeUp(err: unknown): boolean {
     err instanceof DexServiceError &&
     (err as { subStatus?: unknown }).subStatus === "longPollTimeout"
   );
+}
+
+/** Coerce one retained stream message into the watcher's structural event. */
+function toWatcherEvent(message: {
+  value: unknown;
+  resumeToken: string;
+}): WatcherStreamEvent {
+  const envelope = message.value as {
+    eventKey?: string;
+    event?: { stepId?: unknown; ended_at?: unknown };
+  };
+  return {
+    eventKey: String(envelope.eventKey ?? ""),
+    stepId: typeof envelope.event?.stepId === "string" ? envelope.event.stepId : "",
+    endedAt: typeof envelope.event?.ended_at === "string" ? envelope.event.ended_at : null,
+  };
 }
 
 function argValue(flag: string, fallback?: string): string | undefined {
@@ -126,9 +151,47 @@ async function main(): Promise<number> {
   try {
     // Resume token for the subscription (empty = retained head on first read).
     let resumeToken = "";
+    // US-010a drain-to-head page bound (insurance only): 500 pages of
+    // server-max size is far beyond any run's retained envelope count; a
+    // server that never exhausts nextPageToken must not hang the arm.
+    const MAX_DRAIN_PAGES = 500;
+    // Arm-time backlog drain (cx8 fix): read ALL retained pages newest-first
+    // until exhausted, scan them for the trigger, and leave `resumeToken` at
+    // the drained HEAD so the follow phase long-polls only post-arm messages
+    // (the old cursor-at-retained-head follow consumed the backlog at
+    // ~1 message/pollInterval and fell ~28 min behind the ~1.5 s windows).
+    // The cursor is pinned to page 1's newest message BEFORE deep paging, so
+    // even a mid-drain failure leaves the follow lane at head.
+    const drainBacklog = async (): Promise<WatcherStreamEvent[]> => {
+      if (runtime === undefined) return []; // poll-only degradation
+      const events: WatcherStreamEvent[] = [];
+      let pageToken = "";
+      for (let page = 0; page < MAX_DRAIN_PAGES; page++) {
+        const res = await runtime.client.listStreamMessages(
+          flowId,
+          envelopeStream,
+          100,
+          pageToken,
+        );
+        if (page === 0) {
+          const newest = res.messages[0];
+          if (newest !== undefined) resumeToken = newest.resumeToken;
+        }
+        // Oldest-last within the page: emit in stream order.
+        for (let i = res.messages.length - 1; i >= 0; i--) {
+          const message = res.messages[i];
+          if (message !== undefined) events.push(toWatcherEvent(message));
+        }
+        if (res.nextPageToken === "") return events; // exhausted: at head
+        pageToken = res.nextPageToken;
+      }
+      log(`backlog drain hit the ${MAX_DRAIN_PAGES}-page bound — continuing from head`);
+      return events;
+    };
     const result = await runQueueVerifyWatcher({
       deadlineMs: deadlineMinutes * 60_000,
       pollIntervalMs: pollSeconds * 1_000,
+      drainBacklog,
       nextStreamEvent: async (timeoutMs) => {
         if (runtime === undefined) return null; // poll-only degradation
         let message: Awaited<ReturnType<typeof runtime.client.readStream>>;
@@ -144,12 +207,7 @@ async function main(): Promise<number> {
           throw err; // genuine stream failure -> poll fallback (once)
         }
         resumeToken = message.resumeToken;
-        const envelope = message.value as { eventKey?: string; event?: { stepId?: unknown; ended_at?: unknown } };
-        const event: WatcherStreamEvent = {
-          eventKey: String(envelope.eventKey ?? ""),
-          stepId: typeof envelope.event?.stepId === "string" ? envelope.event.stepId : "",
-          endedAt: typeof envelope.event?.ended_at === "string" ? envelope.event.ended_at : null,
-        };
+        const event = toWatcherEvent(message);
         log(`stream event: ${event.eventKey}`);
         return event;
       },

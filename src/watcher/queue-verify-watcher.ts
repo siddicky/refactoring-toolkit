@@ -17,6 +17,13 @@
  * - the whole watch is BOUNDED: `deadlineMs` (30 min in production) ends it
  *   with outcome "timeout" — a watcher can never hang.
  *
+ * US-010a drain-to-head: on arm the retained stream is drained to its head
+ * (all listStreamMessages pages, via the injected `drainBacklog` seam) and
+ * scanned for the trigger BEFORE the follow loop starts at that head — a
+ * trigger already in the backlog fires, and the follow phase reads only
+ * post-arm messages instead of a stale backlog at ~1 message/pollInterval
+ * (the cx8 miss: cursor ~28 min behind, ~1.1-1.6 s windows never reached).
+ *
  * Exactly-once: `fire` is called at most ONCE per watcher lifetime; every
  * later trigger (stream repeat, poll echo) is logged and suppressed.
  *
@@ -48,6 +55,21 @@ export interface QueueVerifyWatcherOptions {
    * poll fallback and stops touching the stream).
    */
   nextStreamEvent: (timeoutMs: number) => Promise<WatcherStreamEvent | null>;
+  /**
+   * US-010a drain-to-head (fixes the cx8 miss): called ONCE at arm, BEFORE
+   * the follow loop. Returns every currently-retained stream event in stream
+   * order (oldest→newest) — the implementation reads all available
+   * listStreamMessages pages until exhausted — and MUST leave the follow
+   * cursor (`nextStreamEvent`'s resume token) at the drained HEAD, so the
+   * follow phase reads only messages published after arm instead of
+   * consuming a stale backlog at ~1 message/pollInterval (the cursor fell
+   * ~28 min behind in cx8 and every ~1.1-1.6 s queue-verify window was
+   * missed). A trigger already IN the drained backlog fires immediately
+   * (a start envelope is retained even after its active window closed).
+   * THROWS on failure: the watcher logs loudly and keeps following from
+   * wherever the cursor ended up (worst case: the pre-US-010a behavior).
+   */
+  drainBacklog?: () => Promise<WatcherStreamEvent[]>;
   /** 60 s poll fallback probe (dexcli): true when queue-verify is active. */
   poll: () => Promise<boolean>;
   /** The kill action. Called AT MOST once. */
@@ -101,6 +123,27 @@ export async function runQueueVerifyWatcher(
   log(
     `watcher start: waiting for pp-queue-verify start (stream + ${Math.round(options.pollIntervalMs / 1000)}s poll fallback, bounded ${Math.round(options.deadlineMs / 60000)}min)`,
   );
+
+  // US-010a drain-to-head: arm-time scan of the retained backlog BEFORE any
+  // follow read, terminal check, or deadline arithmetic. Order is the fix —
+  // a flow that completes quickly must not exit on the terminal branch while
+  // its trigger still sits unread in the retained stream.
+  if (options.drainBacklog !== undefined) {
+    try {
+      const backlog = await options.drainBacklog();
+      log(`drained ${backlog.length} retained stream event(s) to head — following from head`);
+      for (const event of backlog) {
+        if (isQueueVerifyStart(event)) {
+          log(`trigger found in drained backlog: ${event.eventKey}`);
+          return await fireOnce("stream");
+        }
+      }
+    } catch (err) {
+      log(
+        `backlog drain failed — following from the current cursor (poll fallback unaffected): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   while (now() - start < options.deadlineMs) {
     // 1. Stream subscription (primary): one bounded long-poll per cycle.
