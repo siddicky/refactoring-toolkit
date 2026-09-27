@@ -551,6 +551,20 @@ parallel`; `sequential` keeps the Phase 2 loop for A/B):
     path). Residual third miss: `Customer#toArray` truncated-candidate label
     (`array<string,`) — the known recall-side `@return` comma-truncation,
     recorded as a worker-3 follow-up, not a prompt issue.
+  - FIX-WAVE RE-RUN (2026-09-27, live, reconciles the 33/36-vs-PRD-34/36
+    discrepancy): `scripts/jev-spot-check.ts` re-run live (n=36) after the
+    script gained band reporting (reviewer finding 5: per-row cascade noul
+    probabilities preserved in `checks`; `band_rate` ([0.30, 0.70]) and
+    `strong_fail_rate` (<0.8) reported separately in the summary). CURRENT
+    number: **33/36 = 91.7%** (≥90% target PASS; generatedAt
+    2026-09-27T12:36:41Z) — and an earlier same-day run measured **34/36 =
+    94.4%** (12:24Z): run-to-run model variance, both ≥90%, so the PRD's
+    34/36 and BUILD_NOTES' 33/36 were both real observations; the current
+    standing number is 33/36 = 91.7%. Band/strong-fail split on the current
+    artifact: `band_rate` 8/36 = 22.2%, `strong_fail_rate` 13/36 = 36.1%,
+    `escalation_rate` 97.2% (dominated by 18 recall-empty abstentions, the
+    designed path for no-evidence symbols). Artifact:
+    `/tmp/jev-spot-check-fixwave.json`.
 - Suites after the fix: `bun run typecheck` clean; `bun test` 188 pass / 0
   fail (20 files).
 

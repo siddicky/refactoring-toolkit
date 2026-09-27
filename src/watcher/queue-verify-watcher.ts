@@ -24,6 +24,19 @@
  * post-arm messages instead of a stale backlog at ~1 message/pollInterval
  * (the cx8 miss: cursor ~28 min behind, ~1.1-1.6 s windows never reached).
  *
+ * Fix-wave hardening (reviewer findings 1+2):
+ * - FOLLOW CATCH-UP: arming on an EMPTY stream is not enough — the follow
+ *   loop itself consumed retained events at ~1 message/pollInterval, so a
+ *   backlog published AFTER arm re-created the cx8 miss inside the window.
+ *   After each (non-empty) follow read the loop now keeps reading until the
+ *   retained events are exhausted BEFORE any poll/terminal check or sleep —
+ *   a full backlog published mid-watch is consumed within one cycle.
+ * - STALE-START GUARD: a start in the drained backlog fires only when its
+ *   attempt is still ACTIVE (no same-key completion appears later in the
+ *   backlog — start/completion correlated by event key) AND the flow has
+ *   not already gone terminal. A stale trigger never fires the kill; a
+ *   terminal flow exits cleanly (outcome "terminal", firings 0).
+ *
  * Exactly-once: `fire` is called at most ONCE per watcher lifetime; every
  * later trigger (stream repeat, poll echo) is logged and suppressed.
  *
@@ -48,6 +61,27 @@ export function isQueueVerifyStart(event: WatcherStreamEvent): boolean {
   return event.stepId === "pp-queue-verify" && event.endedAt === null;
 }
 
+/**
+ * Stale-start guard (fix-wave finding 2): the starts whose attempt is still
+ * ACTIVE after correlating the drained backlog by event key. A completion
+ * (`endedAt` set, same eventKey) closes the open start it matches — the
+ * envelope factory publishes start and completion under ONE event key
+ * (`stepId#attempt[@identity]`). A start with no later same-key completion
+ * is an unmatched, possibly-live attempt; a fully matched start is stale and
+ * must never fire the kill.
+ */
+export function activeAttemptStarts(events: readonly WatcherStreamEvent[]): WatcherStreamEvent[] {
+  const open = new Map<string, WatcherStreamEvent>();
+  for (const event of events) {
+    if (isQueueVerifyStart(event)) {
+      open.set(event.eventKey, event);
+    } else if (event.stepId === "pp-queue-verify" && event.endedAt !== null) {
+      open.delete(event.eventKey);
+    }
+  }
+  return [...open.values()];
+}
+
 export interface QueueVerifyWatcherOptions {
   /**
    * Stream subscription: resolves the next event or null when the source is
@@ -64,8 +98,9 @@ export interface QueueVerifyWatcherOptions {
    * follow phase reads only messages published after arm instead of
    * consuming a stale backlog at ~1 message/pollInterval (the cursor fell
    * ~28 min behind in cx8 and every ~1.1-1.6 s queue-verify window was
-   * missed). A trigger already IN the drained backlog fires immediately
-   * (a start envelope is retained even after its active window closed).
+   * missed). A start envelope still ACTIVE after start/completion
+   * correlation (fix-wave stale-start guard) fires — gated on the flow not
+   * being terminal.
    * THROWS on failure: the watcher logs loudly and keeps following from
    * wherever the cursor ended up (worst case: the pre-US-010a behavior).
    */
@@ -128,15 +163,38 @@ export async function runQueueVerifyWatcher(
   // follow read, terminal check, or deadline arithmetic. Order is the fix —
   // a flow that completes quickly must not exit on the terminal branch while
   // its trigger still sits unread in the retained stream.
+  //
+  // Fix-wave stale-start guard: the drained start fires only when its
+  // attempt is UNMATCHED (no same-key completion later in the backlog) AND
+  // the flow is not already terminal — a retained [start, done] pair (or a
+  // finished flow) never fires the kill.
   if (options.drainBacklog !== undefined) {
     try {
       const backlog = await options.drainBacklog();
       log(`drained ${backlog.length} retained stream event(s) to head — following from head`);
-      for (const event of backlog) {
-        if (isQueueVerifyStart(event)) {
-          log(`trigger found in drained backlog: ${event.eventKey}`);
-          return await fireOnce("stream");
+      const startsInBacklog = backlog.filter((e) => isQueueVerifyStart(e)).length;
+      const active = activeAttemptStarts(backlog);
+      if (active.length > 0) {
+        let status: "running" | "completed" | "failed" | "unknown" = "unknown";
+        try {
+          status = await options.flowStatus();
+        } catch {
+          status = "unknown"; // query failure never suppresses a live attempt
         }
+        if (status === "completed" || status === "failed") {
+          log(
+            `backlog start is stale — flow ${status} before the trigger; exiting cleanly (no kill)`,
+          );
+          return { outcome: "terminal", firings: 0 };
+        }
+        const trigger = active[0] as WatcherStreamEvent;
+        log(`trigger found in drained backlog: ${trigger.eventKey}`);
+        return await fireOnce("stream");
+      }
+      if (startsInBacklog > 0) {
+        log(
+          `skipped ${startsInBacklog} stale queue-verify start(s) in the drained backlog (matched by completion — no active attempt)`,
+        );
       }
     } catch (err) {
       log(
@@ -146,12 +204,28 @@ export async function runQueueVerifyWatcher(
   }
 
   while (now() - start < options.deadlineMs) {
-    // 1. Stream subscription (primary): one bounded long-poll per cycle.
+    // 1. Stream subscription (primary): one bounded long-poll per cycle, then
+    // a full CATCH-UP drain of everything already retained (fix-wave finding
+    // 1) — consuming one message per pollInterval re-created the cx8 miss for
+    // a backlog published AFTER arm, so the loop reads to exhaustion BEFORE
+    // any poll/terminal check or sleep. Each read uses the same bounded
+    // long-poll (retained events resolve immediately; only the final empty
+    // read waits) and the deadline still bounds the whole loop.
     if (streamUsable) {
       try {
-        const event = await options.nextStreamEvent(options.pollIntervalMs);
-        if (event !== null && isQueueVerifyStart(event)) {
-          return await fireOnce("stream");
+        let event = await options.nextStreamEvent(options.pollIntervalMs);
+        if (event !== null) {
+          let drained = 0;
+          while (event !== null) {
+            drained++;
+            if (isQueueVerifyStart(event)) {
+              log(`catch-up drained ${drained} follow event(s) — trigger inside`);
+              return await fireOnce("stream");
+            }
+            if (now() - start >= options.deadlineMs) break; // bounded drain
+            event = await options.nextStreamEvent(options.pollIntervalMs);
+          }
+          log(`catch-up drained ${drained} follow event(s) to exhaustion before sleeping`);
         }
       } catch (err) {
         // Stream failed: the poll fallback is now the ONLY source (ENGAGED),

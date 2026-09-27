@@ -38,6 +38,10 @@
       "expected": "retry"
     },
     {
+      "id": "deg-10-minimal-usage-2out",
+      "expected": "retry"
+    },
+    {
       "id": "generic-885-token-unparseable",
       "expected": "generic_retry"
     },

@@ -208,29 +208,93 @@ describe("queue-verify kill watcher (US-007): exactly-once, bounded, clean exits
 // behind and every ~1.1-1.6 s queue-verify window was missed. Fix: at arm,
 // drain the retained backlog (injected `drainBacklog` seam) and scan it for
 // the trigger BEFORE the follow loop starts at the drained head.
+//
+// Fix-wave amendment: a drained start fires only when its attempt is
+// UNMATCHED (start/completion correlated by event key) AND the flow is not
+// terminal — the original [OTHER, START, DONE]+completed shape was a STALE
+// trigger and must exit cleanly with zero firings instead.
 describe("queue-verify kill watcher (US-010a): drain-to-head before following", () => {
-  test("REGRESSION (cx8 shape): a trigger already in the retained backlog fires from the drain — the pre-US-010a follow-only watcher missed it", async () => {
-    // Backlog published BEFORE arm, trigger inside it; the follow phase sees
-    // only post-arm messages (nulls), and the flow goes terminal quickly —
-    // exactly the run shape where the old cursor-at-tail follow never reached
-    // the trigger in time and exited on the terminal branch.
-    const backlog = [OTHER_EVENT, START_EVENT, DONE_EVENT];
-    const h = harness({ events: [null, null], status: "completed" });
-    const result = await h.run({ drainBacklog: async () => backlog });
+  test("REGRESSION (cx8 shape): an UNMATCHED start in the retained backlog fires while the flow is still running", async () => {
+    // Backlog published BEFORE arm with a still-active attempt (no same-key
+    // completion after it); the flow is running — the kill must fire.
+    const h = harness({ events: [null, null], status: "running" });
+    const result = await h.run({ drainBacklog: async () => [OTHER_EVENT, START_EVENT] });
 
-    // Drained shape fires...
     expect(result.outcome).toBe("fired");
     expect(result.via).toBe("stream");
     expect(result.firings).toBe(1);
-    expect(h.logs.some((l) => l.includes("drained 3 retained stream event(s) to head"))).toBe(true);
+    expect(h.logs.some((l) => l.includes("drained 2 retained stream event(s) to head"))).toBe(true);
     expect(h.logs.some((l) => l.includes("trigger found in drained backlog"))).toBe(true);
+  });
 
-    // ...while the OLD behavior (no drain seam) on the SAME scenario exits
-    // terminal with zero firings — the miss this story fixes, kept as a
-    // documented contrast.
-    const old = await harness({ events: [null, null], status: "completed" }).run();
-    expect(old.outcome).toBe("terminal");
-    expect(old.firings).toBe(0);
+  test("REGRESSION (stale-start, fix-wave): a matched [start, done] pair in the backlog NEVER fires; terminal flow exits cleanly (0 firings)", async () => {
+    // The reviewer-rejected shape: the start's completion sits later in the
+    // SAME backlog (attempt already closed) and the flow went terminal. The
+    // drain-to-head watcher fired on it; the stale-start guard must not.
+    const h = harness({ events: [null, null], status: "completed" });
+    const result = await h.run({ drainBacklog: async () => [OTHER_EVENT, START_EVENT, DONE_EVENT] });
+
+    expect(result.outcome).toBe("terminal");
+    expect(result.firings).toBe(0);
+    expect(h.firings.length).toBe(0);
+    expect(h.logs.some((l) => l.includes("skipped 1 stale queue-verify start(s)"))).toBe(true);
+    expect(h.logs.some((l) => l.includes("trigger found in drained backlog"))).toBe(false);
+  });
+
+  test("a still-UNMATCHED backlog start on an already-terminal flow does not fire either (terminal gate)", async () => {
+    const h = harness({ events: [null], status: "failed" });
+    const result = await h.run({ drainBacklog: async () => [START_EVENT] });
+    expect(result.outcome).toBe("terminal");
+    expect(result.firings).toBe(0);
+    expect(h.firings.length).toBe(0);
+    expect(h.logs.some((l) => l.includes("flow failed before the trigger"))).toBe(true);
+  });
+
+  test("attempt correlation: a closed attempt-1 does not suppress a LATER open attempt-2 start in the same backlog", async () => {
+    const start2: WatcherStreamEvent = {
+      eventKey: "pp-queue-verify#2",
+      stepId: "pp-queue-verify",
+      endedAt: null,
+    };
+    const done1: WatcherStreamEvent = {
+      eventKey: "pp-queue-verify#1",
+      stepId: "pp-queue-verify",
+      endedAt: "2026-09-27T01:00:00.000Z",
+    };
+    const h = harness({ events: [null], status: "running" });
+    const result = await h.run({ drainBacklog: async () => [START_EVENT, done1, start2] });
+    expect(result.outcome).toBe("fired");
+    expect(result.firings).toBe(1);
+    expect(h.logs.some((l) => l.includes("trigger found in drained backlog: pp-queue-verify#2"))).toBe(true);
+  });
+
+  test("REGRESSION (fix-wave catch-up): armed on an EMPTY stream, a large backlog + trigger published while the flow is active fires within one cycle — not 1 message/poll", async () => {
+    // The cx8 miss shape, post-arm edition: arm drains 0 events, then a large
+    // backlog is published with the trigger at its end while the flow is
+    // active (first long-poll comes back empty; the published events land in
+    // the retained stream right after). The follow phase must catch up to
+    // exhaustion in ONE cycle. The pre-fix loop consumed 1 message/poll — on
+    // this deadline (5 min / 60 s polls) it would read only ~4 of 21 events
+    // and exit on the timeout without ever reaching the trigger.
+    const backlog: WatcherStreamEvent[] = Array.from({ length: 20 }, (_, i) => ({
+      eventKey: `pp-implement#${i}@src/a.php#1`,
+      stepId: "pp-implement",
+      endedAt: null,
+    }));
+    const h = harness({
+      events: [null, ...backlog, START_EVENT],
+      polls: [],
+      status: "running",
+      deadlineMs: 5 * 60_000,
+      pollIntervalMs: 60_000,
+    });
+    const result = await h.run({ drainBacklog: async () => [] });
+
+    expect(result.outcome).toBe("fired");
+    expect(result.via).toBe("stream");
+    expect(result.firings).toBe(1);
+    expect(h.logs.some((l) => l.includes("drained 0 retained stream event(s) to head"))).toBe(true);
+    expect(h.logs.some((l) => l.includes("catch-up drained 21 follow event(s) — trigger inside"))).toBe(true);
   });
 
   test("a trigger published AFTER arm is caught by the follow phase (cursor pinned at head by the drain)", async () => {

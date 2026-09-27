@@ -109,11 +109,22 @@ async function main(): Promise<number> {
 
   let correct = 0;
   const rows: Array<Record<string, unknown>> = [];
+  // US-005 (fix-wave finding 5): band/strong-fail classification over the
+  // four VERIFICATION-cascade nouls only (recall/none/choice-confidence
+  // escalations have no noul p to classify).
+  const BAND_LOW = 0.3;
+  const BAND_HIGH = 0.7;
+  const STRONG_FAIL_BELOW = 0.8;
   for (const symbol of graded) {
     const decision = await selectSymbolType(client, symbol);
     const accepted = GROUND_TRUTH[`${symbol.file}#${symbol.name}`] ?? [];
     const hit = accepted.includes(decision.selected);
     if (hit) correct += 1;
+    // The cascade noul probabilities are PRESERVED per row (check/p/flagged)
+    // so band and strong-fail rates are recomputable from the artifact.
+    const checks = decision.checks.map((c) => ({ check: c.check, p: c.p, flagged: c.flagged }));
+    const bandHit = checks.some((c) => c.p >= BAND_LOW && c.p <= BAND_HIGH);
+    const strongFailHit = checks.some((c) => c.p < STRONG_FAIL_BELOW);
     rows.push({
       file: symbol.file,
       symbol: symbol.name,
@@ -121,15 +132,20 @@ async function main(): Promise<number> {
       accepted,
       correct: hit,
       flagged: decision.flagged,
+      checks,
+      band_hit: bandHit,
+      strong_fail_hit: strongFailHit,
       escalations: decision.escalations.map((e) => e.check),
     });
     console.log(
-      `${hit ? "PASS" : "MISS"} ${symbol.file}#${symbol.name} → ${decision.selected}${decision.flagged ? " (flagged)" : ""}`,
+      `${hit ? "PASS" : "MISS"} ${symbol.file}#${symbol.name} → ${decision.selected}${decision.flagged ? " (flagged)" : ""}${bandHit ? " [band]" : ""}${strongFailHit ? " [strong-fail]" : ""}`,
     );
   }
   const score = correct / rows.length;
   // US-005 (AC-S): uncertain-band and strong-fail rates, reported separately.
-  // A band hit = any escalation noul p in [0.30, 0.70]; strong-fail = p < 0.8.
+  // A band hit = any cascade noul p in [0.30, 0.70]; strong-fail = p < 0.8.
+  const bandRate = rows.filter((r) => r.band_hit).length / rows.length;
+  const strongFailRate = rows.filter((r) => r.strong_fail_hit).length / rows.length;
   const summary = {
     generatedAt: new Date().toISOString(),
     model: "typesafe-system-one",
@@ -139,6 +155,10 @@ async function main(): Promise<number> {
     target: 0.9,
     pass: score >= 0.9,
     escalation_rate: rows.filter((r) => r.flagged).length / rows.length,
+    band_rate: bandRate,
+    strong_fail_rate: strongFailRate,
+    band_definition: `any verification-cascade noul p in [${BAND_LOW}, ${BAND_HIGH}]`,
+    strong_fail_definition: `any verification-cascade noul p < ${STRONG_FAIL_BELOW}`,
     escalations_by_check: rows.reduce<Record<string, number>>((acc, r) => {
       const names = (r.escalations as string[] | undefined) ?? [];
       for (const c of names) acc[c] = (acc[c] ?? 0) + 1;

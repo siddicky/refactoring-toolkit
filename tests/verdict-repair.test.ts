@@ -551,6 +551,62 @@ describe("repair paths through runReviewTurn", () => {
     const tuple = out.verdict as ReviewTuple;
     expect(tuple.metrics.findings.length).toBe(1);
   });
+
+  test("REGRESSION (fix-wave memo keying): two flows on the same step+diff never inherit each other's replies; a settled execution's entry is cleared", async () => {
+    // Pre-fix the memo was keyed by step+diff ONLY (module-global), so flow Y
+    // reviewing the same file+round inherited flow X's reply as its "prior
+    // attempt" — an identical reply text (the poisoned-cache shape arm (c)
+    // targets) triggered a FALSE repair. The key now carries flow/run
+    // identity, and a settled execution (verdict returned) clears its entry.
+    const ctxWith = (flowId: string, runId: string): Context =>
+      ({ ...fakeCtx().ctx, flowId, runId }) as unknown as Context;
+
+    const harness = scriptedHarness([]);
+    configurePortHarness(harness);
+
+    // Flow X, attempt 1: healthy reply -> success (the execution ENDS).
+    harness.script.push(HEALTHY_REPLY);
+    const outX = await runReviewTurn({
+      ctx: ctxWith("flow-X", "run-X"),
+      reviewerId: "reviewer-A",
+      file: "src/Money.php",
+      round: 1,
+      epoch: 1,
+      diff: DIFF_TURN,
+      attempt: 1,
+    });
+    expect(tombstoneOf(outX.verdict)).toBeNull();
+
+    // Flow Y, SAME step+diff, SAME reply text: must NOT see X's reply as a
+    // prior (no verbatim-repeat, no repair) — exactly 1 prompt for this call.
+    harness.script.push(HEALTHY_REPLY);
+    const outY = await runReviewTurn({
+      ctx: ctxWith("flow-Y", "run-Y"),
+      reviewerId: "reviewer-A",
+      file: "src/Money.php",
+      round: 1,
+      epoch: 1,
+      diff: DIFF_TURN,
+      attempt: 1,
+    });
+    expect(tombstoneOf(outY.verdict)).toBeNull();
+    expect(harness.prompts.length).toBe(2); // 1 per flow — no repair anywhere
+
+    // A LATER execution under Y's own key also starts clean: Y's settled
+    // entry was cleared when its execution ended (no inherited prior).
+    harness.script.push(HEALTHY_REPLY);
+    const outY2 = await runReviewTurn({
+      ctx: ctxWith("flow-Y", "run-Y"),
+      reviewerId: "reviewer-A",
+      file: "src/Money.php",
+      round: 1,
+      epoch: 1,
+      diff: DIFF_TURN,
+      attempt: 2,
+    });
+    expect(tombstoneOf(outY2.verdict)).toBeNull();
+    expect(harness.prompts.length).toBe(3); // still no repair
+  });
 });
 
 describe("attempt-exhaustion tombstones (deterministic ctx.attempt >= maxAttempts)", () => {
@@ -638,6 +694,41 @@ describe("attempt-exhaustion tombstones (deterministic ctx.attempt >= maxAttempt
     expect(completed?.outcome).toBe("completed");
     expect(completed?.attempt).toBe(REVIEW_STEP_MAX_ATTEMPTS);
     expect((completed?.tokens as TokenUsage).input_tokens).toBe(100);
+  });
+
+  test("REGRESSION (fix-wave diagnosis forwarding): a successful attempt-2 review step's completion envelope carries turn_diagnosis (US-003 successor re-record)", async () => {
+    // runReviewTurn returns turnDiagnosis on attempt >= 2, but the review-step
+    // inner destructured only {verdict, tokens} and dropped it — the envelope
+    // never persisted the successor-attempt diagnosis. Now it is forwarded.
+    const harness = scriptedHarness([HEALTHY_REPLY]);
+    configurePortHarness(harness);
+    const stores = new Map<unknown, Map<string, unknown>>([
+      [
+        ppDiff as unknown,
+        new Map<string, unknown>([
+          [
+            markerKeyOf("src/Money.php", 1),
+            {
+              diffId: "diff-f-r1",
+              raw: SAMPLE_DIFF,
+              doc: DIFF_DOC,
+              bodyLineOffset: DIFF_HEADER_LINES,
+            } satisfies CapturedDiff,
+          ],
+        ]),
+      ],
+    ]);
+    const ctx = attributeCtx(stores, 2); // attempt 2 -> the diagnosis is built
+    const step = new PortFileFlow().reviewA;
+    const decision = await step.execute(ctx as never, FRI);
+    expect(decision.kind).toBe("next");
+    const envelopes = [...stores.get(envelopeEvents as unknown)?.values() ?? []] as EnvelopeEvent[];
+    const completed = envelopes.find((e) => e.ended_at !== null);
+    expect(completed?.stepId).toBe("pp-review-a");
+    expect(completed?.outcome).toBe("completed");
+    expect(completed?.turn_diagnosis).not.toBeNull();
+    expect(completed?.turn_diagnosis?.trigger).toBe("retry-context");
+    expect(completed?.turn_diagnosis?.attempt).toBe(2);
   });
 });
 

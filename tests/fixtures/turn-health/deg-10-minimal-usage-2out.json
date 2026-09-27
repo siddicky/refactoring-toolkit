@@ -1,0 +1,18 @@
+{
+  "_id": "deg-10-minimal-usage-2out",
+  "_expected": "retry",
+  "_note": "10th degenerate fixture (fix-wave finding 7; PRD US-003 requires ten). Expected outcome: retry — Tier-0 degenerate (degenerateReply: usage present, NO text part, not aborted). Distinct uncovered shape: MINIMUM-measurable usage — 2 output tokens, ZERO reasoning, ZERO cache. deg-01..09 all carry heavy reasoning (~32k/2.9k) and/or non-zero cache (the wave-4 cache-amplified signatures); this one proves the predicate fires on usage-presence alone at ANY usage magnitude. A text-part-present variant is NOT Tier-0 (the predicate requires an empty text part), so the text+reasoning-parts shape suggested in review is excluded by design.",
+  "info": {
+    "tokens": {
+      "input": 61234,
+      "output": 2,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "cost": 0
+  },
+  "parts": []
+}

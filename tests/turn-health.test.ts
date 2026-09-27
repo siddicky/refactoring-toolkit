@@ -6,9 +6,11 @@
  * 1. Raw SDK message-shape fixtures ({info:{tokens}, parts}) driving
  *    OpencodeHarness.prompt through the REAL extractors (extractTokenUsage /
  *    extractText / hasAbortedError) via an SDK-boundary double.
- * 2. NINE degenerate no-text fixtures (BUILD_NOTES §WAVE-4 session
+ * 2. TEN degenerate no-text fixtures (BUILD_NOTES §WAVE-4 session
  *    signatures: 0-16 output tokens, no text part, heavy reasoning,
- *    usage-present fast path) -> OpencodePromptError retryable.
+ *    usage-present fast path -> OpencodePromptError retryable; the 10th
+ *    (fix-wave finding 7) is the MINIMUM-usage arm: 2 output tokens, zero
+ *    reasoning, zero cache — usage-presence alone is Tier-0).
  * 3. Healthy negatives pass through: ~235-output-token valid verdict
  *    (wave-5 Sisyphus signature), text-present/output-0 (the case the
  *    deliberately DROPPED ≤8-output-token arm would have misclassified),
@@ -81,7 +83,7 @@ function degenerateFixture(
 }
 
 // ---------------------------------------------------------------------------
-// 1+2: nine degenerate no-text fixtures -> retryable (BUILD_NOTES §WAVE-4)
+// 1+2: ten degenerate no-text fixtures -> retryable (BUILD_NOTES §WAVE-4)
 // ---------------------------------------------------------------------------
 
 const DEGENERATE_FIXTURES: ReadonlyArray<{ label: string; fixture: RawMessage }> = [
@@ -121,11 +123,27 @@ const DEGENERATE_FIXTURES: ReadonlyArray<{ label: string; fixture: RawMessage }>
     label: "cx-4 prep review-A: 16 out (WAVE-4 observed ceiling 0-16)",
     fixture: degenerateFixture(16, 2877),
   },
+  {
+    // 10th degenerate (fix-wave finding 7): the MINIMUM-measurable-usage arm —
+    // 2 output tokens, ZERO reasoning, ZERO cache. Distinct from every wave-4
+    // signature (all carried heavy reasoning and/or amplified cache): the
+    // predicate fires on usage-presence alone. A text-part-present variant is
+    // NOT Tier-0 (degenerateReply requires an empty text part), so this — not
+    // the suggested text+reasoning shape — is the uncovered Tier-0 class.
+    label: "fix-wave: 2 out / 0 reasoning / zero cache (minimum-measurable usage — Tier-0 at ANY usage magnitude)",
+    fixture: {
+      info: {
+        tokens: { input: 61234, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+        cost: 0,
+      },
+      parts: [],
+    },
+  },
 ];
 
 describe("Tier-0 degenerate-turn detection (raw SDK shapes through the real extractors)", () => {
-  test("all nine degenerate no-text fixtures throw retryable OpencodePromptError", async () => {
-    expect(DEGENERATE_FIXTURES.length).toBe(9);
+  test("all ten degenerate no-text fixtures throw retryable OpencodePromptError", async () => {
+    expect(DEGENERATE_FIXTURES.length).toBe(10);
     for (const { label, fixture } of DEGENERATE_FIXTURES) {
       const h = harness(fixture);
       let caught: unknown;

@@ -899,10 +899,24 @@ async function diagnoseAmbiguousThrow(input: {
  */
 
 /** In-step verbatim-repeat memo (US-006 predicate arm c): the previous
- *  attempt's normalized reply per `<step>:<diffId>`, held in the step
- *  closure's process memory ONLY — zero durable substrate; cross-attempt
- *  replay is already cache-busted by the retry-prompt suffix. */
+ *  attempt's normalized reply per `<flowId>/<runId>:<step>:<diffId>`, held in
+ *  the step closure's process memory ONLY — zero durable substrate;
+ *  cross-attempt replay is already cache-busted by the retry-prompt suffix.
+ *  Fix-wave keying (reviewer finding 3): the key carries the flow/run
+ *  identity — keyed by step+diff alone, two flows reviewing the same
+ *  file+round cross-contaminated (a flow inherited another flow's pending
+ *  reply as its "prior attempt" -> false repair/tombstone). */
 const inStepVerdictTexts = new Map<string, string>();
+
+/** The in-step memo key for one review execution: flow/run + step + diff. */
+function inStepMemoKey(input: {
+  ctx: Context;
+  reviewerId: string;
+  stepId?: string;
+  diff: ReviewTurnDiff;
+}): string {
+  return `${input.ctx.flowId}/${input.ctx.runId}:${input.stepId ?? `pp-review-${input.reviewerId}`}:${input.diff.diffId}`;
+}
 
 /** Test seam: clears the in-step verbatim memo (per-test isolation). */
 export function resetInStepVerdictMemo(): void {
@@ -956,6 +970,32 @@ export async function runReviewTurn(input: {
   tokens: number | TokenUsage | null;
   turnDiagnosis: TurnDiagnosis | null;
 }> {
+  const result = await runReviewTurnOnce(input);
+  // Fix-wave memo hygiene (reviewer finding 3): the review execution ENDED
+  // (verdict or tombstone returned) — the memo entry existed only to serve
+  // throw-to-retry comparisons WITHIN this execution (a throwing attempt
+  // leaves it; dex's next attempt reads it). Clearing here keeps the
+  // process-global map bounded and guarantees a later execution — this
+  // flow's or another's — never inherits a settled execution's reply.
+  inStepVerdictTexts.delete(inStepMemoKey(input));
+  return result;
+}
+
+async function runReviewTurnOnce(input: {
+  ctx: Context;
+  reviewerId: string;
+  file: string;
+  round: number;
+  epoch: number;
+  diff: ReviewTurnDiff;
+  attempt?: number;
+  stepId?: string;
+  maxAttempts?: number;
+}): Promise<{
+  verdict: ReviewVerdict;
+  tokens: number | TokenUsage | null;
+  turnDiagnosis: TurnDiagnosis | null;
+}> {
   const harness = requireHarness();
   const label = fenceLabel(input.file, input.round, input.epoch);
   const session = await harness.createSession(label);
@@ -969,7 +1009,7 @@ export async function runReviewTurn(input: {
 
   const attemptNo = input.attempt ?? 1;
   const maxAttempts = Math.max(1, input.maxAttempts ?? REVIEW_STEP_MAX_ATTEMPTS);
-  const stepKey = `${input.stepId ?? `pp-review-${input.reviewerId}`}:${input.diff.diffId}`;
+  const stepKey = inStepMemoKey(input);
   // Tokens of THIS attempt's failed turn(s), reachable when the failure shape
   // exposed usage (Tier-0 degenerate throws carry it; parse/validation
   // failures had it in hand). null = nothing measurable to anchor.
@@ -1554,7 +1594,10 @@ const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
     if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
-    const { verdict, tokens } = await runReviewTurn({
+    // Fix-wave (reviewer finding 4): turnDiagnosis (US-003 successor-attempt
+    // re-record) is forwarded onto the step's completion envelope — it was
+    // destructured away here, so the envelope never carried it.
+    const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-A",
       file: fri.file,
@@ -1564,7 +1607,7 @@ const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
       attempt: ctx.attempt,
     });
     ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-A"), verdict);
-    return { output: fri, tokens };
+    return { output: fri, tokens, turnDiagnosis };
   },
   route: (_ctx, _input, fri) => goTo(ReviewBStart, fri),
 });
@@ -1587,7 +1630,8 @@ const ReviewBStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
     if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
-    const { verdict, tokens } = await runReviewTurn({
+    // Fix-wave (reviewer finding 4): forward the successor-attempt diagnosis.
+    const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-B",
       file: fri.file,
@@ -1597,7 +1641,7 @@ const ReviewBStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
       attempt: ctx.attempt,
     });
     ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-B"), verdict);
-    return { output: fri, tokens };
+    return { output: fri, tokens, turnDiagnosis };
   },
   route: (_ctx, _input, fri) => goTo(VerdictCheckStep, fri),
 });
@@ -2173,7 +2217,8 @@ const PrepReviewAStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const diff = ppPrepDiff.get(ctx, "diff");
     const state = ppPrepState.get(ctx, "state");
     if (diff === undefined || state === undefined) throw new Error("prep diff/state missing");
-    const { verdict, tokens } = await runReviewTurn({
+    // Fix-wave (reviewer finding 4): forward the successor-attempt diagnosis.
+    const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-A",
       file: PREP_SPEC_FILE,
@@ -2183,7 +2228,7 @@ const PrepReviewAStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
       attempt: ctx.attempt,
     });
     ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-A"), verdict);
-    return { output: input, tokens };
+    return { output: input, tokens, turnDiagnosis };
   },
   route: (_ctx, _input, input) => goTo(PrepReviewBStart, input),
 });
@@ -2208,7 +2253,8 @@ const PrepReviewBStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const diff = ppPrepDiff.get(ctx, "diff");
     const state = ppPrepState.get(ctx, "state");
     if (diff === undefined || state === undefined) throw new Error("prep diff/state missing");
-    const { verdict, tokens } = await runReviewTurn({
+    // Fix-wave (reviewer finding 4): forward the successor-attempt diagnosis.
+    const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-B",
       file: PREP_SPEC_FILE,
@@ -2218,7 +2264,7 @@ const PrepReviewBStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
       attempt: ctx.attempt,
     });
     ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-B"), verdict);
-    return { output: input, tokens };
+    return { output: input, tokens, turnDiagnosis };
   },
   route: (_ctx, _input, input) => goTo(PrepVerdictCheckStep, input),
 });
