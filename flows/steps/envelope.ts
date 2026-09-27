@@ -22,6 +22,7 @@
 
 import {
   AttributeMap,
+  DexServiceError,
   jsonCodec,
   StepList,
   Stream,
@@ -177,11 +178,29 @@ export function configureEnvelopeStreamPublisher(
 }
 
 /**
+ * US-007 (dex-sdk review, DRIFT S): the telemetry swallow is BOUNDED, not
+ * unconditional. A DexServiceError is the EXPECTED best-effort outage shape
+ * (stream store down, retention pressure) — swallowed silently per the
+ * US-002 contract. Any other failure is a defect (codec, definition,
+ * programming) and is logged sanitized (flowId/eventKey only, bounded
+ * detail) at warn so it stays visible — but still swallowed, because a
+ * telemetry mirror must never fail a durable step (US-002, test-asserted).
+ */
+function swallowPublishFailure(message: EnvelopeStreamMessage, err: unknown): void {
+  if (err instanceof DexServiceError) return;
+  const detail = err instanceof Error ? (err.message.split("\n")[0] ?? "") : String(err);
+  console.warn(
+    `[envelope-stream] non-service publish failure (durable write unaffected): flow=${message.flowId} event=${message.eventKey}${detail === "" ? "" : `: ${detail.slice(0, 200)}`}`,
+  );
+}
+
+/**
  * The ONLY stream-publish call site in the toolkit. Emits one envelope event
- * onto the telemetry stream. EVERY call is try/catch-swallowed (and the
- * runner-side publisher swallows its own rejections): a telemetry outage
- * (no publisher, unregistered stream, server unreachable) must NEVER fail a
- * durable step — asserted by tests/turn-health.test.ts.
+ * onto the telemetry stream. EVERY failure is bounded-swallowed (see
+ * {@link swallowPublishFailure}; the runner-side publisher reports its own
+ * rejections the same way): a telemetry outage (no publisher, unregistered
+ * stream, server unreachable) must NEVER fail a durable step — asserted by
+ * tests/turn-health.test.ts and tests/jev-wiring.test.ts.
  */
 function publishEnvelopeEvent(context: Context, eventKey: string, event: EnvelopeEvent): void {
   const emit = envelopeStreamPublisher;
@@ -193,14 +212,14 @@ function publishEnvelopeEvent(context: Context, eventKey: string, event: Envelop
     event,
   };
   try {
-    // Promise.resolve also covers sync returns; the .catch swallows ASYNC
-    // publisher failures so a rejected publish can never become an
-    // unhandled rejection (or a step failure).
-    void Promise.resolve(emit(message)).catch(() => {
-      // Swallowed deliberately: telemetry is best-effort (US-002 spec).
-    });
-  } catch {
-    // Swallowed deliberately: telemetry is best-effort (US-002 spec).
+    // Promise.resolve also covers sync returns; the .catch routes ASYNC
+    // publisher failures through the bounded swallow so a rejected publish
+    // can never become an unhandled rejection (or a step failure).
+    void Promise.resolve(emit(message)).catch((err: unknown) =>
+      swallowPublishFailure(message, err),
+    );
+  } catch (err) {
+    swallowPublishFailure(message, err);
   }
 }
 

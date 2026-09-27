@@ -308,6 +308,40 @@ export function burnDownFromUnknown(value: unknown): BurnDownSample | null {
   };
 }
 
+/**
+ * US-007 (Stage 2d): converts telemetry-STREAM messages into feed entries —
+ * the same mapping collectUpsert applies to durable envelope attributes, so
+ * a stream-delivered event and its polled counterpart are indistinguishable
+ * in /api/state (dedup happens on merge in buildDashboardState). Projection
+ * only: the stream is never a correctness source; this is a rendering feed.
+ */
+export function feedFromStreamMessages(
+  messages: readonly { flowId: string; event: unknown }[],
+): FeedEntry[] {
+  const entries: FeedEntry[] = [];
+  for (const message of messages) {
+    const parsed = parseEnvelope(message.event);
+    if (parsed === null) continue;
+    entries.push({
+      flowId: message.flowId,
+      ts: envelopeTs(parsed),
+      startedAt: parsed.started_at,
+      endedAt: parsed.ended_at,
+      stepId: parsed.stepId,
+      role: parsed.role,
+      file: parsed.file,
+      round: parsed.round,
+      attempt: parsed.attempt,
+      outcome: parsed.outcome,
+      tokens: parsed.tokens,
+      usage: parsed.usage,
+      wallClockMs: parsed.wall_clock_ms,
+      tokensRequired: parsed.tokensRequired,
+    });
+  }
+  return entries;
+}
+
 // ---------------------------------------------------------------------------
 // Queue state shape (pp-queue/queue durable attribute)
 // ---------------------------------------------------------------------------
@@ -748,6 +782,13 @@ export interface DashboardInput {
     events: readonly NormalizedKillEvent[];
   };
   burnDownFiles: readonly BurnDownSample[];
+  /**
+   * US-007 (Stage 2d): events delivered by the ReadStream subscriber
+   * (port/<flowId>/events), merged into the feed with the same dedup as the
+   * state fallback. Absent/empty = subscriber not running (poll fallback).
+   * Projection-only: this field feeds RENDERING; nothing else consumes it.
+   */
+  streamFeed?: readonly { flowId: string; event: unknown }[];
   feedLimit: number;
   commitLimit: number;
 }
@@ -907,6 +948,22 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     }
     feedByFlow.set(flowId, flowFeed);
     feed.push(...flowFeed);
+  }
+  // US-007: merge stream-delivered events (subscriber receipt) into the feed.
+  // Same dedup key as the state-fallback merge so an event that BOTH the
+  // stream and a poll delivered appears once; events for flows outside the
+  // selection still render (their flowId rides the entry).
+  if (input.streamFeed !== undefined && input.streamFeed.length > 0) {
+    const streamEntries = feedFromStreamMessages(input.streamFeed);
+    const seenStream = new Set(feed.map((e) => `${e.flowId}#${e.stepId}#${e.attempt}#${e.startedAt}`));
+    for (const entry of streamEntries) {
+      const key = `${entry.flowId}#${entry.stepId}#${entry.attempt}#${entry.startedAt}`;
+      if (!seenStream.has(key)) {
+        feed.push(entry);
+        seenStream.add(key);
+        feedByFlow.get(entry.flowId)?.push(entry);
+      }
+    }
   }
   feed.sort((a, b) => tsMs(b.ts) - tsMs(a.ts));
   const feedCapped = feed.slice(0, Math.max(0, input.feedLimit));

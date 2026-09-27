@@ -335,3 +335,21 @@ export interface DashboardStateView {
   /** US-006: rounds whose every reviewer verdict is a tombstone. */
   degradedRounds: DegradedRoundView[];
 }
+
+/**
+ * US-007: one message on the envelope telemetry stream (`port/<flowId>/events`).
+ * Structural mirror of flows/steps/envelope.ts EnvelopeStreamMessage — the
+ * dashboard deliberately does not import flow modules (same rationale as the
+ * ParsedEnvelope duplication note in state.ts). `event` is shape-checked by
+ * parseEnvelope downstream, never cast.
+ */
+export interface StreamEventMessage {
+  /** Topic: `port/<flowId>/events` (self-describing for stream consumers). */
+  topic: string;
+  /** Flow instance ID the event belongs to (the originating dex flow). */
+  flowId: string;
+  /** The durable envelope-event attribute key this message mirrors. */
+  eventKey: string;
+  /** The mirrored envelope event (same payload as the durable write). */
+  event: unknown;
+}

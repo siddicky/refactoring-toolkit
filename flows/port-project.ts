@@ -517,15 +517,22 @@ function bindLeaseStore(ctx: Context, map: AttributeMap<Record<string, LeaseReco
 }
 
 // ---------------------------------------------------------------------------
-/** LIVE Jev client (only when TYPESAFE_API_KEY is present); else naive. */
-let PORT_JEV_LIVE: JudgmentClient | undefined;
-
-export function configurePortJevLive(client: JudgmentClient): void {
-  PORT_JEV_LIVE = client;
-}
-
-export function portJevLiveClient(): JudgmentClient | undefined {
-  return PORT_JEV_LIVE;
+/**
+ * The LIVE Jev client when a REAL (billed) client is wired through the
+ * runtime-hooks seam; `undefined` → every consumer below (verdict-check,
+ * prioritize, vitest triage) runs its deterministic naive default.
+ *
+ * dex-sdk review fix (DRIFT S, silent naive fallback): this used to be a
+ * SECOND module global (`PORT_JEV_LIVE` + configurePortJevLive) that was
+ * NEVER called by the worker — a keyed worker silently ran naive here while
+ * its startup log claimed "Jev: REAL client". There is deliberately no
+ * second seam anymore: the single resolution point is what the worker
+ * configures via configurePortJudgment (scripts/run-demo.ts resolveJudgment).
+ */
+export function liveJevClient(): JudgmentClient | undefined {
+  // portJevLive() is false when nothing is configured, so requirePortJudgment
+  // cannot throw on this path (tests without a worker keep the naive default).
+  return portJevLive() ? requirePortJudgment() : undefined;
 }
 
 /** Accumulated LIVE Jev usage (evidence stream; naive path adds nothing). */
@@ -1488,7 +1495,7 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
       // createCitationChecker seam), else the naive code-only default. A
       // finding survives iff its cited evidence appears in the reviewed diff
       // (p_cited === 1) and its disposition asks for a fix.
-      const jevClient = portJevLive() ? PORT_JEV_LIVE : undefined;
+      const jevClient = liveJevClient();
       let citations;
       if (jevClient !== undefined) {
         let jt = 0;
@@ -1549,7 +1556,7 @@ const PrioritizeStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<File
     const kept = ppKept.get(ctx, keptKeyOf(fri.file, fri.round));
     if (kept === undefined) throw new Error(`kept findings missing for ${fri.file}#${fri.round}`);
     let ordered = kept.findings;
-    const jevClient = portJevLive() ? PORT_JEV_LIVE : undefined;
+    const jevClient = liveJevClient();
     if (jevClient !== undefined && ordered.length > 0) {
       let jt = 0;
       const counting: JudgmentClient = {
@@ -2334,7 +2341,7 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
       }
     }
     const jevUsageSink: number[] = [];
-    const vitestState = await classifyVitestRecords(vitestRecords, iteration, portJevLiveClient(), {
+    const vitestState = await classifyVitestRecords(vitestRecords, iteration, liveJevClient(), {
       onUsage: (tokens) => {
         jevUsageSink.push(tokens);
       },

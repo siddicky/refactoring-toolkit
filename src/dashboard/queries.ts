@@ -9,6 +9,10 @@
  * requires a Registry of Flow classes (importing flows/ couples this module to
  * concurrently-edited flow code) and a writable blob cache. The CLI JSON
  * surface is the same one proven for the 0(h) dispatch-log exit (BUILD_NOTES).
+ * US-007 adds the ONE read-side stream exception: the envelope telemetry
+ * subscriber takes an INJECTED structural readStream (the SDK composition
+ * lives in scripts/serve-status.ts) — this module itself stays SDK-free and
+ * the stream stays projection-only (never a correctness source).
  *
  * Each query returns a Result so the server can mark a source unavailable and
  * keep rendering the rest — never crash.
@@ -26,6 +30,7 @@ import type {
   GitCommitRow,
   GitWorktreeRow,
   NormalizedKillEvent,
+  StreamEventMessage,
 } from "./types.js";
 
 const execFileP = promisify(execFile);
@@ -417,4 +422,163 @@ export async function readBurnDownSources(paths: readonly string[]): Promise<Bur
     }),
   );
   return samples;
+}
+
+// ---------------------------------------------------------------------------
+// envelope telemetry stream subscriber (US-007)
+// ---------------------------------------------------------------------------
+
+/**
+ * READ-SIDE of the envelope telemetry stream (US-007, Stage 2d). The durable
+ * envelope-event attribute stays the ONLY source of truth; this subscriber is
+ * a live projection that replaces dexcli subprocess polling when it works.
+ * Projection-only: no correctness path ever reads a stream (asserted by the
+ * import/usage boundary test in tests/dashboard-stream.test.ts).
+ *
+ * The dex seam stays injected and structural (same rationale as the dexcli
+ * seam above): the caller composes the real reader over an SDK Client's
+ * `readStream` (see scripts/serve-status.ts); tests inject doubles. The SDK's
+ * wake-up vs failure distinction is made on the stable `ErrorSubStatus`
+ * classification ("longPollTimeout"), never on human-readable text.
+ */
+
+/** One decoded stream read: the message plus the resumable token. */
+export interface StreamRead {
+  value: StreamEventMessage;
+  resumeToken: string;
+}
+
+/**
+ * Structural readStream: resolves the NEXT retained message after
+ * `resumeToken`, long-polling up to `timeoutMs`. Throws when the read fails.
+ */
+export type EnvelopeStreamReader = (
+  flowId: string,
+  resumeToken: string,
+  timeoutMs: number,
+) => Promise<StreamRead>;
+
+/** Per-flow subscriber mode: live stream, or poll fallback after a failure. */
+export type SubscriberMode = "stream" | "poll-fallback";
+
+export interface EnvelopeStreamSubscriber {
+  /** Follow the given flow ids (starts loops; stops loops for removed ids). */
+  follow(flowIds: readonly string[]): void;
+  /** Buffered stream events for one flow, in arrival order (bounded). */
+  recentEvents(flowId: string): StreamEventMessage[];
+  /** Current mode of one flow's source ("poll-fallback" once it has failed). */
+  mode(flowId: string): SubscriberMode;
+  /** Count of buffered events per flow (render/test convenience). */
+  size(flowId: string): number;
+  /** Stops every loop; the buffered events remain readable. */
+  stop(): void;
+}
+
+export interface EnvelopeStreamSubscriberOptions {
+  /** Injected structural readStream (SDK Client method or test double). */
+  read: EnvelopeStreamReader;
+  /** Server-side long-poll duration per read. Default 25 s. */
+  longPollMs?: number;
+  /** Per-flow ring-buffer cap (oldest dropped). Default 200. */
+  bufferLimit?: number;
+  /** Called ONCE per flow when the stream fails and poll fallback engages. */
+  onFallback?: (flowId: string, error: string) => void;
+  /** Called after each message lands in the buffer (observability/tests). */
+  onEvent?: (message: StreamEventMessage) => void;
+}
+
+/**
+ * True when a read failure is the EXPECTED long-poll wake-up (nothing
+ * arrived within the poll window): the loop continues. Stable subStatus
+ * classification only — the SDK never needs to be imported here.
+ */
+function isLongPollWakeUp(err: unknown): boolean {
+  return (err as { subStatus?: unknown } | null)?.subStatus === "longPollTimeout";
+}
+
+function describeStreamError(err: unknown): string {
+  if (err instanceof Error) {
+    const msg = err.message.split("\n")[0] ?? err.message;
+    return msg.length > 200 ? `${msg.slice(0, 200)}...` : msg;
+  }
+  return String(err);
+}
+
+/**
+ * Starts a ReadStream-based event source for `port/<flowId>/events` — one
+ * long-poll loop per followed flow with resumable tokens. ANY non-wake-up
+ * read failure (server down, unregistered stream, decode defect) flips that
+ * flow to `poll-fallback`, notifies `onFallback` once, and ENDS the loop:
+ * the retained dexcli polling path keeps serving the feed (ENGAGED fallback
+ * — asserted by tests), and the buffered events stay available.
+ */
+export function startEnvelopeStreamSubscriber(
+  options: EnvelopeStreamSubscriberOptions,
+): EnvelopeStreamSubscriber {
+  const read = options.read;
+  const longPollMs = options.longPollMs ?? 25_000;
+  const bufferLimit = Math.max(1, options.bufferLimit ?? 200);
+
+  interface LoopState {
+    token: string;
+    buffer: StreamEventMessage[];
+    mode: SubscriberMode;
+    active: boolean;
+    seq: number; // guards stale loops after follow()/stop() races
+  }
+  const loops = new Map<string, LoopState>();
+
+  function loop(flowId: string, state: LoopState): void {
+    const seq = state.seq;
+    void (async () => {
+      while (state.active && state.seq === seq) {
+        try {
+          const res = await read(flowId, state.token, longPollMs);
+          if (!state.active || state.seq !== seq) return;
+          state.token = res.resumeToken;
+          state.buffer.push(res.value);
+          if (state.buffer.length > bufferLimit) state.buffer.shift();
+          options.onEvent?.(res.value);
+        } catch (err) {
+          if (!state.active || state.seq !== seq) return;
+          if (isLongPollWakeUp(err)) continue; // nothing new within the window
+          // REAL failure: engage the poll fallback for this flow and stop.
+          state.mode = "poll-fallback";
+          state.active = false;
+          options.onFallback?.(flowId, describeStreamError(err));
+          return;
+        }
+      }
+    })();
+  }
+
+  return {
+    follow(flowIds) {
+      const wanted = new Set(flowIds);
+      for (const [flowId, state] of loops) {
+        if (!wanted.has(flowId)) {
+          state.active = false;
+          loops.delete(flowId);
+        }
+      }
+      for (const flowId of flowIds) {
+        if (loops.has(flowId)) continue;
+        const state: LoopState = { token: "", buffer: [], mode: "stream", active: true, seq: 0 };
+        loops.set(flowId, state);
+        loop(flowId, state);
+      }
+    },
+    recentEvents(flowId) {
+      return [...(loops.get(flowId)?.buffer ?? [])];
+    },
+    mode(flowId) {
+      return loops.get(flowId)?.mode ?? "poll-fallback";
+    },
+    size(flowId) {
+      return loops.get(flowId)?.buffer.length ?? 0;
+    },
+    stop() {
+      for (const state of loops.values()) state.active = false;
+    },
+  };
 }

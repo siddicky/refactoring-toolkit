@@ -34,6 +34,8 @@ import {
   openDexClient,
   startDexWorker,
 } from "../src/dex/client.js";
+import { waitForFlowTerminal } from "../src/dex/wait-for-terminal.js";
+import { DexServiceError } from "@superdurable/dex";
 import {
   OpencodeHarness,
   type AgentSessionClient,
@@ -73,7 +75,7 @@ import { createOfflineJevClient } from "../src/harness/runtime.js";
 import { createRealJevClient, isTypesafeOffline } from "../src/typesafe/client.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
 import { createTurnHealthAssessor } from "../src/typesafe/turn-health.js";
-import { dexCliQueries } from "../src/dashboard/queries.js";
+import { dexCliQueries, describeError } from "../src/dashboard/queries.js";
 import {
   evaluateDispatchGate,
   gateLine,
@@ -438,29 +440,11 @@ async function resolveJudgment(): Promise<JudgmentClient> {
 }
 
 /**
- * Robust flow wait: dex's waitForFlow long-poll times out periodically, so
- * poll until the flow reaches a terminal state or the deadline passes.
+ * Robust flow wait moved to src/dex/wait-for-terminal.ts (US-007: the
+ * transient classification is TYPED there — LongPollTimeoutError /
+ * DexServiceError UNAVAILABLE — replacing the old human-readable text
+ * matching flagged by the dex-sdk review, area 1.6).
  */
-async function waitForFlowTerminal(
-  runtime: { client: { waitForFlow(flowId: string): Promise<unknown> } },
-  flowId: string,
-  deadlineMs: number,
-): Promise<unknown> {
-  const deadline = Date.now() + deadlineMs;
-  for (;;) {
-    try {
-      return await runtime.client.waitForFlow(flowId);
-    } catch (err) {
-      const e = err as { detail?: string; subStatus?: string; message?: string };
-      const transient =
-        e.subStatus === "longPollTimeout" ||
-        (e.detail ?? "").includes("waiting exceeded the timeout") ||
-        (e.message ?? "").includes("14 UNAVAILABLE");
-      if (!transient || Date.now() > deadline) throw err;
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-  }
-}
 
 async function startDemo(): Promise<number> {
   const config = dexConfigFromEnv();
@@ -637,7 +621,8 @@ async function main(): Promise<number> {
       const harness = await pickHarness(argValue("--harness"));
       const flows = argValue("--flows") === "port" ? portFlows(harness) : probeFlows();
       configureProbe(harness, fault);
-      configurePortJudgment(await resolveJudgment());
+      const judgment = await resolveJudgment();
+      configurePortJudgment(judgment);
       configurePortFault(process.env.PORTING_KIT_FAULT);
       // US-003 Tier-1 turn-health (evidence-only, fail-open): a real client
       // when TYPESAFE_API_KEY is present, the scripted in-memory double under
@@ -650,13 +635,33 @@ async function main(): Promise<number> {
           ? "[worker] turn-health: Tier-1 unavailable — ambiguous turns run with no diagnosis (fail-open)"
           : "[worker] turn-health: Tier-1 assessor configured (evidence-only; control flow never reads it)",
       );
+      // US-007 (dex-sdk review, vertical-slice wiring fix): ONE loud startup
+      // line stating which judgment lane is active. The lane rides the client
+      // resolveJudgment configured above; flows/port-project.ts liveJevClient()
+      // resolves every consumer (verdict-check, prioritize, vitest triage)
+      // from that SAME seam — the old never-called configurePortJevLive
+      // second seam is gone, so the log can no longer claim REAL while the
+      // steps silently run naive.
+      console.log(
+        `[worker] JUDGMENT LANE: ${judgment.kind === "real" ? "LIVE JEV" : "NAIVE"} — verdict-check/prioritize/vitest-triage consume ${judgment.kind === "real" ? "the real billed client" : "deterministic naive defaults (no Jev calls)"}`,
+      );
       const handle = await startDexWorker(flows, config);
       // US-002 stream publish (runner-side deviation, see envelope.ts): the
       // worker process mirrors every durable envelope write onto the dex
-      // Stream via Client.writeStream. Both sync (hook) and async (.catch)
-      // failures are swallowed — telemetry never reaches the durable path.
+      // Stream via Client.writeStream. US-007 (dex-sdk review, DRIFT S):
+      // the swallow is BOUNDED — a DexServiceError is the expected
+      // best-effort telemetry outage (silent, per contract); anything else
+      // is a defect (codec/definition/programming) and is logged sanitized
+      // at warn. Telemetry NEVER reaches the durable path either way.
       configureEnvelopeStreamPublisher((msg) => {
-        void handle.client.writeStream(msg.flowId, envelopeStream, "envelope", msg).catch(() => {});
+        void handle.client
+          .writeStream(msg.flowId, envelopeStream, "envelope", msg)
+          .catch((err: unknown) => {
+            if (err instanceof DexServiceError) return;
+            console.warn(
+              `[worker] stream publish failed (non-service; telemetry only): flow=${msg.flowId} event=${msg.eventKey}: ${describeError(err)}`,
+            );
+          });
       });
       console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${argValue("--harness") ?? "auto"} flows=${argValue("--flows") ?? "probe"}`);
       await new Promise(() => {}); // run until killed

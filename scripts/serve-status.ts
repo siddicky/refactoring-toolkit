@@ -5,11 +5,14 @@
  *   GET /           static page (src/dashboard/static/index.html, inline CSS/JS)
  *   GET /api/state  aggregated JSON snapshot (dex + git + kill events)
  *
- * dex is queried ONLY through the dexcli CLI (`flow search/state/history`,
- * JSON output) — never startFlow, never a blob cache. Git queries are plain
- * `git log --all` / `git worktree list` against STATUS_REPO_ROOT. Every source
- * failure degrades that section to an "unavailable" state; the server itself
- * never crashes on missing data.
+ * dex is queried through the dexcli CLI (`flow search/state/history`, JSON
+ * output) — never startFlow, never a flow-mutating call. US-007 adds one
+ * read-side stream exception: an SDK Client over a port.Project-only registry
+ * feeds the envelope telemetry subscriber (STATUS_STREAM_SUBSCRIBE=0 opts
+ * out); the stream stays projection-only and dexcli polling remains the
+ * fallback. Git queries are plain `git log --all` / `git worktree list`
+ * against STATUS_REPO_ROOT. Every source failure degrades that section to an
+ * "unavailable" state; the server itself never crashes on missing data.
  *
  * Launch:
  *   bun run scripts/serve-status.ts
@@ -34,9 +37,15 @@ import {
   gitQueries,
   readBurnDownSources,
   readKillEventSources,
+  startEnvelopeStreamSubscriber,
   type DexQueries,
+  type EnvelopeStreamSubscriber,
   type GitQueries,
 } from "../src/dashboard/queries.js";
+import type { StreamEventMessage } from "../src/dashboard/types.js";
+import { openDexClient, dexConfigFromEnv } from "../src/dex/client.js";
+import { envelopeStream } from "../flows/steps/envelope.js";
+import { PortProjectFlow } from "../flows/port-project.js";
 import { buildDashboardState } from "../src/dashboard/state.js";
 import type {
   DashboardStateView,
@@ -159,6 +168,7 @@ async function snapshot(
   cfg: StatusConfig,
   dex: DexQueries,
   git: GitQueries,
+  stream: EnvelopeStreamSubscriber | null,
 ): Promise<DashboardStateView> {
   const search = await dex.searchFlows();
   let flows: DexFlowSummaryWire[] = [];
@@ -173,6 +183,14 @@ async function snapshot(
   const selected = [...flows]
     .sort((a, b) => Date.parse(b.startTime ?? "") - Date.parse(a.startTime ?? "") || a.flowId.localeCompare(b.flowId))
     .slice(0, Math.max(1, cfg.maxFlows));
+
+  // US-007: follow the selection with the stream subscriber; its buffered
+  // events merge into the feed (projection-only; poll remains the fallback
+  // once a flow's stream loop has failed — mode() flips to poll-fallback).
+  stream?.follow(selected.map((f) => f.flowId));
+  const streamFeed: StreamEventMessage[] = stream
+    ? selected.flatMap((f) => stream.recentEvents(f.flowId))
+    : [];
 
   const stateEntries = await Promise.all(
     selected.map(async (f) => [f.flowId, await flowStateCached(dex, f.flowId)] as const),
@@ -213,8 +231,7 @@ async function snapshot(
   const gitAvailable = gitPair.commits.ok || gitPair.worktrees.ok;
   const gitError = gitPair.commits.ok
     ? (gitPair.worktrees.ok ? null : gitPair.worktrees.error)
-    : gitPair.commits.error;
-  const killAvailable = killRes.scanned.length > 0 && killRes.errors.length === 0;
+    : gitPair.commits.error;  const killAvailable = killRes.scanned.length > 0 && killRes.errors.length === 0;
   const killError = killRes.errors.length > 0
     ? killRes.errors.map((e) => `${e.path}: ${e.error}`).join("; ")
     : killRes.scanned.length === 0
@@ -245,6 +262,7 @@ async function snapshot(
       events: killRes.events,
     },
     burnDownFiles: burnRes,
+    streamFeed,
     feedLimit: cfg.feedLimit,
     commitLimit: cfg.commitLimit,
   });
@@ -279,9 +297,10 @@ async function handleState(
   cfg: StatusConfig,
   dex: DexQueries,
   git: GitQueries,
+  stream: EnvelopeStreamSubscriber | null,
 ): Promise<void> {
   try {
-    const state = await snapshot(cfg, dex, git);
+    const state = await snapshot(cfg, dex, git, stream);
     res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
     res.end(JSON.stringify(state));
   } catch (e) {
@@ -297,6 +316,37 @@ export function main(): void {
   const dex = dexCliQueries({ bin: cfg.dexcliBin, server: cfg.dexServer, timeoutMs: 15_000 });
   const git = gitQueries("git");
 
+  // US-007 (Stage 2d): ReadStream event source for port/<flowId>/events.
+  // The read-side client registers EXACTLY the flow type that owns the
+  // envelope stream (port.Project — one-flow stream ownership) and uses its
+  // OWN blob-cache directory (per-process sharing is the guidance). Fail-open:
+  // when the client cannot open, the dashboard runs on dexcli polling alone
+  // (the poll fallback that stays ENGAGED on any subscriber failure anyway).
+  let stream: EnvelopeStreamSubscriber | null = null;
+  if (process.env.STATUS_STREAM_SUBSCRIBE !== "0") {
+    void (async () => {
+      try {
+        const config = {
+          ...dexConfigFromEnv(),
+          blobCacheDir: process.env.DEX_BLOB_CACHE_DIR?.trim() || ".dex-cache-dashboard",
+        };
+        const runtime = await openDexClient([new PortProjectFlow()], config);
+        stream = startEnvelopeStreamSubscriber({
+          read: (flowId, resumeToken, timeoutMs) =>
+            runtime.client.readStream(flowId, envelopeStream, resumeToken, timeoutMs),
+          onFallback: (flowId, error) => {
+            console.warn(`[serve-status] stream fallback ENGAGED for ${flowId}: ${error} (dexcli polling continues)`);
+          },
+        });
+        console.log("[serve-status] stream subscriber: up (port/<flowId>/events live feed)");
+      } catch (err) {
+        console.warn(
+          `[serve-status] stream subscriber unavailable (${(err as Error).message}) — dexcli polling only`,
+        );
+      }
+    })();
+  }
+
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = (req.url ?? "/").split("?")[0] ?? "/";
     if (url === "/" || url === "/index.html") {
@@ -304,7 +354,7 @@ export function main(): void {
       return;
     }
     if (url === "/api/state") {
-      void handleState(res, cfg, dex, git);
+      void handleState(res, cfg, dex, git, stream);
       return;
     }
     res.writeHead(404, { "content-type": "text/plain" });
@@ -321,6 +371,7 @@ export function main(): void {
     );
   });
   const shutdown = () => {
+    stream?.stop();
     server.close(() => process.exit(0));
     // Hard stop if a connection lingers.
     setTimeout(() => process.exit(0), 1_500).unref();

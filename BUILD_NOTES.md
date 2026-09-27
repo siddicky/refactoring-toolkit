@@ -776,3 +776,85 @@ Full php-sample run incl. the AC1 kill at seed scale. Cost shape from cx-5e:
 reviewer luna ~920k incl. heavy cache-read + fix rounds), ~90 min wall clock.
 php-sample is the 2-file seed (~40% of that). The reviewer lane is stable;
 the parallel topology is now live-proven end-to-end. Awaiting user go/no-go.
+
+# Stage 2d — US-007 (2026-09-27): stream consumers + Jev live wiring + typed errors
+
+## 1. Jev live wiring fix (dex-sdk review DRIFT S — silent naive fallback)
+
+- `configurePortJevLive`/`PORT_JEV_LIVE`/`portJevLiveClient` (flows/port-project.ts) were
+  NEVER called by the worker: a `TYPESAFE_API_KEY` worker ran verdict-check, prioritize,
+  AND vitest triage on the naive default while the startup log claimed "Jev: REAL client".
+- Fix: the second seam is DELETED. `liveJevClient()` (exported, flows/port-project.ts)
+  resolves all three consumption sites from the ONE runtime-hooks seam the worker
+  configures via `configurePortJudgment(await resolveJudgment())`
+  (scripts/run-demo.ts worker case). `portJevLive() ? requirePortJudgment() : undefined`
+  — false when unset, so the naive path can never throw on unconfigured workers.
+- One loud startup line added: `[worker] JUDGMENT LANE: LIVE JEV|NAIVE —
+  verdict-check/prioritize/vitest-triage consume ...`. The log can no longer diverge
+  from the actual lane: both derive from the same client.
+- Tests (tests/jev-wiring.test.ts): real-kind client -> SAME instance reachable at the
+  consumption sites; in-memory client -> naive, no crash; unconfigured -> naive, no
+  crash; source-level assertion of exactly 3 consumption sites + dead-seam absence.
+  End-to-end proof fell out of the suite run: the wiring test's real-kind client LEAKED
+  through the seam into verdict-repair.test.ts steps in the shared process (verdict-check
+  took the Jev route) until an afterEach reset was added — the drift is gone; the seam
+  is live.
+
+## 2. Stream consumers (Stage 2d)
+
+- Dashboard subscriber (src/dashboard/queries.ts): `startEnvelopeStreamSubscriber` —
+  one long-poll `readStream` loop per followed flow over `port/<flowId>/events` with
+  resumable tokens; structural injected reader (the module stays SDK-free); the
+  long-poll wake-up is classified by the stable `subStatus === "longPollTimeout"`, never
+  by text. ANY other failure flips that flow to `poll-fallback`, fires `onFallback`
+  once, and ENDS the loop — the dexcli poll path stays ENGAGED (log line in serve-status).
+  Per-flow ring buffer (default 200). serve-status.ts composes the real reader over a
+  Client whose registry registers EXACTLY the stream-owning flow type (port.Project) in
+  its OWN blob-cache dir (`.dex-cache-dashboard`); `STATUS_STREAM_SUBSCRIBE=0` opts out;
+  client-open failure degrades to poll-only.
+- Feed merge (src/dashboard/state.ts): `feedFromStreamMessages` + `DashboardInput.streamFeed`
+  — stream-delivered events land in the /api/state feed with the SAME dedup key as the
+  state fallback (a stream event and its polled twin render once). StreamEventMessage is
+  a structural mirror in src/dashboard/types.ts (the dashboard still imports no flow module).
+- Kill watcher: `src/watcher/queue-verify-watcher.ts` (pure, all-I/O injected) +
+  `scripts/watch-queue-verify.ts` (CLI). PRIMARY source = stream subscription for the
+  pp-queue-verify START envelope (stepId `pp-queue-verify`, `ended_at === null` — the
+  factory publishes it the moment the step begins, before any durable attribute could
+  exist); 60 s dexcli poll fallback (ACTIVE `PpQueueVerify` step execution, the old shell
+  predicate); bounded 30 min; fires EXACTLY ONCE (guard + immediate clean exit via
+  chaos-kill sidecar); terminal COMPLETED/FAILED before trigger exits cleanly — the r1
+  review's non-exiting terminal branch is fixed by construction. Exit codes: 0 fired,
+  1 terminal, 2 timeout. The /tmp shell watchers (watch-ac1-parallel.sh,
+  watch-queuefix-kill.sh) are superseded; kill only — resume stays the operator procedure.
+- Projection-only boundary (tests/dashboard-stream.test.ts): flows/, src/git/, src/queues/
+  contain NO `readStream|listStreamMessages`; readStream appears only in the projection
+  layer (src/dashboard/queries.ts structural, scripts/serve-status.ts, scripts/watch-queue-verify.ts);
+  the watcher core takes an injected source and never touches the SDK.
+
+## 3. Typed errors + bounded telemetry swallow (dex-sdk review DRIFT S)
+
+- `waitForFlowTerminal` moved to src/dex/wait-for-terminal.ts; transient classification
+  is TYPED: `instanceof LongPollTimeoutError` (documented throw of waitForFlow, verified
+  against installed 0.12.1 declarations) or `DexServiceError` with gRPC
+  `status.UNAVAILABLE`. All human-readable text matching removed ("waiting exceeded the
+  timeout", "14 UNAVAILABLE"). Non-transient errors rethrow immediately; deadline passes
+  -> last error thrown. `retryDelayMs` injectable (tests), default 2 s.
+- Telemetry swallow BOUNDED (flows/steps/envelope.ts `swallowPublishFailure` +
+  scripts/run-demo.ts worker publisher): `DexServiceError` = expected best-effort outage,
+  swallowed silently per the US-002 contract; anything else = defect, logged sanitized
+  (flowId/eventKey + first line of detail, 200-char bound) at warn. Still swallowed
+  either way — a telemetry mirror never fails a durable step (US-002 tests re-verified).
+
+## Verification (fresh)
+
+- `bun run typecheck` clean; `bun test` 304/0 (268 baseline + 36 new:
+  9 wiring/swallow, 11 dashboard-stream/AC-D/boundary, 9 watcher, 7 typed-wait).
+- AC-D unit-level end-to-end: stream message -> subscriber buffer -> `feedFromStreamMessages`
+  -> `buildDashboardState` payload `.feed` (rendered JSON-identical) — asserted; forced
+  stream failure -> mode `poll-fallback` + `onFallback` once + loop ended — asserted.
+- Watcher: exactly-once (stream, duplicate stream, poll echo), poll fallback after stream
+  failure, bounded timeout, terminal clean exit (the r1 fix), non-start events ignored.
+- LIVE observation (dashboard rendering from the subscriber during a real run with >=1
+  subscription-delivered event; poll fallback demonstrated on forced failure in a live
+  server) remains for the US-009 final-code presentation run, consistent with the
+  US-002/US-003 amendment pattern (single live-validation gate).
