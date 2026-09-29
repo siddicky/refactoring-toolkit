@@ -57,10 +57,13 @@
   .capture-modal{width:min(1400px,96vw);max-width:96vw;max-height:94vh;padding:0;border:1px solid var(--line);background:var(--base);color:var(--cloud)}
   .capture-modal::backdrop{background:rgba(2,6,13,.88)}
   .capture-modal-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:8px 12px 8px 18px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+  .capture-modal-actions{display:flex;align-items:center;gap:8px}
+  .capture-modal-zoom{height:38px;padding:0 12px;border:1px solid var(--line);background:var(--raised);color:var(--cloud);font:inherit;letter-spacing:inherit;text-transform:inherit;cursor:pointer}
   .capture-modal-close{flex:none;width:38px;height:38px;border:1px solid var(--line);background:var(--raised);color:var(--cloud);font-size:26px;line-height:1;cursor:pointer}
-  .capture-modal-close:hover,.capture-modal-close:focus-visible{border-color:var(--green);color:var(--green)}
+  .capture-modal-zoom:hover,.capture-modal-zoom:focus-visible,.capture-modal-close:hover,.capture-modal-close:focus-visible{border-color:var(--green);color:var(--green)}
   .capture-modal-body{max-height:calc(94vh - 56px);overflow:auto}
-  .capture-modal-body img{display:block;width:auto;max-width:none;height:auto}
+  .capture-modal-body img{display:block;width:auto;max-width:100%;height:auto;max-height:calc(94vh - 56px);margin:auto}
+  .capture-modal.magnified .capture-modal-body img{max-width:none;max-height:none;margin:0}
   .dashboard-capture figcaption{padding:12px 14px;border-top:1px solid var(--line);font-size:15px;line-height:1.65;color:var(--steel)}
   .dashboard-capture figcaption strong{color:var(--cloud);font-weight:500}
   .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
@@ -1520,7 +1523,10 @@
 <dialog class="capture-modal" id="capture-modal" aria-labelledby="capture-modal-title">
   <div class="capture-modal-header">
     <span id="capture-modal-title"></span>
-    <button type="button" class="capture-modal-close" aria-label="Close full-resolution image">×</button>
+    <div class="capture-modal-actions">
+      <button type="button" class="capture-modal-zoom" aria-pressed="false">Magnify</button>
+      <button type="button" class="capture-modal-close" aria-label="Close image">×</button>
+    </div>
   </div>
   <div class="capture-modal-body"><img id="capture-modal-image" alt=""></div>
 </dialog>
@@ -2246,6 +2252,8 @@ function setupCaptureModal() {
   const modal = document.getElementById('capture-modal');
   const modalImage = document.getElementById('capture-modal-image');
   const modalTitle = document.getElementById('capture-modal-title');
+  const zoomButton = modal.querySelector('.capture-modal-zoom');
+  const modalBody = modal.querySelector('.capture-modal-body');
   let opener;
 
   document.querySelectorAll('.dashboard-capture .capture-link').forEach(button => {
@@ -2254,11 +2262,20 @@ function setupCaptureModal() {
       modalImage.src = image.src;
       modalImage.alt = image.alt;
       modalTitle.textContent = button.closest('figure').querySelector('.bar span').textContent;
+      modal.classList.remove('magnified');
+      zoomButton.setAttribute('aria-pressed', 'false');
+      zoomButton.textContent = 'Magnify';
       opener = button;
       modal.showModal();
     });
   });
 
+  zoomButton.addEventListener('click', () => {
+    const magnified = modal.classList.toggle('magnified');
+    zoomButton.setAttribute('aria-pressed', String(magnified));
+    zoomButton.textContent = magnified ? 'Fit to screen' : 'Magnify';
+    modalBody.scrollTo(0, 0);
+  });
   modal.querySelector('.capture-modal-close').addEventListener('click', () => modal.close());
   modal.addEventListener('click', event => {
     if (event.target === modal) modal.close();

@@ -15,6 +15,7 @@ Reference: the user's existing presentation at `https://delvee.siddicky.ca/`, in
 - Hero: outlined label, two-line regular-weight headline with lime phrase, paragraph, two actions, then an illustrative workflow panel.
 - The page continues with context, architecture, workflow, recovery, evidence, dashboard, fit, and discussion sections.
 - The workflow simulation, scenario controls, code comparison, and evidence drawer are real DOM interactions.
+- Dashboard captures open in a dialog fitted to the viewport. A compact panel control switches to native pixels for scrolling, and the adjacent X closes the dialog.
 - At narrow widths, navigation and grids adapt to the reference page's media queries. Links and controls retain visible focus states.
 
 ## Evidence boundary
