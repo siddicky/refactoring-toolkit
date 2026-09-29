@@ -51,9 +51,16 @@
   .dashboard-capture{margin:24px 0;max-width:850px}
   .dashboard-capture.queue-capture{max-width:640px}
   .dashboard-capture.activity-capture{max-width:none}
-  .dashboard-capture .capture-link{display:block;cursor:zoom-in}
+  .dashboard-capture .capture-link{display:block;width:100%;padding:0;border:0;background:none;text-align:left;cursor:zoom-in}
   .dashboard-capture .capture-link:focus-visible{outline:3px solid var(--green);outline-offset:-3px}
   .dashboard-capture .capture-hint{display:block;padding:9px 14px;border-top:1px solid var(--line);color:var(--green);font-family:var(--mono);font-size:14px;line-height:1.6}
+  .capture-modal{width:min(1400px,96vw);max-width:96vw;max-height:94vh;padding:0;border:1px solid var(--line);background:var(--base);color:var(--cloud)}
+  .capture-modal::backdrop{background:rgba(2,6,13,.88)}
+  .capture-modal-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:8px 12px 8px 18px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+  .capture-modal-close{flex:none;width:38px;height:38px;border:1px solid var(--line);background:var(--raised);color:var(--cloud);font-size:26px;line-height:1;cursor:pointer}
+  .capture-modal-close:hover,.capture-modal-close:focus-visible{border-color:var(--green);color:var(--green)}
+  .capture-modal-body{max-height:calc(94vh - 56px);overflow:auto}
+  .capture-modal-body img{display:block;width:auto;max-width:none;height:auto}
   .dashboard-capture figcaption{padding:12px 14px;border-top:1px solid var(--line);font-size:15px;line-height:1.65;color:var(--steel)}
   .dashboard-capture figcaption strong{color:var(--cloud);font-weight:500}
   .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
@@ -1314,10 +1321,10 @@
 </svg>
 </div>  <figure class="pane dashboard-capture ">
     <div class="bar"><span>SIGKILL event log</span><span>dashboard snapshot</span></div>
-    <a class="capture-link" href="assets/dashboard-kill-log.png" target="_blank" rel="noopener" aria-label="Enlarge SIGKILL event log screenshot (opens in a new tab)">
+    <button type="button" class="capture-link" aria-label="Enlarge SIGKILL event log screenshot">
       <img src="assets/dashboard-kill-log.png" alt="Dashboard log showing SIGKILL intent and confirmation that the target processes exited." loading="lazy" decoding="async">
-      <span class="capture-hint">Click or tap to open full resolution ↗</span>
-    </a>
+      <span class="capture-hint">Click or tap to open full resolution</span>
+    </button>
     <figcaption><strong>The kill itself is recorded.</strong> This panel logs SIGKILL intent and process exit. The AC1 battery linked below supplies the separate recovery checks; this log alone does not prove recovery.</figcaption>
   </figure>
   <div class="note"><strong>Provider failures remain visible.</strong> Early trials encountered slow turns and empty provider responses. The workflow detects degraded turns and can switch review lanes. When retries run out, it records the file as "unreviewed" and continues execution. That status needs attention before anyone accepts the result.</div>
@@ -1358,10 +1365,10 @@
   </div>
 <figure class="pane dashboard-capture queue-capture">
     <div class="bar"><span>Compiler and test queues</span><span>dashboard snapshot</span></div>
-    <a class="capture-link" href="assets/dashboard-queue.png" target="_blank" rel="noopener" aria-label="Enlarge Compiler and test queues screenshot (opens in a new tab)">
+    <button type="button" class="capture-link" aria-label="Enlarge Compiler and test queues screenshot">
       <img src="assets/dashboard-queue.png" alt="Dashboard queue charts: TypeScript ends at zero errors in iteration four; Vitest stays at zero." loading="lazy" decoding="async">
-      <span class="capture-hint">Click or tap to open full resolution ↗</span>
-    </a>
+      <span class="capture-hint">Click or tap to open full resolution</span>
+    </button>
     <figcaption><strong>TypeScript errors reach zero in iteration four.</strong> Vitest stays at zero because it was not installed in the integrated checkout, as recorded in Dex’s final result. This is not evidence that tests passed. The chart includes multiple samples within some iterations; the report gives per-iteration totals.</figcaption>
   </figure>
 </section>
@@ -1373,18 +1380,18 @@
   <div class="note"><strong>Saved dashboard state.</strong> These are static captures, taken September 26, 2026, after <code>cx-5e</code> completed. They show the saved run, not a live connection. Relative timestamps belong to the capture.</div>
   <figure class="pane dashboard-capture ">
     <div class="bar"><span>Dex execution timeline</span><span>cx-5e · event 67</span></div>
-    <a class="capture-link" href="assets/dex-timeline.png" target="_blank" rel="noopener" aria-label="Enlarge Dex execution timeline screenshot (opens in a new tab)">
+    <button type="button" class="capture-link" aria-label="Enlarge Dex execution timeline screenshot">
       <img src="assets/dex-timeline.png" alt="Dex timeline for completed cx-5e with 70 semantic events. Event 67 shows PpQueueVerify-4 completed, linked to event 66, with its recorded input visible in the details panel." loading="lazy" decoding="async">
-      <span class="capture-hint">Click or tap to open full resolution ↗</span>
-    </a>
+      <span class="capture-hint">Click or tap to open full resolution</span>
+    </button>
     <figcaption><strong>Follow the final verification step.</strong> Dex records 70 semantic events for <code>cx-5e</code>. Selected event 67 completes <code>PpQueueVerify-4</code>; event 66 is its linked wait event. The details panel exposes the step input. Completed workflow status does not establish test coverage; Vitest was unavailable in this run.</figcaption>
   </figure>
   <figure class="pane dashboard-capture activity-capture">
     <div class="bar"><span>Agent activity and attempts</span><span>dashboard snapshot</span></div>
-    <a class="capture-link" href="assets/dashboard-activity.png" target="_blank" rel="noopener" aria-label="Enlarge Agent activity and attempts screenshot (opens in a new tab)">
+    <button type="button" class="capture-link" aria-label="Enlarge Agent activity and attempts screenshot">
       <img src="assets/dashboard-activity.png" alt="First twelve activity-feed rows, including final verification, a completed fixer attempt, an interrupted entry with missing token usage, and a reviewer record." loading="lazy" decoding="async">
-      <span class="capture-hint">Click or tap to open full resolution ↗</span>
-    </a>
+      <span class="capture-hint">Click or tap to open full resolution</span>
+    </button>
     <figcaption><strong>Read the attempts as well as the outcome.</strong> The first 12 feed rows show the final verification and commit alongside an earlier interrupted fixer entry marked <code>MISSING</code> for token usage. The raw status remains visible; this excerpt is not the full event history.</figcaption>
   </figure>
 </section>
@@ -1509,6 +1516,14 @@
   <div>EVIDENCE INDEX — <a href="assets/report-cx5e.md">metrics report (cx-5e)</a> · <a href="assets/ac1-battery-cx5e.txt">AC1 battery log</a> · <a href="https://github.com/siddicky/refactoring-toolkit/tree/main/.omc/specs">interview spec</a> · <a href="https://github.com/siddicky/refactoring-toolkit/tree/main/.omc/plans">consensus plan (5 iterations)</a> · <a href="https://github.com/siddicky/refactoring-toolkit/tree/main/BUILD_NOTES.md">build log</a></div>
   <div style="margin-top:10px;color:var(--steel)">Architectural philosophy: plan exhaustively, delegate to agent swarms, verify deterministically.</div>
 </div></footer>
+
+<dialog class="capture-modal" id="capture-modal" aria-labelledby="capture-modal-title">
+  <div class="capture-modal-header">
+    <span id="capture-modal-title"></span>
+    <button type="button" class="capture-modal-close" aria-label="Close full-resolution image">×</button>
+  </div>
+  <div class="capture-modal-body"><img id="capture-modal-image" alt=""></div>
+</dialog>
 
 <script>
 const RAW_EVIDENCE = [
@@ -2227,10 +2242,35 @@ function setupScrollspy() {
   update();
 }
 
+function setupCaptureModal() {
+  const modal = document.getElementById('capture-modal');
+  const modalImage = document.getElementById('capture-modal-image');
+  const modalTitle = document.getElementById('capture-modal-title');
+  let opener;
+
+  document.querySelectorAll('.dashboard-capture .capture-link').forEach(button => {
+    button.addEventListener('click', () => {
+      const image = button.querySelector('img');
+      modalImage.src = image.src;
+      modalImage.alt = image.alt;
+      modalTitle.textContent = button.closest('figure').querySelector('.bar span').textContent;
+      opener = button;
+      modal.showModal();
+    });
+  });
+
+  modal.querySelector('.capture-modal-close').addEventListener('click', () => modal.close());
+  modal.addEventListener('click', event => {
+    if (event.target === modal) modal.close();
+  });
+  modal.addEventListener('close', () => opener?.focus());
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   renderStream();
   setupScrollspy();
   setupDynamicWorkflow();
+  setupCaptureModal();
 });
 </script>
 <!-- Cloudflare Web Analytics -->
