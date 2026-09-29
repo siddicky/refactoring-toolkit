@@ -1,100 +1,2240 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="A recorded run of the refactoring toolkit: evidence, metrics, and mission-control demo.">
-  <meta name="theme-color" content="#0a0e14">
-  <title>Refactoring Toolkit — recorded run</title>
-  <style>
-    :root { color-scheme: dark; --bg:#0a0e14; --panel:#0e141d; --line:#1c2634; --text:#b6c2cf; --muted:#8292a3; --green:#6fdc8c; --blue:#6cb6ff; --amber:#e3b341; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace; --sans:Inter,ui-sans-serif,system-ui,sans-serif }
-    * { box-sizing:border-box }
-    html { scroll-behavior:smooth }
-    body { margin:0; color:var(--text); background:radial-gradient(ellipse at 85% -12%,#152a27 0,transparent 44%),var(--bg); font:14px/1.6 var(--mono) }
-    a { color:var(--blue); text-underline-offset:3px }
-    a:focus-visible,video:focus-visible { outline:2px solid var(--green); outline-offset:4px }
-    .wrap { max-width:1120px; padding:0 24px 80px; margin:auto }
-    header { display:flex; justify-content:space-between; gap:16px; align-items:center; padding:24px 0; border-bottom:1px solid var(--line) }
-    .brand { color:var(--green); font-weight:700; letter-spacing:.08em; text-decoration:none; text-transform:uppercase }
-    .brand span { color:var(--muted) }
-    nav { display:flex; gap:24px; flex-wrap:wrap }
-    nav a { color:var(--muted); text-decoration:none }
-    nav a:hover { color:var(--text) }
-    main { padding-top:72px }
-    .eyebrow { color:var(--green); font-size:12px; letter-spacing:.15em; text-transform:uppercase }
-    h1 { max-width:760px; margin:12px 0 20px; color:#eef5f4; font:700 clamp(40px,6vw,72px)/1.06 var(--sans); letter-spacing:-.045em }
-    .lead { max-width:730px; color:var(--muted); font:18px/1.6 var(--sans) }
-    .status { display:inline-flex; align-items:center; gap:8px; margin-top:20px; padding:6px 12px; border:1px solid #31553d; border-radius:99px; color:var(--green); font-size:12px }
-    .status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor }
-    .stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:56px 0 72px }
-    .stat,.card { background:var(--panel); border:1px solid var(--line); border-radius:8px }
-    .stat { padding:24px }
-    .stat strong { display:block; color:#eef5f4; font:650 clamp(28px,3vw,42px)/1.1 var(--sans); letter-spacing:-.04em }
-    .stat span { display:block; margin-top:8px; color:var(--muted); font-size:12px }
-    section { margin-top:72px }
-    h2 { margin:0 0 12px; color:#eef5f4; font:650 28px/1.2 var(--sans); letter-spacing:-.025em }
-    .section-copy { margin:0 0 24px; color:var(--muted); max-width:780px }
-    .video-shell { padding:8px; border:1px solid #335242; border-radius:12px; background:linear-gradient(135deg,#153329,#0d161c 40%,#101721); box-shadow:0 24px 80px #0007 }
-    video { display:block; width:100%; height:auto; aspect-ratio:16/9; background:#070b10; border-radius:6px }
-    .caption { margin:12px 4px 0; color:var(--muted); font-size:12px }
-    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px }
-    .card { padding:24px }
-    .card h3 { margin:0 0 10px; color:var(--green); font-size:13px; text-transform:uppercase; letter-spacing:.08em }
-    .card p { margin:0; color:var(--muted) }
-    .card strong { color:var(--text); font-weight:600 }
-    .note { border-left:2px solid var(--amber); padding:12px 0 12px 20px; color:var(--muted) }
-    .note strong { color:var(--amber) }
-    .links { display:flex; gap:24px; flex-wrap:wrap; padding:24px; border:1px solid var(--line); border-radius:8px; background:var(--panel) }
-    footer { margin-top:72px; padding-top:24px; border-top:1px solid var(--line); color:var(--muted); font-size:12px }
-    @media(max-width:720px) { .wrap{padding:0 16px 48px} header{align-items:flex-start;flex-direction:column} main{padding-top:48px} .stats,.grid{grid-template-columns:repeat(2,minmax(0,1fr))} .stat,.card{padding:16px} section{margin-top:56px} }
-    @media(max-width:480px) { .stats,.grid{grid-template-columns:1fr} .stats{margin:40px 0 56px} .lead{font-size:16px} }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A prototype after our conversation · Sid</title>
+<meta name="description" content="Sid’s technical follow-up on incremental PHP modernization: a working prototype, engineering choices, independent agent review, and recorded recovery evidence.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@300;400;500;600&family=Instrument+Sans:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --green:#9fef00; --space:#0b111d; --base:#111927; --raised:#182334;
+    --line:#29374c; --steel:#a4b1cd; --cloud:#f5f7fa; --content:1180px;
+    --mono:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:'Instrument Sans',ui-sans-serif,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--space);color:var(--cloud);font-family:var(--sans);font-weight:400;letter-spacing:-0.005em}
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:var(--content);margin:0 auto;padding:0 28px}
+  header.site{height:76px;padding:0 max(28px,calc((100vw - var(--content))/2));display:flex;align-items:center;gap:30px;
+    position:sticky;top:0;z-index:20;background:#0b111ded;backdrop-filter:blur(16px);border-bottom:1px solid #a4b1cd24}
+  .brand{display:flex;align-items:center;gap:13px;font-family:var(--mono);font-size:14px;letter-spacing:.12em;white-space:nowrap;font-weight:400}
+  .logo{width:27px;height:31px;background:var(--green);clip-path:polygon(50% 0,100% 25%,100% 76%,50% 100%,0 76%,0 25%);display:block;position:relative}
+  .logo:after{content:'';position:absolute;inset:5px;background:var(--space);clip-path:inherit}
+  nav.tabs{display:flex;gap:22px;margin-left:auto}
+  nav.tabs a{color:var(--steel);font-size:14px;font-weight:400}
+  nav.tabs a:hover{color:var(--green)}
+  .hero{padding:78px 0 46px}
+  .stamp{display:inline-block;border:1px solid var(--green);color:var(--green);padding:4px 12px;
+    font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;font-weight:400}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.12em;color:var(--steel);margin:16px 0 0;font-weight:400}
+  h1{font-family:'Geist',Arial,sans-serif;font-size:clamp(28px,4.4vw,48px);line-height:1.16;margin:16px 0 20px;font-weight:400;letter-spacing:-0.035em}
+  h1 .g{color:var(--green);font-weight:400}
+  .lede{max-width:70ch;font-size:18px;color:var(--steel);font-weight:400;line-height:1.7}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);
+    border:1px solid var(--line);margin:40px 0 6px}
+  .stat{background:var(--base);padding:18px 20px}
+  .stat b{display:block;font-family:var(--mono);font-size:22px;color:var(--green);letter-spacing:-.02em;font-weight:400}
+  .stat span{font-size:12px;color:var(--steel);text-transform:uppercase;letter-spacing:.12em;font-weight:400}
+  section{padding:56px 0;border-top:1px solid #a4b1cd1f}
+  .label{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--green);margin:0 0 12px;font-weight:400}
+  h2{font-family:'Geist',Arial,sans-serif;font-size:clamp(20px,2.5vw,28px);line-height:1.28;margin:0 0 16px;font-weight:400;letter-spacing:-0.03em}
+  p{max-width:70ch;color:var(--steel);font-weight:400;line-height:1.7;font-size:17px}
+  p strong,li strong{color:var(--cloud);font-weight:500}
+  .pane{border:1px solid var(--line);background:var(--base);margin:24px 0;overflow:hidden}
+  .pane .bar{display:flex;justify-content:space-between;gap:12px;padding:9px 14px;border-bottom:1px solid var(--line);
+    font-family:var(--mono);font-size:12px;color:var(--steel);letter-spacing:.08em;text-transform:uppercase;font-weight:400}
+  .pane img{display:block;width:100%;height:auto}
+  .dashboard-capture{margin:24px 0;max-width:850px}
+  .dashboard-capture.queue-capture{max-width:640px}
+  .dashboard-capture.activity-capture{max-width:none}
+  .dashboard-capture .capture-link{display:block;cursor:zoom-in}
+  .dashboard-capture .capture-link:focus-visible{outline:3px solid var(--green);outline-offset:-3px}
+  .dashboard-capture .capture-hint{display:block;padding:9px 14px;border-top:1px solid var(--line);color:var(--green);font-family:var(--mono);font-size:14px;line-height:1.6}
+  .dashboard-capture figcaption{padding:12px 14px;border-top:1px solid var(--line);font-size:15px;line-height:1.65;color:var(--steel)}
+  .dashboard-capture figcaption strong{color:var(--cloud);font-weight:500}
+  .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+  .card{border:1px solid var(--line);background:var(--base);padding:20px 22px}
+  .card h3{margin:6px 0 8px;font-family:var(--mono);font-size:16px;color:var(--cloud);font-weight:500;letter-spacing:-0.01em}
+  .card p{margin:0;font-size:15px;font-weight:400;line-height:1.7}
+  .card .tag{font-family:var(--mono);font-size:12px;text-transform:uppercase;letter-spacing:.15em;color:var(--green);font-weight:400}
+  .note{border:1px solid var(--line);border-left:3px solid var(--green);background:var(--base);padding:14px 18px;
+    font-size:15px;color:var(--steel);margin:20px 0;font-weight:400;line-height:1.7}
+  .note strong{color:var(--cloud);font-weight:500}
+  table.ev{width:100%;border-collapse:collapse;font-size:15px;line-height:1.65;margin:20px 0;font-weight:400}
+  table.ev td,table.ev th{border:1px solid var(--line);padding:9px 13px;text-align:left;vertical-align:top;color:var(--steel)}
+  table.ev th{background:var(--raised);font-family:var(--mono);font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:var(--cloud);font-weight:500}
+  table.ev td:first-child{color:var(--cloud)}
+  ul.tight{margin:12px 0;padding-left:20px;font-size:17px; line-height:1.7;}
+  ul.tight li{margin:8px 0;color:var(--steel)}
+  ul.tight li strong{color:var(--cloud)}
+  .ask{border:1px solid var(--green);padding:30px 32px;background:var(--base)}
+  .ask h2{margin-top:0}
+  footer.site{border-top:1px solid #a4b1cd1f;padding:28px 0 64px;font-family:var(--mono);font-size:12px;color:var(--steel)}
+  footer.site a{color:var(--green)}
+  /* Bun-style interactive presentation widgets */
+  .visual-widget{border:1px solid var(--line);background:var(--base);margin:32px 0;overflow:hidden;border-radius:4px}
+  .vw-header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;background:var(--raised)}
+  .vw-title{font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--steel);display:flex;align-items:center;gap:10px;font-weight:400}
+  .vw-badge{display:inline-block;padding:2px 8px;font-size:12px;font-weight:500;border:1px solid #9fef0055;color:var(--green);border-radius:100px}
+  .vw-tabs{display:flex;gap:4px;background:var(--space);padding:3px;border-radius:4px;border:1px solid var(--line)}
+  .vw-tab{background:transparent;border:0;color:var(--steel);padding:4px 12px;font-family:var(--mono);font-size:12px;cursor:pointer;border-radius:3px;font-weight:400}
+  .vw-tab.active{background:var(--raised);color:var(--green);font-weight:500}
+  .vw-body{padding:24px}
+  .chat-stream{display:flex;flex-direction:column;gap:16px;max-width:920px;margin:0 auto}
+  .bubble{display:flex;gap:14px;align-items:flex-start}
+  .bubble.reverse{flex-direction:row-reverse}
+  .avatar{width:28px;height:28px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;font-weight:500;flex-shrink:0}
+  .avatar.impl{background:#1e3a5f;color:#60a5fa;border:1px solid #3b82f644}
+  .avatar.rev{background:#451a24;color:#f87171;border:1px solid #ef444444}
+  .avatar.fix{background:#143823;color:var(--green);border:1px solid #9fef0044}
+  .msg-content{background:var(--raised);border:1px solid var(--line);border-radius:6px;padding:12px 16px;font-size:15px;line-height:1.7;max-width:85%;font-weight:400}
+  .bubble.reverse .msg-content{background:#151d2c;border-color:#384b66}
+  .msg-meta{display:flex;align-items:center;gap:10px;margin-bottom:6px;font-family:var(--mono);font-size:12px;color:var(--steel);font-weight:400}
+  .diff-box{background:#080c14;border:1px solid #233044;border-radius:4px;padding:10px 12px;font-family:var(--mono);font-size:13px;line-height:1.65;margin:8px 0;overflow-x:auto;font-weight:400;}
+  .diff-del{color:#f87171;background:#38131844;display:block;margin:0 -12px;padding:0 12px}
+  .diff-add{color:var(--green);background:#18361444;display:block;margin:0 -12px;padding:0 12px}
+  .diff-ctx{color:var(--steel);display:block}
+  .code-cite{display:inline-block;background:#243247;color:#93c5fd;padding:1px 6px;border-radius:3px;font-family:var(--mono);font-size:12px;font-weight:400}
+  .audit-bar{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding:10px 20px;background:var(--space);font-family:var(--mono);font-size:12px;color:var(--steel);font-weight:400}
+  .pulse-dot{width:7px;height:7px;background:var(--green);border-radius:50%;display:inline-block;box-shadow:0 0 8px var(--green);margin-right:6px}
+  /* Stepper interactive */
+  .stepper{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--line);border:1px solid var(--line);margin-bottom:20px}
+  .step-node{background:var(--base);padding:12px;cursor:pointer;transition:all .15s}
+  .step-node:hover{background:var(--raised)}
+  .step-node.active{background:#142217;border-bottom:2px solid var(--green)}
+  .step-node b{display:block;font-family:var(--mono);font-size:12px;color:var(--steel);margin-bottom:4px;font-weight:400}
+  .step-node.active b{color:var(--green)}
+  .step-node span{font-size:13px;color:var(--cloud);font-weight:400}
+
+
+  /* Technology Stack Badges & Highlight Bar */
+  .tech-highlight-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    background: #111927;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 12px 18px;
+    margin: 28px 0 10px;
+  }
+  .tech-highlight-label {
+    font-family: var(--mono);
+    font-size:12px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--steel);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .tech-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+  .tech-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--raised);
+    border: 1px solid var(--line);
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size:12px;
+    color: var(--cloud);
+    text-decoration: none;
+    transition: all .15s;
+  }
+  .tech-pill:hover {
+    border-color: var(--green);
+    color: var(--green);
+    background: #142217;
+  }
+  .tech-pill .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--steel);
+  }
+  .tech-pill.dex {
+    border-color: #9fef0055;
+    background: #142817;
+    color: var(--green);
+  }
+  .tech-pill.dex .dot {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+  }
+  .tech-pill.opencode {
+    border-color: #3b82f655;
+    color: #93c5fd;
+    background: #10243e;
+  }
+  .tech-pill.opencode .dot {
+    background: #60a5fa;
+  }
+  .tech-pill.typesafe {
+    border-color: #a855f755;
+    color: #d8b4fe;
+    background: #231536;
+  }
+  .tech-pill.typesafe .dot {
+    background: #c084fc;
+  }
+  .tech-pill.bun {
+    border-color: #f59e0b55;
+    color: #fde68a;
+    background: #2b1d0c;
+  }
+  .tech-pill.bun .dot {
+    background: #fbbf24;
+  }
+  .card-tech-meta {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid #29374c44;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size:12px;
+    color: var(--steel);
+  }
+  .card-tech-meta code {
+    color: var(--green);
+  }
+
+
+  /* Dynamic Workflow Simulation Widget (Bun-in-Rust inspired) */
+  .dw-section {
+    background: #0b0c10;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin: 36px 0;
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  }
+  .dw-topbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px 22px 6px;
+    border-bottom: 1px solid #29374c44;
+  }
+  .dw-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 100px;
+    border: 1px solid #9fef0055;
+    padding: 2px 10px;
+    font-family: var(--mono);
+    font-size:12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--green);
+    background: #14382355;
+    line-height: 1.6;
+  }
+  .dw-kicker {
+    font-family: var(--mono);
+    font-size:12px;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--steel);
+  }
+  .dw-hero-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 14px 22px 18px;
+  }
+  .dw-counter {
+    font-family: var(--mono);
+    font-size: clamp(28px, 4vw, 36px);
+    font-weight: 700;
+    color: var(--cloud);
+    font-variant-numeric: tabular-nums;
+  }
+  .dw-counter .dw-errs {
+    display: inline-block;
+    min-width: 6ch;
+    transition: color 0.4s;
+    color: var(--green);
+  }
+  .dw-counter span.sub {
+    font-size:14px;
+    font-weight: 400;
+    color: var(--steel);
+  }
+  .dw-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+  }
+  .dw-btn {
+    cursor: pointer;
+    border-radius: 4px;
+    border: 1px solid #3b4e6b;
+    background: #182334;
+    padding: 6px 14px;
+    font-family: var(--mono);
+    font-size:12.5px;
+    color: var(--cloud);
+    transition: all .15s;
+  }
+  .dw-btn:hover {
+    border-color: var(--green);
+    color: var(--green);
+    background: #142217;
+  }
+  .dw-clock {
+    font-family: var(--mono);
+    font-size:12.5px;
+    color: #fbf0df;
+    font-variant-numeric: tabular-nums;
+  }
+  .dw-flow {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding: 0 22px 18px;
+  }
+  .dw-file-col {
+    min-width: 0;
+    border-radius: 6px;
+    border: 1px solid #29374c;
+    background: rgba(0,0,0,0.5);
+    font-family: var(--mono);
+  }
+  .dw-file-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid #29374c;
+    padding: 8px 12px;
+    font-size:12px;
+    color: var(--steel);
+  }
+  .dw-file-lines {
+    height: 252px;
+    overflow:auto;
+    padding: 8px 12px;
+    font-size:12px;
+    line-height: 1.9;
+  }
+  .dw-worktrees-col {
+    min-width: 0;
+    flex: 1;
+  }
+  .dw-col-title {
+    margin-bottom: 8px;
+    font-family: var(--mono);
+    font-size:12px;
+    text-transform: uppercase;
+    letter-spacing: .18em;
+    color: var(--steel);
+  }
+  .dw-wt-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0,1fr));
+    gap: 10px;
+  }
+  @media (max-width: 600px) {
+    .dw-wt-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+  .dw-wt-card {
+    border-radius: 6px;
+    border: 1px solid #29374c;
+    background: rgba(0,0,0,0.4);
+    padding: 10px 12px;
+  }
+  .dw-wt-label {
+    margin-bottom: 8px;
+    white-space:normal;
+    font-family: var(--mono);
+    font-size:12px;
+    color: var(--steel);
+    overflow-wrap: anywhere;
+    line-height: 1.5;
+  }
+  .dw-pipe {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+  .dw-cell {
+    height: 12px;
+    width: 12px;
+    border-radius: 3px;
+    opacity: 0.35;
+    transition: opacity .15s, box-shadow .15s;
+  }
+  .dw-pipe-arrow {
+    font-size:12px;
+    line-height: 1;
+    color: var(--steel);
+  }
+  .dw-stage-legend {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    font-family: var(--mono);
+    font-size:12px;
+    color: var(--steel);
+  }
+  .dw-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .dw-legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+  }
+  .dw-modules-col {
+    width: 100%;
+    min-width: 0;
+  }
+  .dw-row {
+    display: flex;
+    height: 22px;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size:12px;
+    margin-bottom: 5px;
+  }
+  .dw-row-name {
+    width: 7.2rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+    color: var(--cloud);
+  }
+  .dw-row-bar {
+    height: 10px;
+    flex: 1;
+    overflow: hidden;
+    border-radius: 2px;
+    background: #182334;
+  }
+  .dw-row-fill {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+  .dw-row-num {
+    width: 44px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--steel);
+  }
+  .dw-log-box {
+    margin: 4px 22px 18px;
+    border-radius: 6px;
+    border: 1px solid #29374c;
+    background: rgba(0,0,0,0.5);
+    padding: 10px 14px;
+    font-family: var(--mono);
+    font-size:12px;
+    line-height: 1.6;
+  }
+  .dw-log-line {
+    height:auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space:normal;
+    color: var(--steel);
+    min-height: 20px;
+    overflow-wrap: anywhere;
+  }
+  .dw-footer-explainer {
+    border-top: 1px solid #29374c66;
+    padding: 12px 22px;
+    font-size:15px;
+    line-height: 1.65;
+    color: var(--steel);
+    background: #08090d;
+  }
+  .dw-chip {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 9px;
+    height: 9px;
+    border-radius: 3px;
+    background: #fbf0df;
+    box-shadow: 0 0 8px #fbf0dfaa;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  /* Layout Grid with Sticky Technical Rail */
+  .layout-container {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    gap: 48px;
+    align-items: start;
+    position: relative;
+  }
+
+  /* Sticky Side Rail */
+  .side-rail {
+    position: sticky;
+    top: 96px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding-top: 10px;
+    max-height: calc(100dvh - 112px);
+    overflow-y: auto;
+    scrollbar-width: thin;
+    padding-bottom: 12px;
+  }
+
+  .side-rail > *{flex-shrink:0}
+
+  /* Spec Box Card */
+  .spec-box {
+    background: var(--base);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .spec-box-header {
+    background: var(--raised);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size:12px;
+    letter-spacing: .08em;
+    color: var(--steel);
+    text-transform: uppercase;
+  }
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size:12px;
+    font-weight: 500;
+    color: var(--green);
+    background: #143823;
+    padding: 2px 8px;
+    border-radius: 100px;
+    border: 1px solid #9fef0044;
+  }
+  .spec-box-body {
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-size:12px;
+  }
+  .spec-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #29374c44;
+    padding-bottom: 6px;
+  }
+  .spec-row:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+  .spec-label {
+    font-family: var(--mono);
+    font-size:12px;
+    color: var(--steel);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+  }
+  .spec-val {
+    font-family: var(--mono);
+    font-size:12px;
+    color: var(--cloud);
+    font-weight: 500;
+  }
+  .spec-val.active {
+    color: var(--green);
+  }
+
+  /* Table of Contents */
+  .toc-box {
+    background: var(--base);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 14px 16px;
+  }
+  .toc-title {
+    font-family: var(--mono);
+    font-size:12px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--steel);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .toc-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .toc-link {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size:14px;
+    color: var(--steel);
+    font-family: var(--mono);
+    transition: color .15s, transform .15s;
+    text-decoration: none;
+    padding: 3px 0;
+    line-height: 1.5;
+  }
+  .toc-link:hover, .toc-link.active {
+    color: var(--green);
+    transform: translateX(4px);
+  }
+  .toc-link span.num {
+    font-size:12px;
+    color: var(--steel);
+  }
+  .toc-link.active span.num {
+    color: var(--green);
+  }
+
+  /* Split vs Unified Diff View */
+  .diff-view-toggle {
+    display: flex;
+    gap: 4px;
+    background: var(--space);
+    padding: 2px;
+    border-radius: 4px;
+    border: 1px solid var(--line);
+    margin-bottom: 8px;
+    align-self: flex-start;
+  }
+  .diff-toggle-btn {
+    background: transparent;
+    border: 0;
+    color: var(--steel);
+    padding: 3px 8px;
+    font-family: var(--mono);
+    font-size:12px;
+    cursor: pointer;
+    border-radius: 3px;
+  }
+  .diff-toggle-btn.active {
+    background: var(--raised);
+    color: var(--green);
+    font-weight: 500;
+  }
+  .split-diff-grid {
+    display: grid;
+    grid-template-columns: minmax(0,1fr) minmax(0,1fr);
+    gap: 8px;
+    margin: 8px 0;
+  }
+  @media (max-width: 640px) {
+    .split-diff-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+  .split-diff-col {
+    background: #080c14;
+    border: 1px solid #233044;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .split-diff-head {
+    background: #111927;
+    border-bottom: 1px solid #233044;
+    padding: 4px 10px;
+    font-family: var(--mono);
+    font-size:12px;
+    color: var(--steel);
+    display: flex;
+    justify-content: space-between;
+  }
+  .split-diff-code {
+    padding: 8px 10px;
+    font-family: var(--mono);
+    font-size:13px;
+    line-height:1.65;
+    margin: 0;
+    overflow-x: auto;
+    color: var(--steel);
+    font-weight: 400;
+  }
+
+  /* SVG interactive nodes */
+  .svg-node {
+    cursor: pointer;
+    transition: filter .15s, opacity .15s;
+  }
+  .svg-node:hover rect {
+    stroke: var(--green) !important;
+    filter: drop-shadow(0 0 6px rgba(159, 239, 0, 0.4));
+  }
+
+  /* In-situ Evidence Drawer / Inspector */
+  .drawer-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    font-family: var(--mono);
+    font-size:12px;
+    color: var(--green);
+    background: #182334;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all .15s;
+    margin-top: 10px;
+  }
+  .drawer-toggle-btn:hover {
+    border-color: var(--green);
+    background: #142217;
+  }
+  .evidence-drawer {
+    display: none;
+    margin-top: 16px;
+    background: #080c14;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .evidence-drawer.open {
+    display: block;
+  }
+  .evidence-drawer-header {
+    background: var(--raised);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .evidence-drawer-title {
+    font-family: var(--mono);
+    font-size:12px;
+    color: var(--cloud);
+    letter-spacing: .08em;
+  }
+  .evidence-tabs {
+    display: flex;
+    gap: 4px;
+  }
+  .evidence-tab {
+    background: transparent;
+    border: 0;
+    color: var(--steel);
+    padding: 3px 10px;
+    font-family: var(--mono);
+    font-size:12px;
+    cursor: pointer;
+    border-radius: 3px;
+  }
+  .evidence-tab.active {
+    background: var(--space);
+    color: var(--green);
+    border: 1px solid var(--line);
+  }
+  .evidence-body {
+    padding: 12px 14px;
+    max-height: 380px;
+    overflow-y: auto;
+    font-family: var(--mono);
+    font-size:13px;
+    line-height:1.65;
+    color: var(--steel);
+    white-space: pre-wrap;
+    background: #05080e;
+    font-weight: 400;
+  }
+
+  /* Editorial structure and contained interaction surfaces. */
+  [id]{scroll-margin-top:104px}
+  :focus-visible{outline:2px solid var(--green);outline-offset:4px}
+  .skip-link{position:fixed;top:8px;left:8px;z-index:50;padding:12px;background:var(--green);color:var(--space);transform:translateY(-160%)}
+  .skip-link:focus{transform:translateY(0)}
+  .hero-actions{display:flex;flex-wrap:wrap;gap:12px;margin:24px 0 32px}
+  .jump-link{padding:12px 18px;border:1px solid var(--line);border-radius:4px;font-size:14px;display:flex;gap:18px;align-items:center}
+  .jump-link.primary{background:var(--green);border-color:var(--green);color:var(--space);font-weight:500}
+  .jump-link:hover{border-color:var(--green)}
+  .summary-caption{font-family:var(--mono);font-size:14px;margin:0;color:var(--steel)}
+  .stats{margin-top:12px}
+  .main-column,.card,.bubble,.msg-content,.split-diff-col,.dw-wt-card{min-width:0}
+  .card,.ask,.spec-row,.tech-pill{overflow-wrap:anywhere}
+  .card-tech-meta{flex-wrap:wrap;gap:8px}
+  .spec-row{gap:10px;align-items:flex-start}
+  .spec-val{text-align:right}
+  .text-link,.table-scroll a{text-decoration:underline;text-underline-offset:3px;color:var(--green)}
+  .table-scroll{max-width:100%;overflow-x:auto;margin:20px 0}
+  .table-scroll table{min-width:600px;margin:0}
+  table.ev caption{text-align:left;font-size:14px;color:var(--steel);padding:0 0 12px}
+  table.ev tbody th{background:var(--base);text-transform:none;letter-spacing:0;font-family:var(--sans);font-size:15px}
+  .pane:has(> svg){overflow-x:auto}
+  .pane > svg{min-width:720px}
+  .vw-header,.vw-title,.vw-tabs,.audit-bar,.msg-meta,.evidence-drawer-header,.evidence-tabs,.diff-view-toggle,.split-diff-head{flex-wrap:wrap;gap:10px}
+  .vw-header{align-items:flex-start}
+  .vw-tabs{width:100%}
+  .vw-tab{flex:1;text-align:left;min-height:38px}
+  .step-node{border:0;text-align:left;font:inherit;min-width:0}
+  .step-node span{overflow-wrap:anywhere}
+  .msg-content{max-width:calc(100% - 42px);flex:1}
+  .msg-meta{overflow-wrap:anywhere}
+  .diff-box,.split-diff-code{max-width:100%}
+  .evidence-body{overflow:auto;overflow-wrap:anywhere}
+  .dw-section{padding:0}
+  .dw-flow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start}
+  .dw-file-col{grid-column:1 / -1}
+  .dw-file-lines{height:158px}
+  .dw-wt-grid{grid-template-columns:1fr}
+  .dw-file-head{flex-wrap:wrap}
+  .dw-counter .dw-errs{min-width:2ch}
+  .pane .bar{flex-wrap:wrap}
+  nav.tabs{min-width:0;overflow-x:auto;white-space:nowrap;align-items:center}
+  nav.tabs a{padding:12px 0}
+  @media (max-width:1040px){
+    .layout-container{grid-template-columns:minmax(0,1fr);gap:0}
+    .side-rail{display:none}
+    header.site{height:auto;min-height:76px;flex-wrap:wrap;gap:4px;padding:14px 24px 0}
+    nav.tabs{width:100%;gap:24px;margin-left:0}
+    [id]{scroll-margin-top:122px}
+  }
+  @media (max-width:640px){
+    .wrap{padding:0 18px}
+    header.site{padding:12px 18px 0}
+    .hero{padding:42px 0 32px}
+    section{padding:36px 0}
+    .grid2,.dw-flow{grid-template-columns:minmax(0,1fr)}
+    .dw-file-col{grid-column:auto}
+    .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .stat{padding:16px 12px}
+    .card,.ask{padding:18px}
+    .tech-highlight-bar{padding:12px}
+    .tech-pill{flex-wrap:wrap}
+    .vw-body{padding:14px 10px}
+    .vw-header{padding:14px 12px}
+    .stepper{grid-template-columns:repeat(5,minmax(105px,1fr));overflow-x:auto}
+    .step-node{padding:12px 8px}
+    .bubble{gap:8px}
+    .msg-content{padding:10px;max-width:calc(100% - 36px)}
+    .audit-bar{padding:12px}
+    .dw-flow{padding:0 14px 14px}
+    .dw-hero-row,.dw-topbar{padding-left:14px;padding-right:14px}
+    .dw-log-box{margin-left:14px;margin-right:14px}
+    .dw-row-name{width:6.5rem}
+    .dw-row{gap:6px}
+    .evidence-tabs{width:100%}
+    .evidence-tab{min-height:38px;padding:6px}
+    .diff-toggle-btn{min-height:36px}
+  }
+
+  .diff-box .diff-add,.diff-box .diff-del,.diff-box .diff-ctx{min-height:1.6em}
+  .syntax-keyword{color:#c4a7ff}.syntax-string{color:#a8d878}.syntax-comment{color:#8c9db3;font-style:italic}.syntax-number{color:#f6bd71}.syntax-variable{color:#80cfff}.syntax-operator{color:#ef9fcb}
+  .interaction-hint{font-size:14px;line-height:1.6;color:var(--steel);margin:10px 0 14px}
+  .dw-hint{padding:0 22px;margin:12px 0 0}
+  .port-loop-pane{padding:20px 12px 10px}
+  .port-loop-title{font-family:var(--mono);font-size:12px;letter-spacing:1.3px;color:var(--steel);margin:0 8px 8px}
+  .port-loop-pane .interaction-hint{margin:0 8px 12px}
+  .port-loop-scroll{max-width:100%;overflow-x:auto}
+  .port-loop-scroll svg{display:block;width:100%;height:auto;min-width:700px}
+  .svg-node:focus-visible rect{stroke:var(--green);stroke-width:3;filter:drop-shadow(0 0 4px #9fef0066)}
+  .diff-box,.split-diff-code,.split-diff-grid{min-width:0}
+  .diff-box,.split-diff-code,.diff-box code,.split-diff-code code,.diff-box code span,.split-diff-code code span{white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal}
+  .step-node[aria-pressed="true"]{box-shadow:inset 0 -3px var(--green)}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
+</style>
 </head>
 <body>
-  <div class="wrap">
-    <header>
-      <a class="brand" href="#top">&gt;_ <span>refactoring</span> toolkit</a>
-      <nav aria-label="Page sections"><a href="#demo">Demo</a><a href="#evidence">Evidence</a><a href="#sources">Sources</a></nav>
-    </header>
-    <main id="top">
-      <div class="eyebrow">Durable adversarial porting · recorded demonstration</div>
-      <h1>Watch the porting run unfold.</h1>
-      <p class="lead">A PHP to TypeScript migration coordinated through durable flows, isolated worktrees, two reviewer lanes, and verification queues. This page presents a recorded run and its published evidence.</p>
-      <div class="status">Recorded run completed · 27 Sep 2026</div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+  <path d="M0,0L10,5L0,10z" fill="#9fef00"/>
+</marker>
+<marker id="arrs" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+  <path d="M0,0L10,5L0,10z" fill="#a4b1cd"/>
+</marker>
+</defs></svg>
 
-      <div class="stats">
-        <div class="stat"><strong>13</strong><span>completed work units</span></div>
-        <div class="stat"><strong>227</strong><span>envelopes across two parent runs</span></div>
-        <div class="stat"><strong>20 / 26</strong><span>acceptance battery checks passed</span></div>
-        <div class="stat"><strong>0</strong><span>false kill events</span></div>
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<header class="site">
+  <div class="brand"><span class="logo"></span>porting-toolkit</div>
+  <nav class="tabs" aria-label="Sections">
+    <a href="#problem">Context</a><a href="#built">Architecture</a><a href="#workflow">Workflow</a>
+    <a href="#ac1">Recovery</a><a href="#proof">Evidence</a><a href="#dashboard">Dashboard</a><a href="#solve">Fit</a><a href="#pilot">Discussion</a>
+  </nav>
+</header>
+
+<main class="wrap" id="main-content">
+
+<section class="hero" aria-labelledby="page-title">
+  <span class="stamp">A technical follow-up · Sid</span>
+  <p class="kicker">A PROTOTYPE FOR INCREMENTAL PHP → TYPESCRIPT MODERNIZATION</p>
+  <h1 id="page-title">Our conversation prompted<br><span class="g">this prototype.</span></h1>
+  <p class="lede">Chris, your approach to gradual modernization gave me a concrete problem to explore: how to direct coding agents through a small PHP-to-TypeScript extraction and keep their work reviewable. I built this prototype to show my approach, with independent agent reviews, a recorded run, and recovery after an interrupted process.</p>
+  <div class="hero-actions"><a class="jump-link primary" href="#dynamic-workflow">Watch the workflow <span aria-hidden="true">↓</span></a><a class="jump-link" href="#proof">Inspect run evidence <span aria-hidden="true">↓</span></a></div>
+<!-- Illustrative dynamic workflow simulation -->
+<div id="dynamic-workflow" class="dw-section" role="region" aria-label="Illustrative worktree simulation">
+  <div class="dw-topbar">
+    <span class="dw-badge">✻ DEX ORCHESTRATOR · DYNAMIC WORKFLOW</span>
+    <span class="dw-kicker">2 WORKTREE LEASES · ILLUSTRATIVE SIMULATION</span>
+  </div>
+
+  <p class="interaction-hint dw-hint">Select <strong>Replay simulation</strong> to follow the worktree activity. <a class="text-link" href="#orchestrator-flow">Inspect the code and review steps ↓</a></p>
+
+  <div class="dw-hero-row">
+    <div class="dw-counter">
+      <span class="dw-errs" id="dw-err-count">0</span>
+      <span class="sub">example findings unresolved</span>
+    </div>
+    <div class="dw-controls">
+      <button type="button" class="dw-btn" id="dw-replay-btn">↻ Replay simulation</button>
+      <span class="dw-clock" id="dw-clock-display">Simulation complete</span>
+    </div>
+  </div>
+
+  <div class="dw-flow" id="dw-flow-container">
+    <!-- Left Column: Legacy File Defects Queue -->
+    <div class="dw-file-col" id="dw-file-card">
+      <div class="dw-file-head">
+        <span>defects.spec.log</span>
+        <span id="dw-commits-label" style="color:var(--green)">Example complete</span>
+      </div>
+      <div class="dw-file-lines" id="dw-lines-container">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+
+    <!-- Center Column: Leased Worktree State Pipelines -->
+    <div class="dw-worktrees-col">
+      <div class="dw-col-title">Divvied Up · Leased Worktree Slots</div>
+      <div class="dw-wt-grid">
+        <div class="dw-wt-card">
+          <div class="dw-wt-label">worktree lease 1 (isolated)</div>
+          <div class="dw-pipe-list" id="dw-pipe-group-1">
+            <!-- 4 pipelines in WT1 -->
+            <div class="dw-pipe">
+              <span class="dw-cell" style="background:#fbbf24"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#4ade80"></span>
+            </div>
+            <div class="dw-pipe">
+              <span class="dw-cell" style="background:#fbbf24"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#4ade80"></span>
+            </div>
+            <div class="dw-pipe">
+              <span class="dw-cell" style="background:#fbbf24"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#4ade80"></span>
+            </div>
+            <div class="dw-pipe">
+              <span class="dw-cell" style="background:#fbbf24"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#4ade80"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="dw-wt-card">
+          <div class="dw-wt-label">worktree lease 2 (isolated)</div>
+          <div class="dw-pipe-list" id="dw-pipe-group-2">
+            <!-- 4 pipelines in WT2 -->
+            <div class="dw-pipe">
+              <span class="dw-cell" style="background:#fbbf24"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#4ade80"></span>
+            </div>
+            <div class="dw-pipe">
+              <span class="dw-cell" style="background:#fbbf24"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#4ade80"></span>
+            </div>
+            <div class="dw-pipe">
+              <span class="dw-cell" style="background:#fbbf24"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#4ade80"></span>
+            </div>
+            <div class="dw-pipe">
+              <span class="dw-cell" style="background:#fbbf24"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-cell" style="background:#a78bfa"></span>
+              <span class="dw-pipe-arrow">→</span>
+              <span class="dw-cell" style="background:#4ade80"></span>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <section id="demo">
-        <h2>Mission control, captured live</h2>
-        <p class="section-copy">An 88-second recording of the local dashboard while the final validation flow was running. The hosted page is a static replay; its data does not update.</p>
-        <div class="video-shell"><video controls preload="metadata" playsinline aria-label="Recorded mission-control dashboard"><source src="assets/demo.webm" type="video/webm"><track kind="captions" src="assets/demo-captions.vtt" srclang="en" label="English" default>Your browser cannot play this WebM video.</video></div>
-        <p class="caption">Capture taken during the cx9b run, around 14:22 UTC. Source: <a href="assets/cx9-evidence.md">cx9 evidence digest</a>.</p>
-      </section>
+      <div class="dw-stage-legend">
+        <span class="dw-legend-item"><span class="dw-legend-dot" style="background:#fbbf24"></span> 1 Implementer Draft</span>
+        <span class="dw-legend-item"><span class="dw-legend-dot" style="background:#a78bfa"></span> 2 Blind Reviews</span>
+        <span class="dw-legend-item"><span class="dw-legend-dot" style="background:#4ade80"></span> 1 Fixer / Sole Commit</span>
+      </div>
+    </div>
 
-      <section id="evidence">
-        <h2>What the run proved</h2>
-        <p class="section-copy">The final flow completed at 17:48 UTC after a continued-as-new rollover. These figures are drawn from the recorded validation artifacts.</p>
-        <div class="grid">
-          <article class="card"><h3>Durable progress</h3><p><strong>13 work units</strong> completed: ten first-round units and three fix rounds. All expected outputs were present at the integration head.</p></article>
-          <article class="card"><h3>Subscriber</h3><p>The dashboard's stream subscriber remained active throughout the run, with <strong>zero poll fallbacks</strong> recorded in its log.</p></article>
-          <article class="card"><h3>Review provenance</h3><p>The final metrics report records <strong>77 envelopes and eight verdict records</strong>, with no reviewer tombstones.</p></article>
-          <article class="card"><h3>Verification</h3><p>Final typecheck reached <strong>zero errors</strong>. The run's Vitest queue recorded <strong>39 passing and four failing</strong> tests.</p></article>
+    <!-- Right Column: Sealed TypeScript Module Landings -->
+    <div class="dw-modules-col">
+      <div class="dw-col-title">→ Commits Land Per Target Slice</div>
+      <div class="dw-rows-list" id="dw-module-rows" style="min-height:240px">
+        <!-- Module progress rows -->
+        <div class="dw-row">
+          <span class="dw-row-name" title="SubscriptionService.php">SubscriptionSvc</span>
+          <span class="dw-row-bar"><span class="dw-row-fill" style="width:100%;background:#f472b6"></span></span>
+          <span class="dw-row-num">11 fs</span>
         </div>
-        <p class="note"><strong>Known limit:</strong> The kill and resume arc did not fire. Three short queue-verify windows were correctly classified as completed attempts, so six battery checks tied to that arc remained unproven. The dispatch gate also ran in a degraded, fail-open state.</p>
-      </section>
-
-      <section id="sources">
-        <h2>Inspect the evidence</h2>
-        <p class="section-copy">The source artifacts document both the successful checks and the limits of this run.</p>
-        <div class="links"><a href="assets/cx9-evidence.md">Run evidence digest ↗</a><a href="assets/report-final.md">Final metrics report ↗</a><a href="https://github.com/siddicky/refactoring-toolkit">Source repository ↗</a></div>
-      </section>
-    </main>
-    <footer>Refactoring Toolkit · Static presentation of recorded data · No live backend connected</footer>
+        <div class="dw-row">
+          <span class="dw-row-name" title="legacy_helpers.php">legacy_helpers</span>
+          <span class="dw-row-bar"><span class="dw-row-fill" style="width:100%;background:#fb923c"></span></span>
+          <span class="dw-row-num">7 fs</span>
+        </div>
+        <div class="dw-row">
+          <span class="dw-row-name" title="EarningsLedger.php">EarningsLedger</span>
+          <span class="dw-row-bar"><span class="dw-row-fill" style="width:100%;background:#f87171"></span></span>
+          <span class="dw-row-num">4 fs</span>
+        </div>
+        <div class="dw-row">
+          <span class="dw-row-name" title="ChatSentinel.php">ChatSentinel</span>
+          <span class="dw-row-bar"><span class="dw-row-fill" style="width:100%;background:#34d399"></span></span>
+          <span class="dw-row-num">3 fs</span>
+        </div>
+        <div class="dw-row">
+          <span class="dw-row-name" title="EntitlementChecker.php">EntitlementChk</span>
+          <span class="dw-row-bar"><span class="dw-row-fill" style="width:100%;background:#38bdf8"></span></span>
+          <span class="dw-row-num">2 fs</span>
+        </div>
+        <div class="dw-row">
+          <span class="dw-row-name" title="PORTING.spec.md">PORTING.spec</span>
+          <span class="dw-row-bar"><span class="dw-row-fill" style="width:100%;background:#9fef00"></span></span>
+          <span class="dw-row-num">clean</span>
+        </div>
+      </div>
+    </div>
   </div>
+
+  <div class="dw-log-box">
+    <div class="dw-log-line" id="dw-log-0">· round-1(SubscriptionService.php): reviewer-A flagged 4 major defects; citation check F1..F4=1.00</div>
+    <div class="dw-log-line" id="dw-log-1">· round-2(Payouts/EarningsLedger.php): fixer applied Monotonic BigInt precision; reviewer-A approved</div>
+    <div class="dw-log-line" id="dw-log-2" style="color:var(--green)">· final wave join: Wait.allOf resolved · 10 idempotent commits · 213 envelopes anchored → MERGED</div>
+  </div>
+
+  <div class="dw-footer-explainer">
+    <strong>Illustrative simulation.</strong> The chips, defect descriptions, counters, and log messages explain how work moves through review and repair. They are scripted examples, not a playback of individual cx-5e events. The recorded run covers five PHP source files and one specification, with 213 anchored envelopes and 2,292,331 model tokens.
+  </div>
+</div>
+
+  <p class="summary-caption">Recorded run · cx-5e · 26 September 2026</p>
+  <div class="stats">
+    <div class="stat"><b>2.29M</b><span>model tokens recorded</span></div>
+    <div class="stat"><b>5 files</b><span>PHP sources + one spec</span></div>
+    <div class="stat"><b>10/10</b><span>idempotent op-ID commits</span></div>
+    <div class="stat"><b>SIGKILL</b><span>mid-flight kill → clean resume</span></div>
+    <div class="stat"><b>213/213</b><span>events anchored with zero loss</span></div>
+    <div class="stat"><b>22</b><span>completed verdict records</span></div>
+  </div>
+
+  <div class="tech-highlight-bar">
+    <span class="tech-highlight-label">Engineered With</span>
+    <div class="tech-pills">
+      <span class="tech-pill dex"><span class="dot"></span><strong>Dex SDK</strong> @superdurable/dex · Durable Flows &amp; Steps</span>
+      <span class="tech-pill opencode"><span class="dot"></span><strong>OpenCode AI</strong> @opencode-ai/sdk · Blind Review Swarms</span>
+      <span class="tech-pill typesafe"><span class="dot"></span><strong>TypeSafe AI</strong> @typesafe-ai/sdk · Calibrated Judgments</span>
+      <span class="tech-pill bun"><span class="dot"></span><strong>Bun &amp; TypeScript</strong> Bun 1.3 · TS 5.9 Strict</span>
+    </div>
+  </div>
+</section>
+
+<div class="layout-container">
+<article class="main-column" aria-label="Technical overview and run evidence">
+
+<section id="problem">
+  <p class="label">01 · context from our conversation</p>
+  <h2>Start with one bounded extraction.</h2>
+  <p>Your plan retains the database, introduces a modern PHP BFF and Vue 3 frontend, and moves selected functions into Node and Encore TypeScript services over time. I focused on one part of that approach: making the work inside a small extraction easier to direct and inspect.</p>
+  <p>You also described engineers directing coding agents and bringing working prototypes back to stakeholders. I wanted to make my own engineering choices visible in a working example:</p>
+  <ul class="tight">
+    <li><strong>Small units of work.</strong> Track progress by file, with compiler feedback and review findings attached to each round.</li>
+    <li><strong>Independent agent review.</strong> Separate the implementer from two reviewers and give their findings to a fixer.</li>
+    <li><strong>Inspectable recovery.</strong> Interrupt a run, restart it, and compare saved history with the resulting commits.</li>
+  </ul>
+  <p>The demonstration uses sample PHP sources. It is a basis for discussing the workflow and its limits before applying it to a real service boundary.</p>
+</section>
+
+<section id="built">
+  <p class="label">02 · the harness architecture</p>
+  <h2>What I built, and why</h2>
+  <p>I put orchestration in code, gave implementation and review separate agent roles, and recorded each round for inspection. That makes it possible to examine where an agent changed a file, how reviewers responded, and what happened when execution stopped.</p>
+  <div class="grid2">
+    <div class="card"><span class="tag">orchestration · superdurable/dex</span>
+      <h3>Dex Flows, Steps &amp; Waits</h3>
+      <p><strong>Dex Flows</strong> coordinate agent dispatches, git operations, and queue checks through typed <code>Step&lt;T&gt;</code> units with SQLite WAL persistence. <code>Wait.allOf</code> joins concurrent work. The recorded recovery run shows completed work being reused and interrupted steps retried.</p>
+      <div class="card-tech-meta">
+        <span>Primitive: <code>Flow &middot; Step &middot; Wait</code></span>
+        <span>Package: <code>@superdurable/dex</code></span>
+      </div>
+    </div>
+    <div class="card"><span class="tag">adversarial swarms · opencode-ai</span>
+      <h3>1 Implementer · 2 Blind Reviewers · 1 Fixer</h3>
+      <p><code>@opencode-ai/sdk</code> coordinates an implementer, two independent reviewers, and a fixer. Worktree leases separate file edits. Reviewers receive the diff with repository tools disabled; citation judgments assess whether their findings refer to the supplied changes.</p>
+      <div class="card-tech-meta">
+        <span>Primitive: <code>Agent Context Lease</code></span>
+        <span>Package: <code>@opencode-ai/sdk</code></span>
+      </div>
+    </div>
+    <div class="card"><span class="tag">calibrated judgment · typesafe-ai</span>
+      <h3>Structured review judgments</h3>
+      <p>Uses <code>@typesafe-ai/sdk</code> judgments to assess reviewer findings and citation matches. The run report records agreement outcomes and citation scores for each review round.</p>
+      <div class="card-tech-meta">
+        <span>Output: <code>Review judgments</code></span>
+        <span>Package: <code>@typesafe-ai/sdk</code></span>
+      </div>
+    </div>
+    <div class="card"><span class="tag">immutable audit · dex attributes &amp; streams</span>
+      <h3>Dex Envelope Streams &amp; Anchored Reflogs</h3>
+      <p>JSON event envelopes record role, target file, iteration, attempt number, and token consumption in <strong>Dex Attributes</strong>. The dashboard and recovery timeline expose that history so I can inspect agent activity and compare it with the saved report.</p>
+      <div class="card-tech-meta">
+        <span>Primitive: <code>Dex History &middot; Attributes</code></span>
+        <span>Trace: <code>dexcli flow history</code></span>
+      </div>
+    </div>
+  </div>
+
+<div class="pane port-loop-pane">
+<h3 class="port-loop-title" id="port-loop-title">THE PORT LOOP — ONE FILE, ONE CYCLE</h3>
+<p class="interaction-hint" id="port-loop-hint">Select an outlined step to inspect its example. Keyboard: Tab, then Enter or Space. On small screens, scroll the diagram sideways.</p>
+<div class="port-loop-scroll" role="region" tabindex="0" aria-labelledby="port-loop-title" aria-describedby="port-loop-hint">
+<svg viewBox="0 0 740 580" role="group" aria-label="Implement, capture diff, independent sequential reviews A then B, check verdict. Findings pass through prioritize and fixer; clean verdict goes directly to commit. Commit, integrate, verify; verification failures enter bounded queue repair.">
+<defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#9fef00"/></marker></defs>
+<g font-family="Geist Mono,monospace">
+<text x="20" y="20" fill="#a4b1cd" font-size="11">Independent reviewer sessions · executed in order A → B</text>
+<g class="svg-node" role="button" tabindex="0" aria-label="Inspect implement example" onclick="jumpStep(0)" onkeydown="if(event.key === 'Enter' || event.key === ' '){event.preventDefault();jumpStep(0);}"><rect x="20" y="40" width="200" height="70" rx="8" fill="#182334" stroke="#9fef00"/><text x="120" y="68" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">IMPLEMENT</text><text x="120" y="89" text-anchor="middle" fill="#a4b1cd" font-size="11">agent · leased worktree</text></g>
+<g class="svg-node" role="button" tabindex="0" aria-label="Inspect diff capture example" onclick="jumpStep(1)" onkeydown="if(event.key === 'Enter' || event.key === ' '){event.preventDefault();jumpStep(1);}"><rect x="270" y="40" width="200" height="70" rx="8" fill="#182334" stroke="#9fef00"/><text x="370" y="68" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">DIFF CAPTURE</text><text x="370" y="89" text-anchor="middle" fill="#a4b1cd" font-size="11">diff stored by value</text></g>
+<g class="svg-node" role="button" tabindex="0" aria-label="Inspect reviewer a example" onclick="jumpStep(2)" onkeydown="if(event.key === 'Enter' || event.key === ' '){event.preventDefault();jumpStep(2);}"><rect x="520" y="40" width="200" height="70" rx="8" fill="#182334" stroke="#9fef00"/><text x="620" y="68" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">REVIEWER A</text><text x="620" y="89" text-anchor="middle" fill="#a4b1cd" font-size="11">diff only · no tools</text></g>
+<g class="svg-node" role="button" tabindex="0" aria-label="Inspect reviewer b example" onclick="jumpStep(2)" onkeydown="if(event.key === 'Enter' || event.key === ' '){event.preventDefault();jumpStep(2);}"><rect x="520" y="170" width="200" height="70" rx="8" fill="#182334" stroke="#9fef00"/><text x="620" y="198" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">REVIEWER B</text><text x="620" y="219" text-anchor="middle" fill="#a4b1cd" font-size="11">independent session</text></g>
+<g><rect x="270" y="170" width="200" height="70" rx="8" fill="#182334" stroke="#29374c"/><text x="370" y="198" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">VERDICT CHECK</text><text x="370" y="219" text-anchor="middle" fill="#a4b1cd" font-size="11">citations · agreement</text></g>
+<g><rect x="20" y="170" width="200" height="70" rx="8" fill="#182334" stroke="#29374c"/><text x="120" y="198" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">PRIORITIZE</text><text x="120" y="219" text-anchor="middle" fill="#a4b1cd" font-size="11">rank retained findings</text></g>
+<g class="svg-node" role="button" tabindex="0" aria-label="Inspect fixer example" onclick="jumpStep(3)" onkeydown="if(event.key === 'Enter' || event.key === ' '){event.preventDefault();jumpStep(3);}"><rect x="20" y="300" width="200" height="70" rx="8" fill="#182334" stroke="#9fef00"/><text x="120" y="328" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">FIXER</text><text x="120" y="349" text-anchor="middle" fill="#a4b1cd" font-size="11">apply retained findings</text></g>
+<g class="svg-node" role="button" tabindex="0" aria-label="Inspect commit example" onclick="jumpStep(4)" onkeydown="if(event.key === 'Enter' || event.key === ' '){event.preventDefault();jumpStep(4);}"><rect x="270" y="300" width="200" height="70" rx="8" fill="#182334" stroke="#9fef00"/><text x="370" y="328" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">COMMIT</text><text x="370" y="349" text-anchor="middle" fill="#a4b1cd" font-size="11">op-ID · sole committer</text></g>
+<g><rect x="520" y="300" width="200" height="70" rx="8" fill="#182334" stroke="#29374c"/><text x="620" y="328" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">INTEGRATE</text><text x="620" y="349" text-anchor="middle" fill="#a4b1cd" font-size="11">merge to integration</text></g>
+<g><rect x="520" y="430" width="200" height="70" rx="8" fill="#182334" stroke="#29374c"/><text x="620" y="458" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">QUEUES VERIFY</text><text x="620" y="479" text-anchor="middle" fill="#a4b1cd" font-size="11">compiler + test queues</text></g>
+<g><rect x="270" y="430" width="200" height="70" rx="8" fill="#182334" stroke="#29374c"/><text x="370" y="458" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">QUEUE REPAIR</text><text x="370" y="479" text-anchor="middle" fill="#a4b1cd" font-size="11">bounded fix rounds</text></g>
+<path d="M220 75 H270" stroke="#9fef00" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+<path d="M470 75 H520" stroke="#9fef00" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+<path d="M620 110 V170" stroke="#9fef00" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+<path d="M520 205 H470" stroke="#9fef00" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+<path d="M270 205 H220" stroke="#9fef00" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+<path d="M120 240 V300" stroke="#9fef00" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+<path d="M220 335 H270" stroke="#9fef00" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+<path d="M470 335 H520" stroke="#9fef00" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+<path d="M620 370 V430" stroke="#9fef00" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+<path d="M370 240 V300" stroke="#9fef00" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+<text x="222" y="192" fill="#a4b1cd" font-size="11">issues</text>
+<text x="385" y="275" fill="#a4b1cd" font-size="11">clean</text>
+<path d="M520 465 H470" stroke="#a4b1cd" stroke-width="1.5" fill="none" marker-end="url(#a1)" stroke-dasharray="5 5"/>
+<text x="475" y="452" fill="#a4b1cd" font-size="11">fail</text>
+<path d="M370 500 V540 H620 V500" stroke="#a4b1cd" stroke-width="1.5" fill="none" marker-end="url(#a1)" stroke-dasharray="5 5"/>
+<text x="425" y="561" fill="#a4b1cd" font-size="11">fix → verify again</text>
+<text x="20" y="463" fill="#a4b1cd" font-size="11">Durable steps</text>
+<text x="20" y="485" fill="#a4b1cd" font-size="11">Queue-specific repair</text>
+<text x="20" y="505" fill="#a4b1cd" font-size="11">uses bounded rounds.</text>
+</g></svg>
+</div>
+</div>
+
+</section>
+
+<section id="workflow" aria-labelledby="workflow-heading">
+  <p class="label">03 · workflow</p>
+  <h2 id="workflow-heading">Follow a file through review and repair</h2>
+  <p>Choose a scenario and select a step to inspect its code and review findings. This example and the <a class="text-link" href="#dynamic-workflow">opening worktree simulation</a> use illustrative data to explain the flow. The <a class="text-link" href="#proof">recorded evidence</a> is listed separately below.</p>
+
+<!-- Interactive orchestration example -->
+<div class="visual-widget" id="orchestrator-flow">
+  <div class="vw-header">
+    <div class="vw-title">
+      <span class="pulse-dot"></span>
+      <span>Orchestrator example</span>
+      <span class="vw-badge">Illustrative scenario</span>
+    </div>
+    <p class="interaction-hint">Choose a scenario to change the example.</p>
+    <div class="vw-tabs" role="group" aria-label="Example scenarios">
+      <button type="button" aria-pressed="true" class="vw-tab active" onclick="showOrchScenario(0)">Scenario 1: Async Resource Leak</button>
+      <button type="button" aria-pressed="false" class="vw-tab" onclick="showOrchScenario(1)">Scenario 2: Boundary Precision</button>
+      <button type="button" aria-pressed="false" class="vw-tab" onclick="showOrchScenario(2)">Scenario 3: Null Safety Gate</button>
+    </div>
+  </div>
+  <div class="vw-body">
+    <p class="interaction-hint">Select a step to reveal the conversation through that point. Switch Split / Unified to compare code views.</p>
+    <div class="stepper" role="group" aria-label="Show conversation through step">
+      <button type="button" class="step-node active" id="st-0" onclick="jumpStep(0)">
+        <b>STEP 01</b>
+        <span>1. Implementer Draft</span>
+      </button>
+      <button type="button" class="step-node" id="st-1" onclick="jumpStep(1)">
+        <b>STEP 02</b>
+        <span>2. Diff Extracted</span>
+      </button>
+      <button type="button" class="step-node" id="st-2" onclick="jumpStep(2)">
+        <b>STEP 03</b>
+        <span>3. Adversarial Review</span>
+      </button>
+      <button type="button" class="step-node" id="st-3" onclick="jumpStep(3)">
+        <b>STEP 04</b>
+        <span>4. Fixer Remediation</span>
+      </button>
+      <button type="button" class="step-node" id="st-4" onclick="jumpStep(4)">
+        <b>STEP 05</b>
+        <span>5. Idempotent Commit</span>
+      </button>
+    </div>
+
+    <div class="chat-stream" id="stream-content">
+      <!-- Dynamic stream populated by JS -->
+    </div>
+  </div>
+  <div class="audit-bar">
+    <span><span>WORKTREE:</span> <code class="code-cite" id="orch-wt">wt-02 (isolated)</code></span>
+    <span><span>OP-ID:</span> <code class="code-cite" id="orch-op">op_5f8a9e2</code></span>
+    <span><span>VERDICT:</span> <strong style="color:var(--green)" id="orch-verdict">CONFIRMED DISCREPANCY REPAIRED</strong></span>
+  </div>
+</div>
+
+
+</section>
+
+<section id="ac1">
+  <p class="label">04 · crash recovery</p>
+  <h2>What happened after SIGKILL</h2>
+  <p>In the recorded recovery exercise, I stopped the orchestration engine and background workers with SIGKILL during verification, then restarted using the same database. The saved artifacts record the outcome:</p>
+  <ul class="tight">
+    <li>The <strong>Dex worker</strong> resumed directly from the last uncommitted <code>Step</code> boundary in SQLite WAL and drove to a clean <strong>COMPLETED</strong> state;</li>
+    <li><strong>Zero duplicate agent dispatches:</strong> Dex step memoization bypassed completed tasks, verified via <code>dexcli flow history</code>;</li>
+    <li><strong>10 operation-ID commits recorded, 0 duplicates:</strong> Every git operation uses an idempotent op-ID bound to Dex's step execution context;</li>
+    <li>Interrupted fix cycles re-executed with incremented <code>Context.attempt</code> counters, transparently auditing skipped vs retried executions.</li>
+  </ul>
+
+
+<div class="pane" style="padding:10px 6px 4px">
+<svg viewBox="0 0 1100 240" style="display:block;width:100%;height:auto" role="img" aria-label="Kill and resume timeline: run, SIGKILL, restart, resume, completed">
+  <text x="24" y="36" fill="#a4b1cd" font-family="Geist Mono,monospace" font-size="12" letter-spacing="2">KILL / RESUME — OBSERVED ON A REAL RUN</text>
+  <line x1="60" y1="120" x2="1040" y2="120" stroke="#29374c" stroke-width="2"/>
+  <g font-family="Geist Mono,monospace">
+    <circle cx="120" cy="120" r="7" fill="#9fef00"/>
+    <text x="120" y="96" text-anchor="middle" fill="#f5f7fa" font-size="12">RUN</text>
+    <text x="120" y="150" text-anchor="middle" fill="#a4b1cd" font-size="10.5">2 files porting</text>
+    <text x="120" y="166" text-anchor="middle" fill="#a4b1cd" font-size="10.5">in parallel waves</text>
+    <circle cx="420" cy="120" r="7" fill="#9fef00"/>
+    <text x="420" y="96" text-anchor="middle" fill="#f5f7fa" font-size="12">QUEUE VERIFY</text>
+    <text x="420" y="150" text-anchor="middle" fill="#a4b1cd" font-size="10.5">queue verification reached</text>
+    <rect x="560" y="86" width="180" height="68" rx="8" fill="#182334" stroke="#ff5c5c"/>
+    <text x="650" y="112" text-anchor="middle" fill="#ff5c5c" font-size="14" font-weight="700">⚡ SIGKILL</text>
+    <text x="650" y="132" text-anchor="middle" fill="#a4b1cd" font-size="10.5">server + all workers</text>
+    <line x1="492" y1="120" x2="556" y2="120" stroke="#ff5c5c" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <circle cx="800" cy="120" r="7" fill="#9fef00"/>
+    <text x="800" y="96" text-anchor="middle" fill="#f5f7fa" font-size="12">RESTART</text>
+    <text x="800" y="150" text-anchor="middle" fill="#a4b1cd" font-size="10.5">same database</text>
+    <circle cx="990" cy="120" r="9" fill="none" stroke="#9fef00" stroke-width="2"/>
+    <circle cx="990" cy="120" r="4" fill="#9fef00"/>
+    <text x="990" y="96" text-anchor="middle" fill="#9fef00" font-size="12" font-weight="700">COMPLETED</text>
+    <text x="990" y="150" text-anchor="middle" fill="#a4b1cd" font-size="10.5">terminal state</text>
+    <line x1="127" y1="120" x2="413" y2="120" stroke="#9fef00" stroke-width="2"/>
+    <line x1="427" y1="120" x2="556" y2="120" stroke="#9fef00" stroke-width="2"/>
+    <line x1="560" y1="120" x2="793" y2="120" stroke="#ff5c5c" stroke-width="2" stroke-dasharray="6 5"/>
+    <line x1="807" y1="120" x2="981" y2="120" stroke="#9fef00" stroke-width="2"/>
+  </g>
+  <g font-family="Geist Mono,monospace" font-size="11.5">
+    <rect x="60" y="180" width="300" height="40" rx="6" fill="#182334" stroke="#29374c"/>
+    <text x="80" y="205" fill="#f5f7fa">✓ 10 op-ID commits · 0 duplicates</text>
+    <rect x="380" y="180" width="330" height="40" rx="6" fill="#182334" stroke="#29374c"/>
+    <text x="400" y="205" fill="#f5f7fa">✓ 0 redundant calls on completed files</text>
+    <rect x="730" y="180" width="310" height="40" rx="6" fill="#182334" stroke="#29374c"/>
+    <text x="750" y="205" fill="#f5f7fa">✓ interrupted rounds redone correctly</text>
+  </g>
+</svg>
+</div>  <figure class="pane dashboard-capture ">
+    <div class="bar"><span>SIGKILL event log</span><span>dashboard snapshot</span></div>
+    <a class="capture-link" href="assets/dashboard-kill-log.png" target="_blank" rel="noopener" aria-label="Enlarge SIGKILL event log screenshot (opens in a new tab)">
+      <img src="assets/dashboard-kill-log.png" alt="Dashboard log showing SIGKILL intent and confirmation that the target processes exited." loading="lazy" decoding="async">
+      <span class="capture-hint">Click or tap to open full resolution ↗</span>
+    </a>
+    <figcaption><strong>The kill itself is recorded.</strong> This panel logs SIGKILL intent and process exit. The AC1 battery linked below supplies the separate recovery checks; this log alone does not prove recovery.</figcaption>
+  </figure>
+  <div class="note"><strong>Provider failures remain visible.</strong> Early trials encountered slow turns and empty provider responses. The workflow detects degraded turns and can switch review lanes. When retries run out, it records the file as "unreviewed" and continues execution. That status needs attention before anyone accepts the result.</div>
+</section>
+
+<section id="proof">
+  <p class="label">05 · run evidence</p>
+  <h2>Read the recorded results</h2>
+  <p>The artifacts below support these results from the saved run. Reviewer agreement and citation scores describe the review process; they do not measure type inference accuracy.</p>
+  <div class="table-scroll" role="region" aria-label="Run evidence table" tabindex="0">
+  <table class="ev">
+    <caption>cx-5e metrics and AC1 recovery checks</caption>
+    <thead><tr><th scope="col">Result</th><th scope="col">Recorded evidence</th><th scope="col">Source</th></tr></thead>
+    <tbody>
+    <tr><th scope="row">Crash recovery</th><td>AC1 assertions pass: post-kill activity, no duplicate op-ID commits, integrated output present</td><td><a href="assets/ac1-battery-cx5e.txt">AC1 battery log</a></td></tr>
+    <tr><th scope="row">Provenance and token accounting</th><td><strong>213 anchored envelopes</strong>, 2,292,331 model tokens</td><td><a href="assets/report-cx5e.md">cx-5e report</a></td></tr>
+    <tr><th scope="row">Review coverage</th><td><strong>22 completed verdict records</strong> across five PHP files and one specification; findings, agreement, and citation scores recorded per round</td><td><a href="assets/report-cx5e.md">Findings and agreement</a></td></tr>
+    <tr><th scope="row">Verification queues</th><td>TypeScript errors: <strong>6 → 3 → 1 → 0</strong>. Vitest was not installed in the integrated checkout; its zero queue totals do not show executed tests.</td><td><a href="assets/report-cx5e.md">Queue burn-down</a></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div style="margin: 16px 0;">
+    <button type="button" class="drawer-toggle-btn" id="drawer-toggle" aria-expanded="false" aria-controls="evidence-drawer" onclick="toggleDrawer()">
+      <span>&#9660;</span> <span>INSPECT RAW ARTIFACT RECEIPTS</span>
+    </button>
+    <div class="evidence-drawer" id="evidence-drawer">
+      <div class="evidence-drawer-header">
+        <div class="evidence-drawer-title">
+          <span>RAW VERIFICATION RECEIPT INSPECTOR</span>
+        </div>
+        <div class="evidence-tabs">
+          <button type="button" class="evidence-tab active" id="ev-tab-0" onclick="showEvidenceDoc(0)">ac1-battery.txt</button>
+          <button type="button" class="evidence-tab" id="ev-tab-1" onclick="showEvidenceDoc(1)">report-cx5e.md</button>
+        </div>
+      </div>
+      <pre class="evidence-body" id="evidence-body"></pre>
+    </div>
+  </div>
+<figure class="pane dashboard-capture queue-capture">
+    <div class="bar"><span>Compiler and test queues</span><span>dashboard snapshot</span></div>
+    <a class="capture-link" href="assets/dashboard-queue.png" target="_blank" rel="noopener" aria-label="Enlarge Compiler and test queues screenshot (opens in a new tab)">
+      <img src="assets/dashboard-queue.png" alt="Dashboard queue charts: TypeScript ends at zero errors in iteration four; Vitest stays at zero." loading="lazy" decoding="async">
+      <span class="capture-hint">Click or tap to open full resolution ↗</span>
+    </a>
+    <figcaption><strong>TypeScript errors reach zero in iteration four.</strong> Vitest stays at zero because it was not installed in the integrated checkout, as recorded in Dex’s final result. This is not evidence that tests passed. The chart includes multiple samples within some iterations; the report gives per-iteration totals.</figcaption>
+  </figure>
+</section>
+
+<section id="dashboard">
+  <p class="label">06 · recorded dashboard</p>
+  <h2>Inspect the run, one panel at a time</h2>
+  <p>The Dex timeline shows the recorded workflow execution. The mission-control panel below adds agent attempts and token records. Open either image at full resolution to inspect the details.</p>
+  <div class="note"><strong>Saved dashboard state.</strong> These are static captures, taken September 26, 2026, after <code>cx-5e</code> completed. They show the saved run, not a live connection. Relative timestamps belong to the capture.</div>
+  <figure class="pane dashboard-capture ">
+    <div class="bar"><span>Dex execution timeline</span><span>cx-5e · event 67</span></div>
+    <a class="capture-link" href="assets/dex-timeline.png" target="_blank" rel="noopener" aria-label="Enlarge Dex execution timeline screenshot (opens in a new tab)">
+      <img src="assets/dex-timeline.png" alt="Dex timeline for completed cx-5e with 70 semantic events. Event 67 shows PpQueueVerify-4 completed, linked to event 66, with its recorded input visible in the details panel." loading="lazy" decoding="async">
+      <span class="capture-hint">Click or tap to open full resolution ↗</span>
+    </a>
+    <figcaption><strong>Follow the final verification step.</strong> Dex records 70 semantic events for <code>cx-5e</code>. Selected event 67 completes <code>PpQueueVerify-4</code>; event 66 is its linked wait event. The details panel exposes the step input. Completed workflow status does not establish test coverage; Vitest was unavailable in this run.</figcaption>
+  </figure>
+  <figure class="pane dashboard-capture activity-capture">
+    <div class="bar"><span>Agent activity and attempts</span><span>dashboard snapshot</span></div>
+    <a class="capture-link" href="assets/dashboard-activity.png" target="_blank" rel="noopener" aria-label="Enlarge Agent activity and attempts screenshot (opens in a new tab)">
+      <img src="assets/dashboard-activity.png" alt="First twelve activity-feed rows, including final verification, a completed fixer attempt, an interrupted entry with missing token usage, and a reviewer record." loading="lazy" decoding="async">
+      <span class="capture-hint">Click or tap to open full resolution ↗</span>
+    </a>
+    <figcaption><strong>Read the attempts as well as the outcome.</strong> The first 12 feed rows show the final verification and commit alongside an earlier interrupted fixer entry marked <code>MISSING</code> for token usage. The raw status remains visible; this excerpt is not the full event history.</figcaption>
+  </figure>
+</section>
+
+<section id="solve">
+  <p class="label">07 · potential fit</p>
+  <h2>Where this could fit</h2>
+  <p>I see this workflow as a way to explore one selected service extraction alongside the retained PHP application. Choosing the service boundary and defining acceptable behavior would come first. The prototype supplies a repeatable workflow for the code changes:</p>
+  <ul class="tight">
+    <li><strong>File-level work.</strong> Dex coordinates implementation, diff capture, two reviews, citation assessment, prioritization, fixes, commits, and integration. This makes each file’s progress inspectable; a deployable service still needs a defined contract and integration checks.</li>
+    <li><strong>Separate review roles.</strong> Reviewers inspect the supplied diff with repository tools disabled. TypeSafe judgments assess agreement and citation matches before findings reach the fixer. These are model judgments, so human review and behavioral tests still matter.</li>
+    <li><strong>Recovery records.</strong> Operation IDs identify git commits, and Dex records step execution. Parallel batches join through <code>Wait.allOf</code>. The SIGKILL exercise above shows what recovered in that run.</li>
+  </ul>
+
+
+<div class="pane" style="padding:10px 6px 4px">
+<svg viewBox="0 0 1100 300" style="display:block;width:100%;height:auto" role="img" aria-label="Parallel waves: files migrating concurrently across leased worktrees, joined into the integrated output">
+  <text x="24" y="36" fill="#a4b1cd" font-family="Geist Mono,monospace" font-size="12" letter-spacing="2">PARALLEL WAVES — FILES MIGRATE CONCURRENTLY ACROSS LEASED WORKTREES</text>
+  <g font-family="Geist Mono,monospace">
+    <rect x="60" y="70" width="380" height="56" rx="8" fill="#182334" stroke="#29374c"/>
+    <text x="80" y="94" fill="#f5f7fa" font-size="13" font-weight="700">WORKTREE 1 · LEASED</text>
+    <text x="80" y="112" fill="#a4b1cd" font-size="10.5">src/Billing/SubscriptionService.php → port loop</text>
+    <rect x="60" y="160" width="380" height="56" rx="8" fill="#182334" stroke="#29374c"/>
+    <text x="80" y="184" fill="#f5f7fa" font-size="13" font-weight="700">WORKTREE 2 · LEASED</text>
+    <text x="80" y="202" fill="#a4b1cd" font-size="10.5">src/Access/EntitlementChecker.php → port loop</text>
+    <line x1="250" y1="126" x2="250" y2="156" stroke="#a4b1cd" stroke-width="1.2" stroke-dasharray="4 4"/>
+    <line x1="440" y1="98" x2="560" y2="120" stroke="#9fef00" stroke-width="1.5" marker-end="url(#a1)"/>
+    <line x1="440" y1="188" x2="560" y2="156" stroke="#9fef00" stroke-width="1.5" marker-end="url(#a1)"/>
+    <rect x="565" y="108" width="230" height="64" rx="8" fill="#0b111d" stroke="#9fef00"/>
+    <text x="680" y="134" text-anchor="middle" fill="#9fef00" font-size="13" font-weight="700">WAVE JOIN</text>
+    <text x="680" y="153" text-anchor="middle" fill="#a4b1cd" font-size="10.5">Wait.allOf · caps at lease pool</text>
+    <line x1="795" y1="140" x2="833" y2="140" stroke="#9fef00" stroke-width="1.5" marker-end="url(#a1)"/>
+    <rect x="838" y="108" width="230" height="64" rx="8" fill="#182334" stroke="#29374c"/>
+    <text x="953" y="132" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">INTEGRATION</text>
+    <text x="953" y="151" text-anchor="middle" fill="#a4b1cd" font-size="10.5">one output project · serial merge</text>
+    <line x1="953" y1="172" x2="953" y2="210" stroke="#a4b1cd" stroke-width="1.5" marker-end="url(#a1)"/>
+    <rect x="838" y="214" width="230" height="56" rx="8" fill="#182334" stroke="#29374c"/>
+    <text x="953" y="238" text-anchor="middle" fill="#f5f7fa" font-size="13" font-weight="700">QUEUES VERIFY</text>
+    <text x="953" y="256" text-anchor="middle" fill="#a4b1cd" font-size="10.5">tsc 0 · Vitest unavailable</text>
+    <text x="60" y="266" fill="#5d6b85" font-size="10.5">2-slot lease pool (configurable) · pool exhaustion retries queue at wave planner · commit-only git for agents</text>
+  </g>
+</svg>
+</div>  <div class="note"><strong>Still to validate.</strong> I have not run this against your codebase or integrated the output with Encore. Compatibility with your deployment environment and access to the model providers also need validation. The recorded run demonstrates the workflow and recovery checks; it does not establish production readiness or behavioral parity.</div>
+</section>
+
+<section id="pilot">
+  <p class="label">08 · discussion</p>
+  <div class="ask">
+    <h2>Let’s talk through the prototype.</h2>
+    <p style="max-width:740px">I’d welcome the chance to walk you through the prototype and discuss where this approach might fit. I can show the implementation choices, the reviewer findings, and what the recovery exercise established.</p>
+    <p style="max-width:740px">The source, PR, and saved run artifacts are here for inspection. I hope they give you a concrete sense of how I would approach this work with your team.</p>
+    <p style="margin-top:20px;font-family:var(--mono)"><span style="color:var(--green)">&gt;</span> <a href="https://github.com/siddicky/refactoring-toolkit" style="color:var(--green)">github.com/siddicky/refactoring-toolkit</a>&nbsp;&nbsp;<a href="https://github.com/siddicky/refactoring-toolkit/pull/1" style="color:var(--green)">PR #1 — the build, reviewed</a></p>
+  </div>
+</section>
+</article><!-- /.main-column -->
+
+<aside class="side-rail">
+  <div class="spec-box">
+    <div class="spec-box-header">
+      <span>Run snapshot</span>
+      <span class="status-pill">RECORDED</span>
+    </div>
+    <div class="spec-box-body">
+      <div class="spec-row">
+        <span class="spec-label">Durable Core</span>
+        <span class="spec-val active">Dex SDK 0.12.1</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">Execution Unit</span>
+        <span class="spec-val">Dex Flow &middot; Step &middot; Wait</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">Agent Harness</span>
+        <span class="spec-val">OpenCode AI 1.18</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">Judgment Engine</span>
+        <span class="spec-val">TypeSafe AI 0.6.0</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">Target Stack</span>
+        <span class="spec-val">PHP 8.2 &rarr; TS 5.9 Strict</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">Concurrency</span>
+        <span class="spec-val">2 Leased Worktrees</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">Crash Anchor</span>
+        <span class="spec-val active">op-ID SHA-256 (Dex)</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">Events Anchored</span>
+        <span class="spec-val active">213 / 213 (100%)</span>
+      </div>
+      <div class="spec-row">
+        <span class="spec-label">Verdict records</span>
+        <span class="spec-val active">22 completed</span>
+      </div>
+    </div>
+  </div>
+
+  <nav class="toc-box" aria-label="Section index">
+    <div class="toc-title">Section Index</div>
+    <ol class="toc-list" id="toc-list">
+      <li><a href="#problem" class="toc-link" data-sec="problem"><span class="num">01</span> Context</a></li>
+      <li><a href="#built" class="toc-link" data-sec="built"><span class="num">02</span> Architecture</a></li>
+      <li><a href="#workflow" class="toc-link" data-sec="workflow"><span class="num">03</span> Workflow examples</a></li>
+      <li><a href="#ac1" class="toc-link" data-sec="ac1"><span class="num">04</span> Crash recovery</a></li>
+      <li><a href="#proof" class="toc-link" data-sec="proof"><span class="num">05</span> Run evidence</a></li>
+      <li><a href="#dashboard" class="toc-link" data-sec="dashboard"><span class="num">06</span> Recorded dashboard</a></li>
+      <li><a href="#solve" class="toc-link" data-sec="solve"><span class="num">07</span> Potential fit</a></li>
+      <li><a href="#pilot" class="toc-link" data-sec="pilot"><span class="num">08</span> Discussion</a></li>
+    </ol>
+  </nav>
+</aside>
+
+</div><!-- /.layout-container -->
+</main>
+
+<footer class="site"><div class="wrap">
+  <div>EVIDENCE INDEX — <a href="assets/report-cx5e.md">metrics report (cx-5e)</a> · <a href="assets/ac1-battery-cx5e.txt">AC1 battery log</a> · <a href="https://github.com/siddicky/refactoring-toolkit/tree/main/.omc/specs">interview spec</a> · <a href="https://github.com/siddicky/refactoring-toolkit/tree/main/.omc/plans">consensus plan (5 iterations)</a> · <a href="https://github.com/siddicky/refactoring-toolkit/tree/main/BUILD_NOTES.md">build log</a></div>
+  <div style="margin-top:10px;color:var(--steel)">Architectural philosophy: plan exhaustively, delegate to agent swarms, verify deterministically.</div>
+</div></footer>
+
+<script>
+const RAW_EVIDENCE = [
+  {
+    name: "ac1-battery.txt",
+    content: "PASS flow completed\nPASS sidecar has intent + completed\nPASS intent-before-kill ordering (monotonic)\nPASS sidecar anchored to dex run id\ninfo: child flows across waves: 10\nPASS post-kill activity exists (resume happened)\nPASS flow closed after kill\ninfo: completed round-1 files: ['src/Access/EntitlementChecker.php', 'src/Billing/SubscriptionService.php', 'src/Moderation/ChatSentinel.php', 'src/Payouts/EarningsLedger.php', 'src/Support/legacy_helpers.php']; blocked: []\nPASS zero new implementer invocations post-kill\nPASS no duplicate op-ID commits\nPASS round-1 keyed commits reachable at integration HEAD\nPASS completed-file content exists in integrated output\ninfo: post-fix outcome distribution (fix/commit/integrate): {'skipped': 5, 'completed': 20}\nPASS fix-round work present post-kill (redone path)\n\nALL PASS\n"
+  },
+  {
+    name: "report-cx5e.md",
+    content: "# Porting Run Metrics Report\n\n_generated_at: 2026-09-26T20:51:51.196Z_\n\n## Provenance\n- status: OK\n\n## Summary\n- files: 6 (PORTING.spec.md, src/Access/EntitlementChecker.php, src/Billing/SubscriptionService.php, src/Moderation/ChatSentinel.php, src/Payouts/EarningsLedger.php, src/Support/legacy_helpers.php)\n- envelopes: 213 (start markers: 44, interrupted: 0)\n- completed verdict records: 22\n- tokens (model-calling roles): 2292331\n- total wall clock: 6035487 ms\n\n## Findings and agreement\n\n### PORTING.spec.md \u2014 round 0 (agreement: agree-clean)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 0 |  |\n| reviewer-B | 0 |  |\n- agreement: agree-clean \u2014 both completed reviews report zero findings\n\n### src/Access/EntitlementChecker.php \u2014 round 1 (agreement: disagree)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 1 | major |\n| reviewer-B | 1 | major |\n- agreement: disagree \u2014 findings could not be fully paired: reviewer-A has 1, reviewer-B has 1, matched 0\n- citation checks: F1=1.00, F1=1.00\n\n### src/Access/EntitlementChecker.php \u2014 round 2 (agreement: disagree)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 1 | minor |\n| reviewer-B | 0 |  |\n- agreement: disagree \u2014 one-sided: only reviewer-A reports findings\n- citation checks: F1=1.00\n\n### src/Billing/SubscriptionService.php \u2014 round 1 (agreement: disagree)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 4 | major, major, major, major |\n| reviewer-B | 3 | major, major, major |\n- agreement: disagree \u2014 findings could not be fully paired: reviewer-A has 4, reviewer-B has 3, matched 0\n- citation checks: F1=1.00, F2=1.00, F3=1.00, F4=1.00, F1=1.00, F2=1.00, F3=1.00\n\n### src/Billing/SubscriptionService.php \u2014 round 2 (agreement: disagree)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 2 | minor, major |\n| reviewer-B | 3 | major, major, major |\n- agreement: disagree \u2014 findings could not be fully paired: reviewer-A has 2, reviewer-B has 3, matched 0\n- citation checks: F1=1.00, F2=1.00, F1=1.00, F2=1.00, F3=1.00\n\n### src/Moderation/ChatSentinel.php \u2014 round 1 (agreement: disagree)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 1 | major |\n| reviewer-B | 1 | major |\n- agreement: disagree \u2014 findings could not be fully paired: reviewer-A has 1, reviewer-B has 1, matched 0\n- citation checks: F1=1.00, F1=1.00\n\n### src/Moderation/ChatSentinel.php \u2014 round 2 (agreement: disagree)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 1 | major |\n| reviewer-B | 1 | major |\n- agreement: disagree \u2014 findings could not be fully paired: reviewer-A has 1, reviewer-B has 1, matched 0\n- citation checks: F1=1.00, F1=1.00\n\n### src/Payouts/EarningsLedger.php \u2014 round 1 (agreement: disagree)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 1 | blocker |\n| reviewer-B | 2 | blocker, blocker |\n- agreement: disagree \u2014 findings could not be fully paired: reviewer-A has 1, reviewer-B has 2, matched 1\n- citation checks: F1=0.99, F1=0.99, F2=0.99\n\n### src/Payouts/EarningsLedger.php \u2014 round 2 (agreement: disagree)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 2 | major, major |\n| reviewer-B | 1 | major |\n- agreement: disagree \u2014 findings could not be fully paired: reviewer-A has 2, reviewer-B has 1, matched 0\n- citation checks: F1=1.00, F2=1.00, F1=1.00\n\n### src/Support/legacy_helpers.php \u2014 round 1 (agreement: disagree)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 1 | major |\n| reviewer-B | 1 | major |\n- agreement: disagree \u2014 findings could not be fully paired: reviewer-A has 1, reviewer-B has 1, matched 0\n- citation checks: F1=1.00, F1=1.00\n\n### src/Support/legacy_helpers.php \u2014 round 2 (agreement: disagree)\n| reviewer | findings | severities |\n| --- | --- | --- |\n| reviewer-A | 4 | major, major, minor, major |\n| reviewer-B | 1 | major |\n- agreement: disagree \u2014 findings could not be fully paired: reviewer-A has 4, reviewer-B has 1, matched 0\n- citation checks: F1=1.00, F2=1.00, F3=1.00, F4=1.00, F1=1.00\n\n## Tokens and wall clock per file and role\n| file | role | steps | tokens | wall clock ms |\n| --- | --- | --- | --- | --- |\n| (flow) | agent | 6 | 380701 | 1392787 |\n| (flow) | diff-capture | 1 | n/a | 16 |\n| (flow) | judgment | 1 | 17525 | 2580 |\n| (flow) | queue | 2 | n/a | 516 |\n| (flow) | record | 21 | n/a | 379 |\n| (flow) | review | 2 | 81985 | 24403 |\n| (flow) | verdict-check | 1 | n/a | 1 |\n| src/Access/EntitlementChecker.php | agent | 3 | 173023 | 336759 |\n| src/Access/EntitlementChecker.php | commit | 2 | n/a | 64 |\n| src/Access/EntitlementChecker.php | diff-capture | 2 | n/a | 26 |\n| src/Access/EntitlementChecker.php | prioritize | 2 | n/a | 1 |\n| src/Access/EntitlementChecker.php | record | 12 | n/a | 31 |\n| src/Access/EntitlementChecker.php | review | 4 | 165671 | 51479 |\n| src/Access/EntitlementChecker.php | verdict-check | 2 | n/a | 3 |\n| src/Billing/SubscriptionService.php | agent | 3 | 217853 | 1207672 |\n| src/Billing/SubscriptionService.php | commit | 2 | n/a | 59 |\n| src/Billing/SubscriptionService.php | diff-capture | 2 | n/a | 26 |\n| src/Billing/SubscriptionService.php | prioritize | 2 | n/a | 0 |\n| src/Billing/SubscriptionService.php | record | 12 | n/a | 32 |\n| src/Billing/SubscriptionService.php | review | 4 | 172103 | 48076 |\n| src/Billing/SubscriptionService.php | verdict-check | 2 | n/a | 1 |\n| src/Moderation/ChatSentinel.php | agent | 3 | 197078 | 912336 |\n| src/Moderation/ChatSentinel.php | commit | 2 | n/a | 63 |\n| src/Moderation/ChatSentinel.php | diff-capture | 2 | n/a | 27 |\n| src/Moderation/ChatSentinel.php | prioritize | 2 | n/a | 0 |\n| src/Moderation/ChatSentinel.php | record | 12 | n/a | 47 |\n| src/Moderation/ChatSentinel.php | review | 4 | 166307 | 61484 |\n| src/Moderation/ChatSentinel.php | verdict-check | 2 | n/a | 1 |\n| src/Payouts/EarningsLedger.php | agent | 3 | 186645 | 692548 |\n| src/Payouts/EarningsLedger.php | commit | 2 | n/a | 70 |\n| src/Payouts/EarningsLedger.php | diff-capture | 2 | n/a | 26 |\n| src/Payouts/EarningsLedger.php | prioritize | 2 | n/a | 1 |\n| src/Payouts/EarningsLedger.php | record | 12 | n/a | 44 |\n| src/Payouts/EarningsLedger.php | review | 4 | 165688 | 56003 |\n| src/Payouts/EarningsLedger.php | verdict-check | 2 | n/a | 2 |\n| src/Support/legacy_helpers.php | agent | 3 | 202382 | 1198792 |\n| src/Support/legacy_helpers.php | commit | 2 | n/a | 61 |\n| src/Support/legacy_helpers.php | diff-capture | 2 | n/a | 30 |\n| src/Support/legacy_helpers.php | prioritize | 2 | n/a | 1 |\n| src/Support/legacy_helpers.php | record | 12 | n/a | 25 |\n| src/Support/legacy_helpers.php | review | 4 | 165370 | 49015 |\n| src/Support/legacy_helpers.php | verdict-check | 2 | n/a | 0 |\n\n## Cost per role (provider-reported split)\n| role | calls | input | cache-read | cache-write | reasoning | output | cost USD |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| agent | 21 | 772484 | 349824 | 0 | 196474 | 38900 | ~$0 |\n| judgment | 1 | n/a | n/a | n/a | n/a | n/a | n/a |\n| review | 22 | 329308 | 576000 | 0 | 7946 | 3870 | ~$0 |\n\n- total cost: ~$0.0000\n- `~` = estimated: tokens flowed on a lane whose provider reports no per-call cost (plan-authed); the USD total is not exact.\n\n## Fixer retries\n| file | retries |\n| --- | --- |\n| src/Access/EntitlementChecker.php | 0 |\n| src/Billing/SubscriptionService.php | 0 |\n| src/Moderation/ChatSentinel.php | 0 |\n| src/Payouts/EarningsLedger.php | 0 |\n| src/Support/legacy_helpers.php | 0 |\n\n## Queue burn-down\n\n### tsc\n| iteration | total | per file |\n| --- | --- | --- |\n| 1 | 6 | src/access/entitlement-checker.ts:2, src/billing/subscription-service.ts:1, src/moderation/chat-sentinel.ts:1, src/payouts/earnings-ledger.ts:1, src/support/legacy-helpers.ts:1 |\n| 2 | 3 | src/moderation/chat-sentinel.ts:1, src/payouts/earnings-ledger.ts:1, src/support/legacy-helpers.ts:1 |\n| 3 | 1 | src/support/legacy-helpers.ts:1 |\n| 4 | 0 | (total):0 |\n\n### vitest\n| iteration | total | per file |\n| --- | --- | --- |\n| 1 | 0 | (total):0 |\n| 2 | 0 | (total):0 |\n| 3 | 0 | (total):0 |\n| 4 | 0 | (total):0 |\n\n## Kill events\n- kill-intent run=cx5-kill-1 utc=2026-09-26T19:50:38.665Z monotonic_ms=45 target_pids=68294,72852\n- kill-completed run=cx5-kill-1 utc=2026-09-26T19:50:38.719Z monotonic_ms=98 resumed=false note=all targets exited after SIGKILL (reason=cx-5 fix-round kill smoke: queue-verify reached (wave-5 AC1))\n\n- interrupted envelopes: 0\n\n## Dispatch anchoring (dex typed 1:N)\n- status: OK\n- envelopes anchored: 213\n- dispatch entries: 368 (non-agent kinds: 0, unexplained: 0)\n- model steps missing start marker: 0\n"
+  }
+];
+
+let curEvidenceDoc = 0;
+let isDrawerOpen = false;
+
+function toggleDrawer() {
+  isDrawerOpen = !isDrawerOpen;
+  const drawer = document.getElementById("evidence-drawer");
+  const btn = document.getElementById("drawer-toggle");
+  btn.setAttribute("aria-expanded", String(isDrawerOpen));
+  if (isDrawerOpen) {
+    drawer.classList.add("open");
+    btn.innerHTML = '<span>&#9650;</span> <span>HIDE RAW ARTIFACT RECEIPTS</span>';
+    showEvidenceDoc(curEvidenceDoc);
+  } else {
+    drawer.classList.remove("open");
+    btn.innerHTML = '<span>&#9660;</span> <span>INSPECT RAW ARTIFACT RECEIPTS</span>';
+  }
+}
+
+function showEvidenceDoc(idx) {
+  curEvidenceDoc = idx;
+  document.getElementById("ev-tab-0").classList.toggle("active", idx === 0);
+  document.getElementById("ev-tab-1").classList.toggle("active", idx === 1);
+  document.getElementById("evidence-body").textContent = RAW_EVIDENCE[idx].content;
+}
+
+let diffViewMode = "split"; // "split" | "unified"
+
+function setDiffView(mode) {
+  const toggles = [...document.querySelectorAll(".diff-view-toggle")];
+  const focusedToggle = document.activeElement?.closest(".diff-view-toggle");
+  const focusedIndex = toggles.indexOf(focusedToggle);
+  diffViewMode = mode;
+  renderStream();
+  if (focusedIndex >= 0) {
+    document.querySelectorAll(".diff-view-toggle")[focusedIndex]
+      ?.querySelector('[aria-pressed="true"]')?.focus({ preventScroll: true });
+  }
+}
+
+const SCENARIOS = [
+  {
+    title: "Scenario 1: Async Resource Leak",
+    wt: "wt-01/billing",
+    opId: "op_9c71a04",
+    verdict: "DEFECT IDENTIFIED · BOUNDED REMEDIATION APPLIED",
+    steps: [
+      {
+        role: "impl",
+        name: "agent-impl-1",
+        meta: "worktree: wt-01/billing · phase: initial_transpile",
+        msg: "Ported SubscriptionBilling.php to subscriptionBilling.ts using Promise-based HTTP client.",
+        diff: `// src/billing/subscriptionBilling.ts
+export async function drainPendingCharges(subId: string): Promise<void> {
+  const client = getHttpClient();
+  const charges = await client.fetchPending(subId);
+  for (const c of charges) {
+    const handle = fs.openSync('/tmp/' + c.id + '.lock', 'w');
+    await client.postCharge(c);
+    // Missing release on error/completion
+  }
+}`,
+        split: {
+          leftTitle: "PHP Original (Legacy Source)",
+          leftCode: `function drainPendingCharges($subId) {
+    $client = getHttpClient();
+    $charges = $client->fetchPending($subId);
+    foreach ($charges as $c) {
+        $handle = fopen("/tmp/{$c->id}.lock", "w");
+        $client->postCharge($c);
+        // Note: Missing fclose() on throw
+    }
+}`,
+          rightTitle: "TypeScript Implementer Draft",
+          rightCode: `export async function drainPendingCharges(subId: string): Promise<void> {
+  const client = getHttpClient();
+  const charges = await client.fetchPending(subId);
+  for (const c of charges) {
+    const handle = fs.openSync('/tmp/' + c.id + '.lock', 'w');
+    await client.postCharge(c);
+    // Missing release on error/completion
+  }
+}`
+        }
+      },
+      {
+        role: "diff",
+        name: "git-harness",
+        meta: "diff-size: +12 lines · citation-hash: 0x8a91f3",
+        msg: "Isolated patch captured by value. Diff serialized and distributed to blind review nodes."
+      },
+      {
+        role: "rev",
+        name: "reviewer-alpha (adversarial · 0 tools)",
+        meta: "citation-check: PASS (100% matched) · agreement: 1.00",
+        msg: "Discrepancy identified: fs.openSync descriptor leaks if client.postCharge throws or finishes without fs.closeSync. In a long-running batch job, this exhausts OS file descriptors within ~1024 operations."
+      },
+      {
+        role: "fix",
+        name: "fixer-agent",
+        meta: "target: src/billing/subscriptionBilling.ts · rule: bounded_resource",
+        msg: "Applied try/finally block with guaranteed closeSync and safe descriptor cleanup:",
+        diff: `export async function drainPendingCharges(subId: string): Promise<void> {
+  const client = getHttpClient();
+  const charges = await client.fetchPending(subId);
+  for (const c of charges) {
+    const handle = fs.openSync('/tmp/' + c.id + '.lock', 'w');
++   try {
+      await client.postCharge(c);
++   } finally {
++     fs.closeSync(handle);
++   }
+  }
+}`,
+        split: {
+          leftTitle: "Vulnerable Implementer Draft",
+          leftCode: `for (const c of charges) {
+  const handle = fs.openSync('/tmp/' + c.id + '.lock', 'w');
+  await client.postCharge(c);
+  // leaked on error
+}`,
+          rightTitle: "Fixer Remediation (Guaranteed Release)",
+          rightCode: `for (const c of charges) {
+  const handle = fs.openSync('/tmp/' + c.id + '.lock', 'w');
+  try {
+    await client.postCharge(c);
+  } finally {
+    fs.closeSync(handle);
+  }
+}`
+        }
+      },
+      {
+        role: "commit",
+        name: "orchestrator (sole committer)",
+        meta: "commit: sha-819bc2e · op-id: op_9c71a04 · verified: tsc 0",
+        msg: "Idempotent commit written to integration tree. Next wave dispatched."
+      }
+    ]
+  },
+  {
+    title: "Scenario 2: Boundary Precision",
+    wt: "wt-02/auth",
+    opId: "op_4b23f81",
+    verdict: "FLOOR PRECISION BUG CAUGHT PRIOR TO MERGE",
+    steps: [
+      {
+        role: "impl",
+        name: "agent-impl-2",
+        meta: "worktree: wt-02/auth · phase: token_refresh",
+        msg: "Converted Unix epoch timestamp calculations from PHP round() to Math.trunc().",
+        diff: `// src/auth/tokenVerifier.ts
+export function parseTokenExpiry(expiresInSec: number): { seconds: number; ms: number } {
+  const sec = Math.trunc(expiresInSec);
+  const ms = Math.round((expiresInSec - sec) * 1000);
+  return { seconds: sec, ms };
+}`,
+        split: {
+          leftTitle: "PHP Original (Legacy Source)",
+          leftCode: `function parseTokenExpiry(float $expiresInSec): array {
+    $sec = (int) floor($expiresInSec);
+    $ms = (int) round(($expiresInSec - $sec) * 1000);
+    return ['seconds' => $sec, 'ms' => $ms];
+}`,
+          rightTitle: "TypeScript Implementer Draft",
+          rightCode: `export function parseTokenExpiry(expiresInSec: number): { seconds: number; ms: number } {
+  const sec = Math.trunc(expiresInSec);
+  const ms = Math.round((expiresInSec - sec) * 1000);
+  return { seconds: sec, ms };
+}`
+        }
+      },
+      {
+        role: "diff",
+        name: "git-harness",
+        meta: "diff-size: +7 lines · citation-hash: 0x4f128c",
+        msg: "Captured diff for isolated verification."
+      },
+      {
+        role: "rev",
+        name: "reviewer-beta (adversarial · 0 tools)",
+        meta: "citation-check: PASS · severity: high",
+        msg: "Math.trunc rounds negative floats toward zero. For pre-epoch or skewed timestamps (-0.5s), sec becomes -0 and ms becomes -500, producing invalid timestamps. Use Math.floor() to guarantee positive millisecond ranges [0, 1000)."
+      },
+      {
+        role: "fix",
+        name: "fixer-agent",
+        meta: "verdict-action: rewrite_math_floor",
+        msg: "Remediated timestamp truncation to strictly enforce monotonic non-negative fractional components.",
+        diff: `export function parseTokenExpiry(expiresInSec: number): { seconds: number; ms: number } {
+- const sec = Math.trunc(expiresInSec);
++ const sec = Math.floor(expiresInSec);
+  const ms = Math.round((expiresInSec - sec) * 1000);
+  return { seconds: sec, ms };
+}`,
+        split: {
+          leftTitle: "Implementer Draft (Trunc Bug)",
+          leftCode: `const sec = Math.trunc(expiresInSec);
+// For -0.5s: sec = 0, ms = -500 (Broken)`,
+          rightTitle: "Fixer Remediation (Floor Monotonic)",
+          rightCode: `const sec = Math.floor(expiresInSec);
+// For -0.5s: sec = -1, ms = 500 (Safe)`
+        }
+      },
+      {
+        role: "commit",
+        name: "orchestrator (sole committer)",
+        meta: "commit: sha-31f0a1c · op-id: op_4b23f81 · verified: vitest green",
+        msg: "Edge cases confirmed green against golden fixture set."
+      }
+    ]
+  },
+  {
+    title: "Scenario 3: Null Safety Gate",
+    wt: "wt-03/telemetry",
+    opId: "op_77e01a9",
+    verdict: "OPTIONAL CHAINING REPAIRED · NO RUNTIME THROW",
+    steps: [
+      {
+        role: "impl",
+        name: "agent-impl-1",
+        meta: "worktree: wt-03/telemetry · phase: payload_mapping",
+        msg: "Ported PHP nested associative array payload parsing into TypeScript object lookup.",
+        diff: `// src/telemetry/payload.ts
+export function extractCorrelationId(payload: Record<string, any>): string {
+  return payload.metadata.headers.correlation_id || generateNewId();
+}`,
+        split: {
+          leftTitle: "PHP Original (Legacy Null Tolerant)",
+          leftCode: `function extractCorrelationId(array $payload): string {
+    return $payload['metadata']['headers']['correlation_id']
+        ?? generateNewId();
+}`,
+          rightTitle: "TypeScript Implementer Draft",
+          rightCode: `export function extractCorrelationId(payload: Record<string, any>): string {
+  // Throws TypeError if metadata or headers undefined
+  return payload.metadata.headers.correlation_id || generateNewId();
+}`
+        }
+      },
+      {
+        role: "diff",
+        name: "git-harness",
+        meta: "diff-size: +4 lines · citation-hash: 0x9021dd",
+        msg: "Diff extracted to isolated envelope."
+      },
+      {
+        role: "rev",
+        name: "reviewer-alpha (adversarial · 0 tools)",
+        meta: "citation-check: PASS · agreement: 1.00",
+        msg: "PHP isset() does not throw when intermediate keys are absent. In TypeScript, accessing payload.metadata.headers directly throws TypeError: cannot read properties of undefined when headers is omitted."
+      },
+      {
+        role: "fix",
+        name: "fixer-agent",
+        meta: "target: src/telemetry/payload.ts",
+        msg: "Applied safe optional chaining and fallback assignment matching PHP behavior:",
+        diff: `export function extractCorrelationId(payload: Record<string, any>): string {
+- return payload.metadata.headers.correlation_id || generateNewId();
++ return payload?.metadata?.headers?.correlation_id ?? generateNewId();
+}`,
+        split: {
+          leftTitle: "Vulnerable Implementer Draft",
+          leftCode: `return payload.metadata.headers.correlation_id || generateNewId();`,
+          rightTitle: "Fixer Remediation (Optional Chaining)",
+          rightCode: `return payload?.metadata?.headers?.correlation_id ?? generateNewId();`
+        }
+      },
+      {
+        role: "commit",
+        name: "orchestrator (sole committer)",
+        meta: "commit: sha-5012a9e · op-id: op_77e01a9 · verified: strict-tsc 0",
+        msg: "Deterministic seal validated. Zero compiler warnings."
+      }
+    ]
+  }
+];
+
+let curScenario = 0;
+let curStep = 2; // default highlight review step
+
+function renderStream() {
+  const sc = SCENARIOS[curScenario];
+  document.getElementById("orch-wt").textContent = sc.wt;
+  document.getElementById("orch-op").textContent = sc.opId;
+  document.getElementById("orch-verdict").textContent = sc.verdict;
+
+  // update steppers
+  for (let i = 0; i < 5; i++) {
+    const el = document.getElementById("st-" + i);
+    if (!el) continue;
+    el.setAttribute("aria-pressed", String(i === curStep));
+    if (i <= curStep) {
+      el.classList.add("active");
+    } else {
+      el.classList.remove("active");
+    }
+  }
+
+  const container = document.getElementById("stream-content");
+  let html = "";
+  for (let i = 0; i <= curStep; i++) {
+    const st = sc.steps[i];
+    const isRev = st.role === "rev";
+    const isFix = st.role === "fix";
+    const isCommit = st.role === "commit";
+    const avatarClass = isRev ? "rev" : (isFix || isCommit ? "fix" : "impl");
+    const avatarText = isRev ? "RV" : (isFix ? "FX" : (isCommit ? "OK" : "IM"));
+    const isReverse = isRev;
+
+    let codeBlockHtml = "";
+    if (st.split && diffViewMode === "split") {
+      codeBlockHtml = `
+        <div class="diff-view-toggle" role="group" aria-label="Code view">
+          <button type="button" aria-pressed="true" class="diff-toggle-btn active" onclick="setDiffView('split')">Side-by-Side Split</button>
+          <button type="button" aria-pressed="false" class="diff-toggle-btn" onclick="setDiffView('unified')">Unified Patch</button>
+        </div>
+        <div class="split-diff-grid">
+          <div class="split-diff-col">
+            <div class="split-diff-head"><span>${st.split.leftTitle}</span> <span>ORIGINAL</span></div>
+            <pre class="split-diff-code"><code>${highlightCode(st.split.leftCode)}</code></pre>
+          </div>
+          <div class="split-diff-col" style="border-color:#384b66">
+            <div class="split-diff-head" style="background:#151d2c"><span>${st.split.rightTitle}</span> <span style="color:var(--green)">MIGRATION</span></div>
+            <pre class="split-diff-code"><code>${highlightCode(st.split.rightCode)}</code></pre>
+          </div>
+        </div>
+      `;
+    } else if (st.diff) {
+      codeBlockHtml = `
+        ${st.split ? `
+        <div class="diff-view-toggle" role="group" aria-label="Code view">
+          <button type="button" aria-pressed="false" class="diff-toggle-btn" onclick="setDiffView('split')">Side-by-Side Split</button>
+          <button type="button" aria-pressed="true" class="diff-toggle-btn active" onclick="setDiffView('unified')">Unified Patch</button>
+        </div>` : ''}
+        <pre class="diff-box"><code>${formatDiff(st.diff)}</code></pre>
+      `;
+    }
+
+    html += `
+      <div class="bubble ${isReverse ? 'reverse' : ''}">
+        <div class="avatar ${avatarClass}">${avatarText}</div>
+        <div class="msg-content">
+          <div class="msg-meta">
+            <strong style="color:var(--cloud)">${st.name}</strong>
+            <span>${st.meta}</span>
+          </div>
+          <div>${st.msg}</div>
+          ${codeBlockHtml}
+        </div>
+      </div>
+    `;
+  }
+  container.innerHTML = html;
+}
+
+// Tokenize raw PHP / TypeScript before escaping. No generated markup is retokenized.
+function highlightCode(raw) {
+  const tokens = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|#[^\n]*|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|\$[A-Za-z_]\w*|\b(?:export|async|await|function|const|let|var|return|if|else|for|foreach|as|of|while|try|catch|finally|throw|new|class|public|private|protected|static|interface|type|import|from|extends|implements|true|false|null|undefined|void|string|number|boolean|int|float|bool|array|echo)\b|\b\d+(?:\.\d+)?n?\b|<\?php|\?>|===|!==|=>|->|\?\?|\?\.|==|!=|<=|>=|&&|\|\||[+\-*/%=<>!?:]/g;
+  let result = '', offset = 0;
+  for (const match of raw.matchAll(tokens)) {
+    result += escapeHtml(raw.slice(offset, match.index));
+    const token = match[0];
+    const kind = /^(\/\/|\/\*|#)/.test(token) ? 'comment'
+      : /^["'`]/.test(token) ? 'string'
+      : token[0] === '$' ? 'variable'
+      : /^\d/.test(token) ? 'number'
+      : /^[A-Za-z]/.test(token) ? 'keyword' : 'operator';
+    result += `<span class="syntax-${kind}">${escapeHtml(token)}</span>`;
+    offset = match.index + token.length;
+  }
+  return result + escapeHtml(raw.slice(offset));
+}
+
+function formatDiff(raw) {
+  // Keep patch prefixes outside the syntax tokens so +/- remain intact.
+  return raw.split('\n').map(line => {
+    const prefix = /^[+-]/.test(line) ? line[0] : '';
+    const kind = prefix === '+' ? 'add' : prefix === '-' ? 'del' : 'ctx';
+    const code = prefix ? line.slice(1) : line;
+    return `<span class="diff-${kind}">${prefix}${highlightCode(code)}</span>`;
+  }).join('');
+}
+
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function showOrchScenario(idx) {
+  curScenario = idx;
+  curStep = 2; // start at review step for high visual impact
+  document.querySelectorAll(".vw-tab").forEach((btn, i) => {
+    btn.classList.toggle("active", i === idx);
+    btn.setAttribute("aria-pressed", String(i === idx));
+  });
+  renderStream();
+}
+
+function jumpStep(idx) {
+  curStep = idx;
+  renderStream();
+  const widget = document.getElementById("orchestrator-flow");
+  if (widget) {
+    const top = widget.getBoundingClientRect().top + window.pageYOffset - (document.querySelector("header.site")?.getBoundingClientRect().height || 76) - 16;
+    window.scrollTo({ top, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  }
+}
+
+
+// Illustrative workflow events. These are not the recorded cx-5e event stream.
+const DW_EVENTS = [
+  [0, 0, "round-0(PORTING.spec.md): specification review agree-clean (0 findings)"],
+  [120000, 4, "round-1(EntitlementChecker.php): reviewer-A flags missing role guard; citation 1.00"],
+  [280000, 4, "round-1(EntitlementChecker.php): fixer resolves role guard, commit op_14f3b"],
+  [450000, 3, "round-1(ChatSentinel.php): regex catastrophic backtracking flagged by reviewer-B"],
+  [710000, 3, "round-1(ChatSentinel.php): atomic regex rewrite applied; vitest green"],
+  [950000, 2, "round-1(EarningsLedger.php): floating point currency drift caught (blocker)"],
+  [1200000, 2, "round-1(EarningsLedger.php): migrated to decimal bigint cents; citation verified"],
+  [1500000, 1, "round-1(legacy_helpers.php): 4 major array key existence throws identified"],
+  [1800000, 1, "round-1(legacy_helpers.php): null-coalescing and optional chaining remediation"],
+  [2100000, 0, "round-1(SubscriptionService.php): async handle leak on client.postCharge throw"],
+  [2400000, 0, "round-1(SubscriptionService.php): try/finally release block applied; tsc 0"],
+  [2800000, 2, "round-2(EarningsLedger.php): minor docblock type ambiguity cleared"],
+  [3100000, 0, "round-2(SubscriptionService.php): boundary edge check confirmed clean"],
+  [3600000, 5, "wave-join: Wait.allOf completed for wave 1; wave 2 dispatches"],
+  [4200000, 1, "round-2(legacy_helpers.php): strict type signature sealed with 100% test coverage"],
+  [5100000, 0, "final link dedup: 10 op-ID idempotent commits joined to integration HEAD"]
+];
+
+const DW_DEFECT_LINES = [
+  ["defect[SEV-1]", "SubscriptionService.php: resource leak fs.openSync without finally"],
+  ["defect[SEV-2]", "SubscriptionService.php: unhandled Promise rejection on rate limit"],
+  ["defect[SEV-1]", "EarningsLedger.php: floating point rounding error on payout cents"],
+  ["defect[SEV-3]", "legacy_helpers.php: missing array offset notice converts to TypeError"],
+  ["defect[SEV-2]", "ChatSentinel.php: ReDoS regex vulnerability on nested mentions"],
+  ["defect[SEV-1]", "EntitlementChecker.php: strict equality check bypassed on null role"],
+  ["defect[SEV-3]", "SubscriptionService.php: date string parsing ignores UTC timezone skew"],
+  ["defect[SEV-2]", "legacy_helpers.php: array_merge argument type error on non-array input"],
+  ["defect[SEV-1]", "EarningsLedger.php: ledger entry duplicate key violation under race"],
+  ["defect[SEV-2]", "ChatSentinel.php: unicode boundary truncation splits surrogate pairs"],
+  ["defect[SEV-3]", "EntitlementChecker.php: unmemoized permission lookup adds 400ms latency"]
+];
+
+const DW_LANE_TOTALS = [11, 7, 4, 3, 2, 1];
+const DW_STAGES = ["#fbbf24", "#a78bfa", "#4ade80"];
+const DW_T0 = 1778053205000;
+
+function setupDynamicWorkflow() {
+  const root = document.getElementById("dynamic-workflow");
+  if (!root) return;
+
+  const errsEl = document.getElementById("dw-err-count");
+  const clockEl = document.getElementById("dw-clock-display");
+  const btn = document.getElementById("dw-replay-btn");
+  const commitsEl = document.getElementById("dw-commits-label");
+  const linesBox = document.getElementById("dw-lines-container");
+  const fileCard = document.getElementById("dw-file-card");
+  const flowContainer = document.getElementById("dw-flow-container");
+
+  const rows = root.querySelectorAll(".dw-row");
+  const fills = root.querySelectorAll(".dw-row-fill");
+  const nums = root.querySelectorAll(".dw-row-num");
+  const pipes = [...root.querySelectorAll(".dw-pipe")];
+  const cells = pipes.map(p => [...p.querySelectorAll(".dw-cell")]);
+  const logEls = [
+    document.getElementById("dw-log-0"),
+    document.getElementById("dw-log-1"),
+    document.getElementById("dw-log-2")
+  ];
+
+  let playing = false;
+  let batchIndex = 0;
+  let inflight = 0;
+  let lineCursor = 0;
+  let pendingTimeouts = [];
+  const laneCurrent = new Array(DW_LANE_TOTALS.length).fill(0);
+
+  // Chips for animation
+  const chips = pipes.map(() => {
+    const chip = document.createElement("span");
+    chip.className = "dw-chip";
+    flowContainer.appendChild(chip);
+    return chip;
+  });
+
+  function getAnchor(el) {
+    const fr = flowContainer.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    return [r.left - fr.left + r.width / 2, r.top - fr.top + r.height / 2];
+  }
+
+  function placeChip(chip, coord, ms) {
+    chip.style.transition = ms ? `transform ${ms}ms cubic-bezier(0.4, 0, 0.3, 1)` : "none";
+    chip.style.transform = `translate(${coord[0] - 4}px, ${coord[1] - 4}px)`;
+  }
+
+  function glowCell(c, color, ms) {
+    c.style.opacity = "1";
+    c.style.boxShadow = `0 0 9px ${color}`;
+    setTimeout(() => {
+      if (playing) {
+        c.style.opacity = "0.35";
+        c.style.boxShadow = "none";
+      }
+    }, ms);
+  }
+
+  function makeLine(idx, fixed) {
+    const [code, msg] = DW_DEFECT_LINES[idx % DW_DEFECT_LINES.length];
+    const div = document.createElement("div");
+    div.style.overflow = "hidden";
+    div.style.textOverflow = "ellipsis";
+    div.style.whiteSpace = "nowrap";
+
+    const tag = document.createElement("span");
+    tag.style.fontWeight = "700";
+    tag.style.color = fixed ? "var(--green)" : "#f87171";
+    tag.textContent = fixed ? "✓ " + code : "✕ " + code;
+
+    const text = document.createElement("span");
+    text.style.color = fixed ? "#4b5563" : "var(--steel)";
+    text.textContent = ": " + msg;
+
+    div.appendChild(tag);
+    div.appendChild(text);
+    return div;
+  }
+
+  function fillLines(allFixed) {
+    linesBox.innerHTML = "";
+    for (let i = 0; i < 11; i++) {
+      linesBox.appendChild(makeLine(i, allFixed));
+    }
+  }
+
+  function syncLane(l) {
+    if (l >= DW_LANE_TOTALS.length) return;
+    const pct = Math.min(100, (laneCurrent[l] / DW_LANE_TOTALS[l] * 100)).toFixed(0);
+    fills[l].style.width = pct + "%";
+    nums[l].textContent = `${laneCurrent[l]}/${DW_LANE_TOTALS[l]} fs`;
+  }
+
+  function finalState() {
+    playing = false;
+    errsEl.textContent = "0";
+    errsEl.style.color = "var(--green)";
+    commitsEl.textContent = "Example complete";
+    clockEl.textContent = "Simulation complete";
+
+    for (let l = 0; l < DW_LANE_TOTALS.length; l++) {
+      laneCurrent[l] = DW_LANE_TOTALS[l];
+      syncLane(l);
+    }
+    nums[5].textContent = "clean";
+    fills[5].style.width = "100%";
+
+    fillLines(true);
+    logEls[0].textContent = "· round-1(SubscriptionService.php): reviewer-A flagged 4 major defects; citation check F1..F4=1.00";
+    logEls[1].textContent = "· round-2(Payouts/EarningsLedger.php): fixer applied Monotonic BigInt precision; reviewer-A approved";
+    logEls[2].textContent = "· final wave join: Wait.allOf resolved · 10 idempotent commits · 213 envelopes anchored → MERGED";
+    logEls[2].style.color = "var(--green)";
+  }
+
+  function rewind() {
+    playing = true;
+    batchIndex = 0;
+    inflight = 0;
+    lineCursor = 0;
+    errsEl.textContent = "27";
+    errsEl.style.color = "#f87171";
+    commitsEl.textContent = "Example queued";
+    clockEl.textContent = "Simulation running";
+
+    for (let l = 0; l < DW_LANE_TOTALS.length; l++) {
+      laneCurrent[l] = 0;
+      fills[l].style.width = "0%";
+      nums[l].textContent = `0/${DW_LANE_TOTALS[l]} fs`;
+    }
+    nums[5].textContent = "queued";
+    fillLines(false);
+
+    logEls[0].textContent = "· wave-1: leased wt-1 (SubscriptionService) & wt-2 (EntitlementChecker)";
+    logEls[1].textContent = "· parallel agents dispatched across isolated git worktrees";
+    logEls[2].textContent = "· adversarial review gates engaged (diff-only · 0 tools)";
+    logEls[2].style.color = "var(--steel)";
+  }
+
+  function runPipeLoop(pipeIdx) {
+    if (!playing || batchIndex >= DW_EVENTS.length) {
+      if (inflight === 0 && batchIndex >= DW_EVENTS.length) {
+        finalState();
+      }
+      return;
+    }
+
+    const event = DW_EVENTS[batchIndex++];
+    const lane = event[1];
+    const logMsg = event[2];
+    inflight++;
+
+    const chip = chips[pipeIdx];
+    const cs = cells[pipeIdx];
+
+    // Scroll lines
+    if (linesBox.firstChild) linesBox.removeChild(linesBox.firstChild);
+    linesBox.appendChild(makeLine(lineCursor++, false));
+
+    // Animate chip through 3 stages
+    placeChip(chip, getAnchor(fileCard), 0);
+    chip.style.opacity = "1";
+
+    // Stage 1: Implement
+    pendingTimeouts.push(setTimeout(() => {
+      placeChip(chip, getAnchor(cs[0]), 300);
+      glowCell(cs[0], DW_STAGES[0], 350);
+    }, 40));
+
+    // Stage 2: Reviews
+    pendingTimeouts.push(setTimeout(() => {
+      const a1 = getAnchor(cs[1]);
+      const a2 = getAnchor(cs[2]);
+      placeChip(chip, [(a1[0] + a2[0]) / 2, a1[1]], 140);
+      glowCell(cs[1], DW_STAGES[1], 400);
+      glowCell(cs[2], DW_STAGES[1], 400);
+    }, 400));
+
+    // Stage 3: Fixer
+    pendingTimeouts.push(setTimeout(() => {
+      placeChip(chip, getAnchor(cs[3]), 140);
+      glowCell(cs[3], DW_STAGES[2], 260);
+    }, 850));
+
+    // Stage 4: Commit to lane
+    pendingTimeouts.push(setTimeout(() => {
+      if (lane < rows.length) {
+        placeChip(chip, getAnchor(rows[lane]), 350);
+      }
+    }, 1150));
+
+    // Complete step
+    pendingTimeouts.push(setTimeout(() => {
+      chip.style.opacity = "0";
+      if (lane < DW_LANE_TOTALS.length && laneCurrent[lane] < DW_LANE_TOTALS[lane]) {
+        laneCurrent[lane]++;
+        syncLane(lane);
+      }
+      const remaining = Math.max(0, 27 - batchIndex * 2);
+      errsEl.textContent = remaining.toString();
+      if (remaining === 0) errsEl.style.color = "var(--green)";
+      commitsEl.textContent = `${batchIndex}/${DW_EVENTS.length} example events`;
+
+      logEls[0].textContent = logEls[1].textContent;
+      logEls[1].textContent = logEls[2].textContent;
+      logEls[2].textContent = "· " + logMsg;
+
+      inflight--;
+      if (batchIndex >= DW_EVENTS.length && inflight === 0) {
+        finalState();
+      } else if (playing) {
+        runPipeLoop(pipeIdx);
+      }
+    }, 1550));
+  }
+
+  function play() {
+    for (const t of pendingTimeouts) clearTimeout(t);
+    pendingTimeouts = [];
+    chips.forEach(c => { c.style.opacity = "0"; });
+    rewind();
+    pipes.forEach((_, i) => {
+      pendingTimeouts.push(setTimeout(() => runPipeLoop(i), i * 220));
+    });
+  }
+
+  btn.addEventListener("click", play);
+  finalState(); // default to completed state on initial load
+}
+
+// Attach to DOMContentLoaded
+
+// Scrollspy for TOC
+function setupScrollspy() {
+  const links = document.querySelectorAll('.toc-link, nav.tabs a');
+  const sections = [...document.querySelectorAll('.main-column > section[id]')];
+  const targetId = link => link.dataset.sec || link.hash.slice(1);
+
+  const update = () => {
+    let current = '';
+    const scrollPos = window.scrollY + 140;
+
+    for (const sec of sections) {
+      if (sec.getBoundingClientRect().top + window.scrollY <= scrollPos) {
+        current = sec.id;
+      }
+    }
+
+    links.forEach(l => {
+      l.classList.toggle('active', targetId(l) === current);
+      if (targetId(l) === current) l.setAttribute('aria-current', 'location');
+      else l.removeAttribute('aria-current');
+    });
+  };
+  window.addEventListener('scroll', update, { passive: true });
+  update();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  renderStream();
+  setupScrollspy();
+  setupDynamicWorkflow();
+});
+</script>
+<!-- Cloudflare Web Analytics -->
+
+<!-- End Cloudflare Web Analytics -->
 </body>
 </html>

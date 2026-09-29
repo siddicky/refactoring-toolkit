@@ -1,0 +1,16 @@
+PASS flow completed
+PASS sidecar has intent + completed
+PASS intent-before-kill ordering (monotonic)
+PASS sidecar anchored to dex run id
+info: child flows across waves: 10
+PASS post-kill activity exists (resume happened)
+PASS flow closed after kill
+info: completed round-1 files: ['src/Access/EntitlementChecker.php', 'src/Billing/SubscriptionService.php', 'src/Moderation/ChatSentinel.php', 'src/Payouts/EarningsLedger.php', 'src/Support/legacy_helpers.php']; blocked: []
+PASS zero new implementer invocations post-kill
+PASS no duplicate op-ID commits
+PASS round-1 keyed commits reachable at integration HEAD
+PASS completed-file content exists in integrated output
+info: post-fix outcome distribution (fix/commit/integrate): {'skipped': 5, 'completed': 20}
+PASS fix-round work present post-kill (redone path)
+
+ALL PASS

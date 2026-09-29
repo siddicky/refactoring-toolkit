@@ -1,16 +1,24 @@
-# Static demo design
+# Presentation design contract
 
-This presentation keeps the mission-control dashboard's existing visual language: a dark ink canvas, compact monospace labels, thin blue-gray dividers, and green for verified progress. The page is a recorded run, so its status language must always say "recorded" and its figures must match `assets/cx9-evidence.md` and `assets/report-final.md`.
+Reference: the user's existing presentation at `https://delvee.siddicky.ca/`, inspected on 29 September 2026. The Vercel homepage uses that page's DOM, inline styles, and interactions as its visual and content contract. The separately recorded cx9 presentation remains at `cx9.html`.
 
 ## Tokens
 
-- Canvas `#0a0e14`, panel `#0e141d`, border `#1c2634`.
-- Main text `#b6c2cf`, muted text `#8292a3`, green `#6fdc8c`, blue `#6cb6ff`, amber `#e3b341`.
-- System monospace stack for labels and data. System sans stack for the reading headline.
-- Spacing uses 4 px increments. Panels use an 8 px radius and a single border.
+- Accent `#9fef00`; canvas `#0b111d`; panel `#111927`; raised panel `#182334`.
+- Divider `#29374c`; muted text `#a4b1cd`; primary text `#f5f7fa`.
+- Reading type: Instrument Sans. Display type: Geist. Data labels: Geist Mono.
+- Content width: 1180 px. Full-page panels and evidence sections have fine dividers, square corners, and compact uppercase mono labels.
 
-## Layout and behavior
+## Layout and interactions
 
-- Centered content with a 1120 px maximum width, a two-column evidence grid on desktop, and one column on narrow screens.
-- Video remains user-controlled, with no autoplay. Links have visible focus states.
-- The recorded status is text, not a simulated live indicator. No network polling occurs.
+- Sticky 76 px header with geometric lime mark and a section index.
+- Hero: outlined label, two-line regular-weight headline with lime phrase, paragraph, two actions, then an illustrative workflow panel.
+- The page continues with context, architecture, workflow, recovery, evidence, dashboard, fit, and discussion sections.
+- The workflow simulation, scenario controls, code comparison, and evidence drawer are real DOM interactions.
+- At narrow widths, navigation and grids adapt to the reference page's media queries. Links and controls retain visible focus states.
+
+## Evidence boundary
+
+The homepage reproduces the cx-5e presentation and its saved artifacts. It labels the workflow simulation as illustrative and the dashboard captures as static. The cx9 run is a separate recorded presentation at `cx9.html` with its own evidence and limits.
+
+The Biome override preserves the reference's keyboard-focusable scroll regions and interactive SVG groups. Both have explicit accessible labels and keyboard handlers; replacing them with HTML buttons would change the SVG diagram structure.
