@@ -97,7 +97,14 @@ describe("renderReport against recorded fixture events (run-a + dex history)", (
     expect(rendered.json.summary.interrupted_envelope_count).toBe(1);
     expect(rendered.json.summary.verdict_record_count).toBe(8);
     expect(rendered.json.summary.tokens_model_roles).toBe(15640);
-    expect(rendered.json.summary.wall_clock_ms_total).toBe(1049996);
+    // Sum of step durations (overlapping work double counts) is NOT elapsed time.
+    expect(rendered.json.summary.step_time_ms_total).toBe(1049996);
+    const starts = runA.envelopes.map((e) => Date.parse(e.started_at));
+    const ends = runA.envelopes.flatMap((e) => (e.ended_at === null ? [] : [Date.parse(e.ended_at)]));
+    expect(rendered.json.summary.wall_clock_span_ms).toBe(Math.max(...ends) - Math.min(...starts));
+    expect(rendered.markdown).toContain("- step time: 1049996 ms");
+    expect(rendered.markdown).toContain(`- elapsed wall clock: ${rendered.json.summary.wall_clock_span_ms} ms`);
+    expect(rendered.markdown).not.toContain("total wall clock");
     expect(rendered.json.summary.files).toEqual([
       "src/Auth/LdapAuth.php",
       "src/Util/Csv.php",
@@ -756,5 +763,87 @@ describe("renderReport prefers the authoritative verdict file over the lossy ide
     const b = { ...verdict("reviewer-A"), file: "a/b__c.php" };
     const rendered = renderReport({ envelopes: [], verdicts: [a, b], burnDown: [] });
     expect(rendered.json.summary.files).toEqual(["a/b__c.php", "a__b/c.php"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C47: metrics measure what their labels say.
+// ---------------------------------------------------------------------------
+
+describe("renderReport metric labels (C47)", () => {
+  const step = (over: Partial<EnvelopeEvent> & { stepId: string }): EnvelopeEvent => ({
+    role: "agent",
+    file: null,
+    round: null,
+    attempt: 1,
+    started_at: "2026-09-26T10:00:00.000Z",
+    ended_at: "2026-09-26T10:10:00.000Z",
+    outcome: "completed",
+    tokens: 10,
+    wall_clock_ms: 600_000,
+    identity: "src__a.php#1",
+    ...over,
+  });
+  const render = (envelopes: EnvelopeEvent[], verdicts: VerdictRecord[] = []) =>
+    renderReport({ envelopes, verdicts, burnDown: [] });
+
+  test("fixer retries: a lone durable attempt-3 envelope is 2 retries (only the successful attempt persists)", () => {
+    const rendered = render([step({ stepId: "pp-fixer", attempt: 3 })]);
+    expect(rendered.json.fixer_retries).toEqual([{ file: "src/a.php", retries: 2 }]);
+  });
+
+  test("fixer retries are summed per target, not counted per envelope", () => {
+    const rendered = render([
+      step({ stepId: "pp-fixer", attempt: 2, identity: "src__a.php#1" }),
+      step({ stepId: "pp-fixer", attempt: 1, identity: "src__a.php#2" }),
+      step({ stepId: "pp-fixer", attempt: 4, identity: "src__b.php#1" }),
+      // marker (attempt 0) never counts as a retry
+      step({ stepId: "pp-fixer", attempt: 0, outcome: "interrupted", ended_at: null, tokens: null, wall_clock_ms: null, identity: "src__b.php#1" }),
+    ]);
+    expect(rendered.json.fixer_retries).toEqual([
+      { file: "src/a.php", retries: 1 },
+      { file: "src/b.php", retries: 3 },
+    ]);
+  });
+
+  test("two parallel 10-minute steps: step time is the SUM, elapsed wall clock is the overlap-aware span", () => {
+    const rendered = render([
+      step({ stepId: "pp-implement", identity: "src__a.php#1" }),
+      step({ stepId: "pp-implement", identity: "src__b.php#1" }),
+    ]);
+    expect(rendered.json.summary.step_time_ms_total).toBe(1_200_000);
+    expect(rendered.json.summary.wall_clock_span_ms).toBe(600_000);
+    expect(rendered.markdown).toContain("- step time: 1200000 ms");
+    expect(rendered.markdown).toContain("- elapsed wall clock: 600000 ms");
+    expect(rendered.markdown).toContain("| file | role | steps | tokens | step time ms |");
+  });
+
+  test("elapsed wall clock is n/a when no envelope has a parseable end", () => {
+    const rendered = render([step({ stepId: "pp-implement", attempt: 0, outcome: "interrupted", ended_at: null, tokens: null, wall_clock_ms: null })]);
+    expect(rendered.json.summary.wall_clock_span_ms).toBeNull();
+    expect(rendered.markdown).toContain("- elapsed wall clock: n/a");
+  });
+
+  test("the prep spec pseudo-file is not listed under files (but its review work is still reported)", () => {
+    const verdict = (file: string, reviewer: string, round: number): VerdictRecord => ({
+      file,
+      reviewer,
+      round,
+      diff_id: "d",
+      findings: [],
+      citation_check: [],
+    });
+    const rendered = render(
+      [step({ stepId: "pp-implement" })],
+      [
+        verdict("PORTING.spec.md", "reviewer-A", 0),
+        verdict("PORTING.spec.md", "reviewer-B", 0),
+        verdict("src/a.php", "reviewer-A", 1),
+        verdict("src/a.php", "reviewer-B", 1),
+      ],
+    );
+    expect(rendered.json.summary.files).toEqual(["src/a.php"]);
+    expect(rendered.json.file_rounds.map((fr) => fr.file)).toEqual(["PORTING.spec.md", "src/a.php"]);
+    expect(rendered.markdown).toContain("- files: 1 (src/a.php)");
   });
 });

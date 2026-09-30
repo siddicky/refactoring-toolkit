@@ -383,3 +383,82 @@ describe("anchorForRun (recorded fixtures, end to end)", () => {
     expect(cross.ok).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// C47: dispatch entries count step execution ATTEMPTS, not history events.
+// ---------------------------------------------------------------------------
+
+describe("extractDispatchEntries dedupes multi-event executions (C47)", () => {
+  const ev = (type: string, id: string, stepType: string, finalAttempt: number, echo?: { file: string; round: number }) => ({
+    eventId: `${type}-${id}-${finalAttempt}`,
+    type,
+    payload: {
+      context: { stepExecutionId: id, stepType, finalAttempt },
+      ...(echo !== undefined ? { input: { stepInput: echo } } : {}),
+    },
+  });
+
+  test("one execution emitting started + execute-completed + waitFor events is ONE entry", () => {
+    const history: DispatchHistory = {
+      events: [
+        ev("StepStarted", "x1", "PpImplement", 1),
+        ev("StepExecuteCompleted", "x1", "PpImplement", 1),
+        ev("StepWaitForStarted", "x1", "PpImplement", 1),
+        ev("StepWaitForCompleted", "x1", "PpImplement", 1),
+      ],
+    };
+    expect(extractDispatchEntries(history).length).toBe(1);
+  });
+
+  test("retries stay distinct: a new finalAttempt (same or new execution id) is a new entry", () => {
+    const history: DispatchHistory = {
+      events: [
+        ev("StepExecuteFailed", "x1", "PpReviewA", 1),
+        ev("StepExecuteFailed", "x1", "PpReviewA", 2),
+        ev("StepExecuteCompleted", "x1", "PpReviewA", 3),
+        ev("StepWaitForCompleted", "x1", "PpReviewA", 3),
+        ev("StepStarted", "x2", "PpReviewA", 1),
+      ],
+    };
+    const entries = extractDispatchEntries(history);
+    expect(entries.map((e) => `${e.stepExecutionId}@${e.finalAttempt}`)).toEqual(["x1@1", "x1@2", "x1@3", "x2@1"]);
+  });
+
+  test("the duplicate that carries the file+round echo supplies the identity", () => {
+    const history: DispatchHistory = {
+      events: [
+        ev("StepStarted", "x1", "PpImplement", 1),
+        ev("StepExecuteCompleted", "x1", "PpImplement", 1, { file: "src/A.php", round: 2 }),
+      ],
+    };
+    const entries = extractDispatchEntries(history);
+    expect(entries.length).toBe(1);
+    expect(entries[0]?.identity).toBe("src__A.php#2");
+  });
+
+  test("events without a stepExecutionId cannot be deduped and each count", () => {
+    const history: DispatchHistory = {
+      events: [{ payload: { context: { stepType: "PpPrep" } } }, { payload: { context: { stepType: "PpPrep" } } }],
+    };
+    expect(extractDispatchEntries(history).length).toBe(2);
+  });
+
+  test("dispatch_entries_total in the anchor result counts executions, not events (multi-event history)", () => {
+    const history: DispatchHistory = {
+      events: [
+        ev("StepStarted", "m1", "PpImplementStart", 1, { file: "src/A.php", round: 1 }),
+        ev("StepExecuteCompleted", "m1", "PpImplementStart", 1, { file: "src/A.php", round: 1 }),
+        ev("StepStarted", "i1", "PpImplement", 1, { file: "src/A.php", round: 1 }),
+        ev("StepExecuteCompleted", "i1", "PpImplement", 1, { file: "src/A.php", round: 1 }),
+        ev("StepWaitForCompleted", "i1", "PpImplement", 1, { file: "src/A.php", round: 1 }),
+      ],
+    };
+    const identity = "src__A.php#1";
+    const cross = anchorForRun(history, [
+      envelope({ stepId: "pp-implement", role: "agent", attempt: 0, outcome: "interrupted", ended_at: null, wall_clock_ms: null, identity }),
+      envelope({ stepId: "pp-implement", role: "agent", attempt: 1, tokens: 10, identity }),
+    ]);
+    expect(cross.anchor.dispatch_entries_total).toBe(2);
+    expect(cross.ok).toBe(true);
+  });
+});

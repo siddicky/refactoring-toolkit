@@ -52,6 +52,14 @@ import {
 /** The fixer step id (mirror of flows/port-project.ts) for AC2 retry counts. */
 const FIXER_STEP_ID = "pp-fixer";
 
+/**
+ * The prep-analysis spec (flows/port-project.ts PREP_SPEC_FILE, round 0):
+ * prep reviews key their envelopes and verdicts by it. It is real review work
+ * (kept in file_rounds and the token tables) but not a ported source file, so
+ * it is excluded from `summary.files`.
+ */
+const PREP_SPEC_FILE = "PORTING.spec.md";
+
 /** Legacy driver pseudo-file marking an aggregate burn-down row (now `file: null`). */
 const TOTAL_PSEUDO_FILE = "(total)";
 
@@ -89,6 +97,7 @@ export interface DispatchAnchorSummary {
   ok: boolean;
   failures: string[];
   envelopes_anchored: number;
+  /** Distinct step execution attempts (history events of one execution collapse). */
   dispatch_entries_total: number;
   non_agent_dispatch_entries: number;
   unexplained_dispatch_entries: number;
@@ -116,7 +125,13 @@ export interface ReportJson {
     exhausted_attempt_tombstones: number;
     /** Total over model-calling roles, real attempts only; null when none. */
     tokens_model_roles: number | null;
-    wall_clock_ms_total: number;
+    /**
+     * SUM of every real step's own duration. Parallel waves overlap, so this
+     * can exceed the elapsed time — it is step time, not wall clock.
+     */
+    step_time_ms_total: number;
+    /** Elapsed time: first envelope start to last envelope end; null when unknown. */
+    wall_clock_span_ms: number | null;
     /**
      * US-010: what the run was actually verified BY. `tsc_verified` is the
      * last burn-down iteration's typecheck result (null = no tsc samples);
@@ -192,7 +207,11 @@ export interface ReportJson {
     cost_usd: null;
     by_step: Array<{ step: string; calls: number; tokens: number }>;
   } | null;
-  /** Retries = fixer (stepId pp-fixer) envelope events with attempt > 1, per file. */
+  /**
+   * Fixer retries per file: for each fixer target (file#round) the highest
+   * durable attempt minus one, summed per file. Only the successful attempt's
+   * envelope is durable (0(g)), so max(attempt) is the attempt count.
+   */
   fixer_retries: Array<{ file: string; retries: number }>;
   queue_burn_down: Array<{
     queue: QueueKind;
@@ -582,10 +601,16 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
 
   // ---- totals over eligible (model-calling, real-attempt) steps ----------
   let modelTokens: number | null = null;
-  let wallClockTotal = 0;
+  let stepTimeTotal = 0;
+  let spanStart: number | null = null;
+  let spanEnd: number | null = null;
   let startMarkerCount = 0;
   let interruptedRealCount = 0;
   for (const env of envelopes) {
+    const startedAt = Date.parse(env.started_at);
+    if (!Number.isNaN(startedAt)) spanStart = spanStart === null ? startedAt : Math.min(spanStart, startedAt);
+    const endedAt = env.ended_at === null ? Number.NaN : Date.parse(env.ended_at);
+    if (!Number.isNaN(endedAt)) spanEnd = spanEnd === null ? endedAt : Math.max(spanEnd, endedAt);
     if (env.attempt === 0) {
       startMarkerCount++;
       continue;
@@ -595,23 +620,27 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
       const tokens = tokenTotalOf(env.tokens);
       if (tokens !== null) modelTokens = (modelTokens ?? 0) + tokens;
     }
-    if (env.wall_clock_ms !== null) wallClockTotal += env.wall_clock_ms;
+    if (env.wall_clock_ms !== null) stepTimeTotal += env.wall_clock_ms;
   }
 
   // ---- fixer retries -------------------------------------------------------
-  const retriesByFile = new Map<string, number>();
+  // Per target (identity) the highest durable attempt minus one; the durable
+  // envelope of a fixer that succeeded on attempt 3 is attempt 3 alone.
+  const maxAttemptByTarget = new Map<string, Map<string, number>>();
   for (const env of envelopes) {
     if (env.stepId !== FIXER_STEP_ID || env.attempt === 0) continue;
     const file = envelopeTarget(env, canonicalFile)?.file;
     if (file === undefined) continue;
-    if (env.attempt > 1) {
-      retriesByFile.set(file, (retriesByFile.get(file) ?? 0) + 1);
-    } else if (!retriesByFile.has(file)) {
-      retriesByFile.set(file, 0);
-    }
+    const targets = maxAttemptByTarget.get(file) ?? new Map<string, number>();
+    const target = env.identity ?? "(flow)";
+    targets.set(target, Math.max(targets.get(target) ?? 0, env.attempt));
+    maxAttemptByTarget.set(file, targets);
   }
-  const fixerRetries = [...retriesByFile.entries()]
-    .map(([file, retries]) => ({ file, retries }))
+  const fixerRetries = [...maxAttemptByTarget.entries()]
+    .map(([file, targets]) => ({
+      file,
+      retries: [...targets.values()].reduce((sum, attempt) => sum + Math.max(0, attempt - 1), 0),
+    }))
     .sort((p, q) => compareStrings(p.file, q.file));
 
   // ---- queue burn-down ------------------------------------------------------
@@ -703,7 +732,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     provenance_ok: provenanceFailures.length === 0,
     provenance_failures: provenanceFailures,
     summary: {
-      files: [...files].sort(compareStrings),
+      files: [...files].filter((f) => f !== PREP_SPEC_FILE).sort(compareStrings),
       envelope_count: envelopes.length,
       start_marker_count: startMarkerCount,
       interrupted_envelope_count: interruptedRealCount,
@@ -714,7 +743,8 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
         t.reason.startsWith("attempt-exhausted"),
       ).length,
       tokens_model_roles: modelTokens,
-      wall_clock_ms_total: wallClockTotal,
+      step_time_ms_total: stepTimeTotal,
+      wall_clock_span_ms: spanStart !== null && spanEnd !== null && spanEnd >= spanStart ? spanEnd - spanStart : null,
       verification,
     },
     file_rounds: fileRounds,
@@ -809,7 +839,14 @@ function renderMarkdown(report: ReportJson): string {
       ? "- judgment (Jev) tokens: none recorded (naive judgment path or no live Jev spend)"
       : `- judgment (Jev) tokens: ${report.jev_usage.total_tokens} (separate from model-calling roles; see Judgment (Jev) section)`,
   );
-  lines.push(`- total wall clock: ${report.summary.wall_clock_ms_total} ms`);
+  lines.push(
+    `- step time: ${report.summary.step_time_ms_total} ms (sum of per-step durations; parallel steps overlap, so this can exceed elapsed time)`,
+  );
+  lines.push(
+    report.summary.wall_clock_span_ms === null
+      ? "- elapsed wall clock: n/a"
+      : `- elapsed wall clock: ${report.summary.wall_clock_span_ms} ms (first envelope start to last envelope end)`,
+  );
   lines.push("");
 
   lines.push("## Findings and agreement");
@@ -848,11 +885,11 @@ function renderMarkdown(report: ReportJson): string {
   }
   lines.push("");
 
-  lines.push("## Tokens and wall clock per file and role");
+  lines.push("## Tokens and step time per file and role");
   if (report.tokens_by_file_role.length === 0) {
     lines.push("_no envelope events in the stream_");
   } else {
-    lines.push("| file | role | steps | tokens | wall clock ms |");
+    lines.push("| file | role | steps | tokens | step time ms |");
     lines.push("| --- | --- | --- | --- | --- |");
     for (const agg of report.tokens_by_file_role) {
       const tokensCell = agg.tokens === null ? "n/a" : String(agg.tokens);

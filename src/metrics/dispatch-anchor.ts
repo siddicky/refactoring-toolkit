@@ -111,22 +111,43 @@ function identityFromEvent(event: DispatchHistoryEvent): string | null {
  * `payload.context.stepType` are not step dispatches (flow-level events) and
  * are skipped. A missing finalAttempt defaults to 1 (dex always reports it
  * per 0(h); the default keeps hand-made fixtures honest).
+ *
+ * One step execution emits SEVERAL history events (started / execute
+ * completed / waitFor ...) carrying the same context, so events are deduped
+ * per (stepType, stepExecutionId, finalAttempt): an entry is one execution
+ * ATTEMPT, never one event. Retries stay distinct (different finalAttempt or
+ * execution id). Events without a stepExecutionId cannot be deduped and each
+ * count. When duplicates disagree on identity the one that carries the file
+ * +round input echo wins.
  */
 export function extractDispatchEntries(history: DispatchHistory): DispatchEntry[] {
   const entries: DispatchEntry[] = [];
+  const seen = new Map<string, DispatchEntry>();
   for (const event of history.events) {
     const context = event.payload?.context;
     if (context === undefined || context === null) continue;
     const stepType = context.stepType;
     if (typeof stepType !== "string" || stepType.length === 0) continue;
-    const stepExecutionId = context.stepExecutionId;
+    const stepExecutionId = typeof context.stepExecutionId === "string" ? context.stepExecutionId : "";
     const finalAttempt = context.finalAttempt;
-    entries.push({
-      stepExecutionId: typeof stepExecutionId === "string" ? stepExecutionId : "",
+    const entry: DispatchEntry = {
+      stepExecutionId,
       stepType,
       finalAttempt: typeof finalAttempt === "number" && Number.isInteger(finalAttempt) && finalAttempt >= 1 ? finalAttempt : 1,
       identity: identityFromEvent(event),
-    });
+    };
+    if (stepExecutionId === "") {
+      entries.push(entry);
+      continue;
+    }
+    const key = `${stepType}\u0000${stepExecutionId}\u0000${entry.finalAttempt}`;
+    const existing = seen.get(key);
+    if (existing === undefined) {
+      seen.set(key, entry);
+      entries.push(entry);
+    } else if (existing.identity === null && entry.identity !== null) {
+      existing.identity = entry.identity;
+    }
   }
   return entries;
 }
