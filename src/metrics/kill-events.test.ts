@@ -5,7 +5,6 @@ import { join } from "node:path";
 
 import {
   DEFAULT_KILL_EVENTS_PATH,
-  isFiredKill,
   killEventDiagnosticsOf,
   loadKillEvents,
   parseKillEvents,
@@ -13,7 +12,7 @@ import {
   withResumed,
 } from "./kill-events.js";
 import { renderReport } from "./render.js";
-import type { EnvelopeEvent, KillEventsFile } from "./types.js";
+import { type EnvelopeEvent, isFiredKill, type KillEventsFile } from "./types.js";
 import killARaw from "./fixtures/kill-events-run-a.json" with { type: "json" };
 
 const tmp = mkdtempSync(join(tmpdir(), "kill-events-test-"));

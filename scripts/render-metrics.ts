@@ -31,7 +31,6 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { dexConfigFromEnv } from "../src/dex/client.js";
-
 import {
   collectBurnDown,
   collectEnvelopes,

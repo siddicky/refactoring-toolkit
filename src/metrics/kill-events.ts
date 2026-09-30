@@ -32,8 +32,6 @@ import {
   type ReportKillEvent,
 } from "./types.js";
 
-export { isFiredKill };
-
 /** Default sidecar location, relative to the cwd (the repo's /metrics/ dir is gitignored run output). */
 export const DEFAULT_KILL_EVENTS_PATH = "metrics/kill-events.jsonl";
 

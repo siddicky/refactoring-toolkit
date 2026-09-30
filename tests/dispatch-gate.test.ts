@@ -214,8 +214,8 @@ describe("evaluateDispatchGate fail-open branches (AC-B3)", () => {
   });
 
   test("empty history (or a non-array events field) is degraded", async () => {
-    failOpen(await evaluateDispatchGate(okQuery(hist()), "f", NOW));
     const report = await evaluateDispatchGate(okQuery(hist()), "f", NOW);
+    failOpen(report);
     expect(report.reason).toBe("flow history for f is empty");
     const weird = await evaluateDispatchGate(
       okQuery({ flowId: "f", runId: "r" } as unknown as DexHistoryWire),
