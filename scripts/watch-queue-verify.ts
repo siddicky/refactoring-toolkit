@@ -61,8 +61,11 @@
  * flow-status probes run about once per --poll-seconds, and their failures
  * are logged (first, then every 10th) instead of swallowed.
  *
- * Env: DEX_SERVER_ADDRESS / DEX_BLOB_CACHE_DIR (per-process cache dir is
- * deliberate — cross-process BlobCache sharing is not the guidance).
+ * Env: DEX_SERVER_ADDRESS; DEXCLI_BIN (default `dexcli`);
+ * DEX_WATCH_BLOB_CACHE_DIR (default `.dex-cache/watch`, under the gitignored
+ * `.dex-cache/`). The watcher deliberately does NOT read DEX_BLOB_CACHE_DIR:
+ * that is the worker's variable, and cross-process BlobCache sharing is not
+ * the guidance (audit C61).
  */
 
 import { execFile } from "node:child_process";
@@ -89,6 +92,7 @@ import {
   drainRetainedBacklog,
   toWatcherEvent,
 } from "../src/watcher/drain-backlog.js";
+import { watcherBlobCacheDir } from "../src/watcher/blob-cache-dir.js";
 import {
   flowStatusFromWire,
   parseFlowSummary,
@@ -160,7 +164,7 @@ async function main(): Promise<number> {
   // rule), over its own blob-cache directory (per-process sharing).
   const config = {
     ...dexConfigFromEnv(),
-    blobCacheDir: process.env.DEX_BLOB_CACHE_DIR?.trim() || ".dex-cache-watch",
+    blobCacheDir: watcherBlobCacheDir(),
   };
   let runtime: Awaited<ReturnType<typeof openDexClient>> | undefined;
   try {
