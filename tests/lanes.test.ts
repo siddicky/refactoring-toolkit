@@ -17,6 +17,7 @@
 import { describe, expect, test, afterEach } from "bun:test";
 import {
   executorPromptOpts,
+  isDemotedAttempt,
   laneRouting,
   parseModelRef,
   plannerPromptOpts,
@@ -124,6 +125,22 @@ describe("env overrides", () => {
     expect(parseModelRef("  ")).toBeUndefined();
     expect(parseModelRef("x/")).toBeUndefined();
     expect(parseModelRef("/y")).toBeUndefined();
+  });
+});
+
+describe("isDemotedAttempt — the single home of the attempt threshold (C25)", () => {
+  test("attempt 1, 0 and undefined stay on the reviewer lane; attempt >= 2 demotes", () => {
+    for (const a of [undefined, 0, 1]) expect(isDemotedAttempt(a)).toBe(false);
+    for (const a of [2, 3, 10]) expect(isDemotedAttempt(a)).toBe(true);
+  });
+
+  test("reviewLaneRouting flips to the demotion lane exactly where isDemotedAttempt does", () => {
+    const reviewer = reviewLaneRouting(1);
+    for (const a of [undefined, 0, 1, 2, 3, 7]) {
+      const routed = reviewLaneRouting(a);
+      if (isDemotedAttempt(a)) expect(routed).not.toEqual(reviewer);
+      else expect(routed).toEqual(reviewer);
+    }
   });
 });
 

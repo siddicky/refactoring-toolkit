@@ -84,8 +84,7 @@ const LANE_DEFAULTS: Record<LaneName, LaneRouting> = {
 
 /**
  * Resolved routing for a lane: env override per field, in-code default
- * underneath. PURE apart from the env read (same contract as
- * reviewerModelOverride in runtime.ts).
+ * underneath. PURE apart from the env read.
  */
 export function laneRouting(lane: LaneName): LaneRouting {
   const defaults = LANE_DEFAULTS[lane];
@@ -114,9 +113,19 @@ function toPromptOpts(r: LaneRouting): PromptLaneOpts {
 export const plannerPromptOpts = (): PromptLaneOpts => toPromptOpts(laneRouting("planner"));
 export const executorPromptOpts = (): PromptLaneOpts => toPromptOpts(laneRouting("executor"));
 
+/**
+ * The review-lane demotion threshold — the ONE place the rule lives. A review
+ * turn on attempt >= 2 (the dex retry count; undefined = first attempt) runs
+ * on the demotion lane instead of the reviewer lane. runtime.ts
+ * demoteReviewerLane and {@link reviewLaneRouting} both delegate here.
+ */
+export function isDemotedAttempt(attempt: number | undefined): boolean {
+  return (attempt ?? 1) >= 2;
+}
+
 function reviewLaneRoutingLoose(attempt: number | undefined): LaneRouting {
   const reviewer = laneRouting("reviewer");
-  if ((attempt ?? 1) < 2) return reviewer;
+  if (!isDemotedAttempt(attempt)) return reviewer;
   const fallbackModel = parseModelRef(env("OPENCODE_REVIEWER_MODEL_FALLBACK"));
   if (fallbackModel !== undefined) {
     return {
@@ -129,9 +138,9 @@ function reviewLaneRoutingLoose(attempt: number | undefined): LaneRouting {
 
 /**
  * Review-turn routing = demotion policy f(attempt) (US-002) over lanes:
- * attempt 1 runs the reviewer lane; attempt >= 2 demotes to the fallback
- * model (`OPENCODE_REVIEWER_MODEL_FALLBACK`, keeping its runtime.ts meaning)
- * or — when unset — the EXECUTOR lane, since a demoted review turn is
+ * attempt 1 runs the reviewer lane; attempt >= 2 ({@link isDemotedAttempt})
+ * demotes to the fallback model (`OPENCODE_REVIEWER_MODEL_FALLBACK`) or —
+ * when unset — the EXECUTOR lane, since a demoted review turn is
  * execution-grade work. The variant follows the model's lane.
  */
 export const reviewLaneRouting = (attempt: number | undefined): PromptLaneOpts =>

@@ -27,6 +27,7 @@ import {
   degenerateReply,
   type TokenUsage,
 } from "../src/harness/opencode.js";
+import { isDemotedAttempt } from "../src/harness/lanes.js";
 import { demoteReviewerLane } from "../src/harness/runtime.js";
 import {
   configureEnvelopeStreamPublisher,
@@ -243,10 +244,12 @@ describe("Tier-0 degenerate-turn detection (raw SDK shapes through the real extr
 // ---------------------------------------------------------------------------
 
 describe("reviewer-lane demotion policy (pure f(attempt))", () => {
+  // demoteReviewerLane is a generic labeller over the ONE threshold,
+  // isDemotedAttempt (lanes.ts); lane routing itself is covered in lanes.test.ts.
   const luna = { providerID: "openai", modelID: "gpt-6-luna" };
   const glm = { providerID: "zai", modelID: "glm-5.3-flash" };
 
-  test("attempt 1 (and undefined) keeps the OPENCODE_REVIEWER_MODEL default lane", () => {
+  test("attempt 1 (and undefined / 0) keeps the default lane", () => {
     expect(demoteReviewerLane(1, luna, glm)).toEqual(luna);
     expect(demoteReviewerLane(undefined, luna, glm)).toEqual(luna);
     expect(demoteReviewerLane(0, luna, glm)).toEqual(luna);
@@ -257,10 +260,10 @@ describe("reviewer-lane demotion policy (pure f(attempt))", () => {
     expect(demoteReviewerLane(3, luna, glm)).toEqual(glm);
   });
 
-  test("fallback unset -> the demoted lane IS the implementer lane (no override)", () => {
-    expect(demoteReviewerLane(2, luna, undefined)).toBeUndefined();
-    // No default override configured: policy is a no-op either way.
-    expect(demoteReviewerLane(1, undefined, glm)).toBeUndefined();
+  test("labels turns without restating the rule: agrees with isDemotedAttempt for every attempt", () => {
+    for (const a of [undefined, 0, 1, 2, 3, 9]) {
+      expect(demoteReviewerLane(a, "default", "demoted")).toBe(isDemotedAttempt(a) ? "demoted" : "default");
+    }
   });
 
   test("policy depends on NOTHING but the attempt: same inputs, same answer", () => {

@@ -110,8 +110,9 @@ export interface PromptOptions {
   /**
    * Per-turn model override (lane swap, wave-5): when set, THIS turn runs on
    * the given provider/model instead of the harness default — e.g. reviewer
-   * turns on `openai/gpt-6-luna` while implementer/fixer stay on the default
-   * zai lane. Takes precedence over the constructor model.
+   * turns on `nano-gpt/openai/gpt-6-luna` while implementer/fixer run on the
+   * executor lane (zai-coding-plan/glm-5.3-flash). Lane policy lives in
+   * lanes.ts. Takes precedence over the constructor model.
    */
   model?: { providerID: string; modelID: string };
   /**
