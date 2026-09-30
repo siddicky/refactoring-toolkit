@@ -7,6 +7,7 @@ import {
   buildVitestQueueState,
   createNaiveClassifier,
   parseVitestOutput,
+  parseVitestSummary,
   type FailureClassification,
   type FailureClassifier,
   type VitestFailureRecord,
@@ -87,6 +88,70 @@ runTestFile("vitest-queue", {
     const parsed = parseVitestOutput(ansiSample);
     assertEquals(parsed.length, 1, "ANSI-stripped FAIL line still starts a record");
     assertEquals(parsed[0]!.testFile, "tests/a.test.ts");
+  },
+
+  "C26: bullets never start records, FAIL blocks do (no duplicates when streams merge)": () => {
+    // vitest 3.x: per-file bullets (with a describe path) go to stdout, the
+    // FAIL block to stderr; read together they must yield ONE record.
+    const merged = [
+      " ❯ tests/a.test.ts (1 test | 1 failed) 4ms",
+      "   × Suite > case 3ms",
+      "     → expected 1 to be 2",
+      "",
+      " Test Files  1 failed (1)",
+      "      Tests  1 failed (1)",
+      "",
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+      "",
+      " FAIL  tests/a.test.ts > Suite > case",
+      "AssertionError: expected 1 to be 2",
+      " ❯ tests/a.test.ts:5:18",
+      " ❯ src/a.ts:2:9",
+      "",
+      "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯",
+      "",
+    ].join("\n");
+    const records = parseVitestOutput(merged);
+    assertEquals(records.length, 1, "one FAIL block = one record");
+    assertEquals(records[0]!.testName, "Suite > case");
+    assertEquals(records[0]!.frames.length, 2, "frames survive");
+    assertEquals(records[0]!.errorMessage, "AssertionError: expected 1 to be 2", "banner/footer rules stay out of the message");
+    // Bullets alone (the stdout-only shape the flow used to parse) carry no record.
+    assertEquals(parseVitestOutput("   × Suite > case 3ms\n     → expected 1 to be 2\n"), []);
+  },
+
+  "C26: summary lines are anchored (Failed Tests banner / FAIL header cannot overwrite them)": () => {
+    const merged = [
+      " Test Files  1 failed (1)",
+      "      Tests  1 failed | 2 passed (3)",
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+      " FAIL  tests/a.test.ts > Tests > x",
+      "Error: boom",
+    ].join("\n");
+    const summary = parseVitestSummary(merged);
+    assertEquals(summary?.tests, { passed: 2, failed: 1, total: 3 });
+    assertEquals(summary?.testFiles, { passed: 0, failed: 1, total: 1 });
+    // ANSI-colored summary lines still anchor once escapes are stripped.
+    const colored = "\x1b[2m Test Files \x1b[22m \x1b[31m1 failed\x1b[39m (1)\n\x1b[2m      Tests \x1b[22m \x1b[31m1 failed\x1b[39m | 2 passed (3)\n";
+    assertEquals(parseVitestSummary(colored)?.tests, { passed: 2, failed: 1, total: 3 });
+  },
+
+  "C26: a collection-failure header drops the `[ file ]` suffix": () => {
+    const records = parseVitestOutput(
+      [
+        " FAIL  tests/broken.test.ts [ tests/broken.test.ts ]",
+        "Error: Cannot find module '../src/missing'",
+        " ❯ tests/broken.test.ts:2:1",
+        "",
+      ].join("\n"),
+    );
+    assertEquals(records.length, 1);
+    assertEquals(records[0]!.testFile, "tests/broken.test.ts");
+    assertEquals(records[0]!.testName, "");
+    assertEquals(records[0]!.frames, [{ file: "tests/broken.test.ts", line: 2, column: 1 }]);
+    // A TEST name that merely ends in brackets keeps them.
+    const named = parseVitestOutput(" FAIL  tests/a.test.ts > handles [ edge ]\nError: x\n");
+    assertEquals(named[0]!.testName, "handles [ edge ]");
   },
 
   "empty and clean outputs yield no records": () => {
