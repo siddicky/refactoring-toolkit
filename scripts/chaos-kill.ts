@@ -12,8 +12,8 @@
  *
  * Usage:
  *   bun run scripts/chaos-kill.ts --pids 123,456 --reason "hello-flow-kill" \
- *     [--events /tmp/kill-events.json] [--run-id <id>] [--flow-run-id <dexRunId>] \
- *     [--wait-ms 5000]
+ *     [--events metrics/kill-events.jsonl] [--run-id <id>] \
+ *     [--flow-run-id <dexRunId>] [--wait-ms 5000]
  *
  * Every --pids entry must be a PID > 1 and --wait-ms a whole number of
  * milliseconds: an unparsable value is a usage error (exit 2), never silently
@@ -21,6 +21,11 @@
  *
  * Exit codes: 0 every target exited after SIGKILL; 1 a target survived;
  * 2 usage error; 3 NO-OP (no target was alive, nothing was killed).
+ *
+ * Sidecar path: `--events`, default {@link DEFAULT_KILL_EVENTS_PATH}
+ * (`metrics/kill-events.jsonl`, relative to the cwd; /metrics/ is the repo's
+ * gitignored run-output directory, and the parent directory is created on
+ * first write). Shared by chaos-kill and watch-queue-verify (Contract B).
  *
  * Sidecar format: JSON lines, one object per line, append-only:
  *   {"kind":"intent",    run_id, utc, monotonic_ms, target_pids, signal, reason}
@@ -30,7 +35,15 @@
  * a successful kill-and-resume.
  */
 
-import { appendFileSync, closeSync, fsyncSync, openSync } from "node:fs";
+import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync } from "node:fs";
+import { dirname } from "node:path";
+
+/**
+ * Default kill-event sidecar path (Contract B): JSON Lines, relative to the
+ * cwd, inside the gitignored /metrics/ run-output directory. Explicit
+ * `--events` flags still win.
+ */
+export const DEFAULT_KILL_EVENTS_PATH = "metrics/kill-events.jsonl";
 
 export interface KillEventIntent {
   kind: "intent";
@@ -40,7 +53,7 @@ export interface KillEventIntent {
   target_pids: number[];
   signal: "SIGKILL";
   reason: string;
-  /** Dex flow run id, when known — the sidecar self-anchors to the run. */
+  /** Real Dex RUN id (not the flow id), when known — the sidecar self-anchors to the run. */
   flow_run_id?: string;
 }
 
@@ -53,11 +66,16 @@ export interface KillEventCompletion {
   notes: string;
   /** True only when at least one process was actually killed (`killed_pids.length > 0`). */
   fired: boolean;
-  /** Dex flow run id, when known — the sidecar self-anchors to the run. */
+  /** Real Dex RUN id (not the flow id), when known — the sidecar self-anchors to the run. */
   flow_run_id?: string;
 }
 
-export type KillEvent = KillEventIntent | KillEventCompletion;
+/**
+ * One line of the kill sidecar as this writer emits it. (Named KillSidecarLine
+ * so it no longer collides with `KillEvent` in src/metrics/types.ts, the
+ * renderer's normalized shape.)
+ */
+export type KillSidecarLine = KillEventIntent | KillEventCompletion;
 
 export function monotonicMs(): number {
   return Number(process.hrtime.bigint() / 1_000_000n);
@@ -75,7 +93,9 @@ function pidAlive(pid: number): boolean {
 }
 
 /** Appends one JSON line and fsyncs so a killer-side crash cannot reorder evidence. */
-export function appendKillEvent(eventsPath: string, event: KillEvent): void {
+export function appendKillEvent(eventsPath: string, event: KillSidecarLine): void {
+  // The default path lives in metrics/, which may not exist yet.
+  mkdirSync(dirname(eventsPath), { recursive: true });
   const fd = openSync(eventsPath, "a");
   try {
     appendFileSync(fd, `${JSON.stringify(event)}\n`, "utf8");
@@ -91,7 +111,7 @@ export interface ChaosKillOptions {
   runId: string;
   eventsPath: string;
   waitMs: number;
-  /** Dex flow run id (verifier F3-analog): written into both sidecar records. */
+  /** Real Dex RUN id (not the flow id), when known: written into both sidecar records. */
   flowRunId?: string;
 }
 
@@ -223,7 +243,7 @@ export function parseChaosKillArgs(argv: readonly string[]): ParsedChaosKillArgs
       pids,
       reason: values.get("--reason") ?? "unspecified",
       runId: values.get("--run-id") ?? `kill-${Date.now()}`,
-      eventsPath: values.get("--events") ?? "kill-events.json",
+      eventsPath: values.get("--events") ?? DEFAULT_KILL_EVENTS_PATH,
       waitMs: Number(waitArg.trim()),
       ...(flowRunId !== undefined ? { flowRunId } : {}),
     },

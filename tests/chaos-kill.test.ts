@@ -12,7 +12,15 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { chaosKill, parseChaosKillArgs } from "../scripts/chaos-kill.js";
+import {
+  DEFAULT_KILL_EVENTS_PATH,
+  appendKillEvent,
+  chaosKill,
+  monotonicMs,
+  parseChaosKillArgs,
+} from "../scripts/chaos-kill.js";
+
+const CHAOS_KILL_SCRIPT = join(import.meta.dir, "..", "scripts", "chaos-kill.ts");
 
 /** A pid that cannot exist on any supported platform (kernel pid_max < 2^22). */
 const DEAD_PID = 99_999_999;
@@ -162,5 +170,69 @@ describe("C71: the CLI rejects unparsable input instead of filtering it", () => 
     expect(code).toBe(3);
     const [, completed] = await readSidecar(eventsPath);
     expect(completed?.fired).toBe(false);
+  });
+});
+
+describe("C42 (writer side, Contract B): default path, parent dir, run identity", () => {
+  test("the shared default is metrics/kill-events.jsonl (JSON Lines, inside the gitignored /metrics/)", () => {
+    expect(DEFAULT_KILL_EVENTS_PATH).toBe("metrics/kill-events.jsonl");
+    const parsed = parseChaosKillArgs(["--pids", "123"]);
+    expect(parsed.ok && parsed.options.eventsPath).toBe(DEFAULT_KILL_EVENTS_PATH);
+  });
+
+  test("an explicit --events still wins over the default", () => {
+    const parsed = parseChaosKillArgs(["--pids", "123", "--events", "/tmp/custom.jsonl"]);
+    expect(parsed.ok && parsed.options.eventsPath).toBe("/tmp/custom.jsonl");
+  });
+
+  test("appendKillEvent creates the parent directory (metrics/ does not exist on a fresh checkout)", async () => {
+    dir = await mkdtemp(join(tmpdir(), "chaos-kill-"));
+    const eventsPath = join(dir, "metrics", "nested", "kill-events.jsonl");
+    appendKillEvent(eventsPath, {
+      kind: "intent",
+      run_id: "r",
+      utc: new Date().toISOString(),
+      monotonic_ms: monotonicMs(),
+      target_pids: [1234],
+      signal: "SIGKILL",
+      reason: "mkdir",
+    });
+    expect(existsSync(eventsPath)).toBe(true);
+    expect((await readSidecar(eventsPath))[0]?.kind).toBe("intent");
+  });
+
+  test("the CLI with no --events writes metrics/kill-events.jsonl under the cwd", async () => {
+    dir = await mkdtemp(join(tmpdir(), "chaos-kill-"));
+    const proc = Bun.spawn(["bun", "run", CHAOS_KILL_SCRIPT, "--pids", String(DEAD_PID), "--wait-ms", "50"], {
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await proc.exited;
+    const rows = await readSidecar(join(dir, "metrics", "kill-events.jsonl"));
+    expect(rows.map((r) => r.kind)).toEqual(["intent", "completed"]);
+  });
+
+  test("flow_run_id is written verbatim into BOTH records when given, and omitted (not faked) when unknown", async () => {
+    dir = await mkdtemp(join(tmpdir(), "chaos-kill-"));
+    const withRun = join(dir, "with.jsonl");
+    await chaosKill({
+      pids: [],
+      reason: "x",
+      runId: "label",
+      eventsPath: withRun,
+      waitMs: 50,
+      flowRunId: "01a0df1a-real-dex-run",
+    });
+    for (const row of await readSidecar(withRun)) {
+      expect(row.flow_run_id).toBe("01a0df1a-real-dex-run");
+      expect(row.run_id).toBe("label");
+    }
+
+    const without = join(dir, "without.jsonl");
+    await chaosKill({ pids: [], reason: "x", runId: "label", eventsPath: without, waitMs: 50 });
+    for (const row of await readSidecar(without)) {
+      expect("flow_run_id" in row).toBe(false);
+    }
   });
 });

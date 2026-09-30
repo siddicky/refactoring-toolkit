@@ -37,9 +37,15 @@
  * infrastructure it did not start.
  *
  * Usage:
- *   bun run scripts/watch-queue-verify.ts --flow-id <id> --run-id <runId> \
- *     --events /tmp/kill-events.jsonl [--deadline-minutes 30] [--poll-seconds 60] \
- *     [--catch-up-seconds 1]
+ *   bun run scripts/watch-queue-verify.ts --flow-id <id> [--run-id <label>] \
+ *     [--events metrics/kill-events.jsonl] [--flow-run-id <dexRunId>] \
+ *     [--deadline-minutes 30] [--poll-seconds 60] [--catch-up-seconds 1]
+ *
+ * Sidecar (Contract B): JSON Lines at `--events`, default
+ * `metrics/kill-events.jsonl` (chaos-kill's DEFAULT_KILL_EVENTS_PATH). Its
+ * `run_id` is the `--run-id` label; `flow_run_id` is the REAL Dex run id read
+ * from `dexcli flow summary` (overridable with `--flow-run-id`, omitted when
+ * unknown) — never the flow id.
  *
  * Env: DEX_SERVER_ADDRESS / DEX_BLOB_CACHE_DIR (per-process cache dir is
  * deliberate — cross-process BlobCache sharing is not the guidance).
@@ -54,7 +60,7 @@ import { openDexClient, dexConfigFromEnv } from "../src/dex/client.js";
 import { dexCliQueries } from "../src/dashboard/queries.js";
 import { envelopeStream } from "../flows/steps/envelope.js";
 import { PortProjectFlow } from "../flows/port-project.js";
-import { chaosKill } from "./chaos-kill.js";
+import { DEFAULT_KILL_EVENTS_PATH, chaosKill } from "./chaos-kill.js";
 import {
   runQueueVerifyWatcher,
   type WatcherStreamEvent,
@@ -64,6 +70,7 @@ import {
   drainRetainedBacklog,
   toWatcherEvent,
 } from "../src/watcher/drain-backlog.js";
+import { parseFlowSummary, resolveFlowRunId } from "../src/watcher/flow-summary.js";
 
 const execFileP = promisify(execFile);
 
@@ -117,7 +124,8 @@ async function main(): Promise<number> {
     return 2;
   }
   const runId = argValue("--run-id", "watch-queue-verify") as string;
-  const eventsPath = argValue("--events", "/tmp/kill-events.jsonl") as string;
+  const eventsPath = argValue("--events", DEFAULT_KILL_EVENTS_PATH) as string;
+  const flowRunIdOverride = argValue("--flow-run-id");
   const deadlineMinutes = Number.parseInt(argValue("--deadline-minutes", "30") as string, 10);
   const pollSeconds = Number.parseInt(argValue("--poll-seconds", "60") as string, 10);
   const catchUpSeconds = Number.parseInt(argValue("--catch-up-seconds", "1") as string, 10);
@@ -138,11 +146,32 @@ async function main(): Promise<number> {
     log(`stream client unavailable (${(err as Error).message}) — poll fallback only`);
   }
 
+  const dexcliBin = process.env.DEXCLI_BIN?.trim() || "dexcli";
   const cli = dexCliQueries({
-    bin: process.env.DEXCLI_BIN?.trim() || "dexcli",
+    bin: dexcliBin,
     server: config.serverAddress,
     timeoutMs: 10_000,
   });
+
+  // The REAL Dex run id for the sidecar's flow_run_id (audit C42), learned from
+  // `dexcli flow summary` at arm and refreshed by every status probe — never
+  // fetched inside the kill window.
+  let observedRunId: string | null = null;
+  const fetchFlowSummary = async () => {
+    const out = await execFileP(
+      dexcliBin,
+      ["flow", "summary", flowId, "-server", config.serverAddress, "-output", "json"],
+      { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
+    );
+    const summary = parseFlowSummary(out.stdout);
+    if (summary.runId !== null) observedRunId = summary.runId;
+    return summary;
+  };
+  try {
+    await fetchFlowSummary();
+  } catch (err) {
+    log(`flow summary unavailable at arm (${(err as Error).message}) — flow_run_id stays unknown until a probe succeeds`);
+  }
 
   try {
     // Resume token for the subscription (empty = retained head on first read).
@@ -201,14 +230,9 @@ async function main(): Promise<number> {
       },
       flowStatus: async () => {
         try {
-          const out = await execFileP(
-            process.env.DEXCLI_BIN?.trim() || "dexcli",
-            ["flow", "summary", flowId, "-server", config.serverAddress, "-output", "json"],
-            { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-          );
-          const parsed = JSON.parse(out.stdout) as { flowStatus?: string };
-          if (parsed.flowStatus === "FLOW_STATUS_COMPLETED") return "completed";
-          if (parsed.flowStatus === "FLOW_STATUS_FAILED") return "failed";
+          const summary = await fetchFlowSummary();
+          if (summary.flowStatus === "FLOW_STATUS_COMPLETED") return "completed";
+          if (summary.flowStatus === "FLOW_STATUS_FAILED") return "failed";
           return "running";
         } catch {
           return "unknown";
@@ -216,13 +240,17 @@ async function main(): Promise<number> {
       },
       fire: async ({ via }) => {
         const pids = await targetPids();
-        log(`kill via ${via}: pids=${pids.join(",") || "none"} events=${eventsPath} run=${runId} flow=${flowId}`);
+        const flowRunId = resolveFlowRunId(flowRunIdOverride, observedRunId);
+        if (flowRunId === undefined) {
+          log("flow run id unknown — the sidecar records omit flow_run_id (run_id label only)");
+        }
+        log(`kill via ${via}: pids=${pids.join(",") || "none"} events=${eventsPath} run=${runId} flow=${flowId} flowRun=${flowRunId ?? "unknown"}`);
         const kill = await chaosKill({
           pids,
           reason: `US-007 stream watcher: pp-queue-verify start (via ${via})`,
           runId,
           eventsPath,
-          flowRunId: flowId,
+          ...(flowRunId !== undefined ? { flowRunId } : {}),
           waitMs: 5_000,
         });
         return {
