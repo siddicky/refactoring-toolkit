@@ -38,12 +38,13 @@ printed `DIGEST sha256` line.
 Current digests:
 
 ```
-php-sample:            46720f113f7caec48719390f858f60cdf95281d065bd751bb0ac6626d6807bff
-creatorex-middleware:  461d9f9286fabb80aee3e274837eaa64f4899b815a44d4fbc07408dda91ace54
+php-sample:            0e16824ab8b5c28a1cde62400d9c6c7bd8e824e148db6664c55dbc2603800541
+creatorex-middleware:  cd23d2f8d373715472bc5a487a6f5f1badfe580de33759bb100f91f0b4116c16
 ```
 
-Verified on 2026-09-25: for each fixture, two consecutive runs produced
-identical stdout and identical per-file `shasum -a 256` checksums.
+Verified on 2026-09-30: for each fixture, two consecutive runs produced
+identical stdout and identical per-file `shasum -a 256` checksums, and the
+output equals the committed tree.
 
 ## Fixture 1 — `php-sample/` inventory
 
@@ -63,11 +64,11 @@ lines. (Total physical lines shown per file for reference.)
 | `src/Invoice.php` | 173 | 145 |
 | `src/InvoiceRepository.php` | 110 | 92 |
 | **src total (10 files)** | **777** | **636 (495 code)** |
-| `tests/MoneyTest.php` | 61 | 47 |
+| `tests/MoneyTest.php` | 63 | 49 |
 | `tests/PricingTest.php` | 52 | 39 |
 | `tests/InvoiceTest.php` | 86 | 69 |
 | `tests/InvoiceRepositoryTest.php` | 97 | 74 |
-| **tests total (4 files)** | **296** | **229 (220 code)** |
+| **tests total (4 files)** | **298** | **231 (220 code)** |
 
 Per-file counts are also printed by the generator on every run.
 
@@ -80,7 +81,7 @@ Per-file counts are also printed by the generator on every run.
 | Scalar coercions | `Money` ctor `(float)`/`(string)`; `Money::parse` (str_replace + cast); `Money::multiply` operator coercion of `"2.5"`; `PercentageDiscount` `(float)`; `FlatRateDiscount` `(int)`; `Invoice::addLine` `(int)` quantity; `InvoiceRepository::totalByCurrency` `(float)` on `"123.45 USD"` |
 | Late static binding | `PercentageDiscount::of` (`new static` — dead: class is `final`) |
 | Magic methods | `Customer::__get` / `__isset`; `Money::__toString`; `Invoice::__toString` |
-| Loose comparison | `Money::equals` (`amount ==`), `Invoice::quantityForSku` (`sku ==`, so `'9001' == 9001`) |
+| Loose comparison | `Invoice::quantityForSku` (`sku ==`, so `'9001' == 9001` and `'9001' == '9001.0'`); `Money::equals` also spells `amount ==`, but the constructor casts both sides to float, so it behaves exactly like `===` (a `==` site, not an observable trap) |
 | Traits | `Support\Taggable`, used by `Product` and `Invoice` |
 | Interfaces | `Support\Arrayable` (Product, Invoice), `Pricing\DiscountPolicy`, `\Countable` (InvoiceRepository) |
 | By-reference iteration | `InvoiceRepository::totalByCurrency` (`&$row` foreach + `unset`) |
@@ -113,8 +114,11 @@ round-trip loses the customer name; PHP `round()` is half away from zero
 
 - **Phase 2 (trial gate)**: the core loop consumes `fixtures/stub-prep.md`
   (marked STUB) plus seed files from `php-sample/`.
-- **Phase 7 (fixture at scale)**: the full demo run ports the entire
-  `php-sample/` module.
+- **Phase 7 (fixture at scale)**: the full demo run ports the `php-sample/`
+  source module (the 10 `src/` files). The 4 `tests/*.php` files are not port
+  units here: `stub-prep.md` has only the glob row `tests/*.php`, which
+  `parsePrepSourceMap` skips, unlike creatorex, whose test files have explicit
+  rows in `prep-stub.md`.
 - The PHP fixture is read-only input; no PHP toolchain runs anywhere in the
   pipeline. Expected TS output lives outside `fixtures/` (owned by the porting
   loop, not by this generator).
@@ -150,10 +154,10 @@ LOC = non-blank lines; "code" excludes comment-only lines.
 | **src total (5 files)** | **514** | **430 (307 code)** |
 | `tests/Billing/SubscriptionServiceTest.php` | 135 | 103 |
 | `tests/Access/EntitlementCheckerTest.php` | 126 | 96 |
-| `tests/Payouts/EarningsLedgerTest.php` | 69 | 53 |
+| `tests/Payouts/EarningsLedgerTest.php` | 72 | 56 |
 | `tests/Moderation/ChatSentinelTest.php` | 74 | 55 |
 | `tests/Support/LegacyHelpersTest.php` | 59 | 46 |
-| **tests total (5 files)** | **463** | **353 (333 code)** |
+| **tests total (5 files)** | **466** | **356 (334 code)** |
 
 ### Landmine map
 
@@ -161,7 +165,7 @@ LOC = non-blank lines; "code" excludes comment-only lines.
 |---|---|
 | `src/Billing/SubscriptionService.php` | Money as float+string mix: `'12.99'` vs `29.99` prices, `balance_due` rebuilt via `(float)+(float)` then `(string)`. Loose `==` on plan codes: `'100'` resolves for int `100`, but `'premium'`/`'Premium'` are *different* plans and `'PREMIUM'` misses → `??` substitutes `'0.00'` (mistyped codes are free). Lying docblock: `applyCharge` claims declines "never throw" — hard declines throw `RuntimeException`. Grace window checks only an upper bound. Dunning transitions via an explicit allowed-map (`trialing → past_due` is legal). |
 | `src/Access/EntitlementChecker.php` | Geo gate via non-strict `in_array`: int `840` matches legacy alias `'840'`, lowercase `'us'` is denied. Null-coalescing traps: `'0'` entitlement short-circuits the `??` lookup (denied), `null` falls through; `requireEntitlement(false)` disables the whole check via `?? false`. Magic `__call` fluent `require*` gates: only names that do *not* start with `require` throw `BadMethodCallException`, while an unknown `require*` name (e.g. `requireFriendInvite()`) silently registers a gate that `decide()` never evaluates; gates are sticky mutable state until `resetGates()`. Array-shape session rows; `$content` param and `requireGeo()` argument are silently unused. |
-| `src/Payouts/EarningsLedger.php` | Rounding drift: half-away-from-zero (`round`) vs banker's (custom branch) — `2.345 → 2.35 / 2.34`; the banker's branch is unreachable for negatives (`floor` moves away from zero). USD/EUR entries summed 1:1, `balance()` currency argument ignored. "Never negative" docblock on `payable()` contradicted by a pinned `-2.5` payout. Raw amount types preserved per entry (string `'10.00'` vs float `2.5`). |
+| `src/Payouts/EarningsLedger.php` | Rounding drift: half-away-from-zero (`round`) vs banker's (custom branch) — `2.345 → 2.35 / 2.34`; the banker's branch never changes the result for negatives (`floor` moves away from zero: an odd floor falls through to `round()`, an even floor takes the tie branch but returns the same half-away value, e.g. `-2.355 → -2.36`). USD/EUR entries summed 1:1, `balance()` currency argument ignored. "Never negative" docblock on `payable()` contradicted by a pinned `-2.5` payout. Raw amount types preserved per entry (string `'10.00'` vs float `2.5`). |
 | `src/Moderation/ChatSentinel.php` | Substring blocklist: `'crypto'` matches inside `'Crypto news'` (false positive on legit content) while leetspeak `'fr33 m0ney'` evades entirely. Phone regex redacts the date `'2026-01-15'` → `[phone]`, contradicting the "no false positives on stored content" docblock; bare 7-digit phones leak below the length threshold. `snippetAround` passes `$pos + 20` as the *length* argument (and a negative start counts from the end) — pinned to a 17-char window from the tail. |
 | `src/Support/legacy_helpers.php` | `creatorex_pluck` yields `null` for missing keys / non-array rows (not skipped) and reads object properties. `creatorex_format_date` claims "Timezones and DST are handled" — named zones are silently ignored (`(int) 'Europe/Berlin' === 0`), numeric zones are fixed-hour shifts, DST never handled. `creatorex_money_string` rounds via `sprintf('%.2f')` — a third rounding behavior, distinct from `round()` and the banker's path in the ledger. |
 

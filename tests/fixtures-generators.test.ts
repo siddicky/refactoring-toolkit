@@ -17,6 +17,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parsePrepSourceMap } from "../flows/port-project.js";
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 interface FixtureSpec {
@@ -161,6 +163,75 @@ function phpMethod(source: string, name: string): string {
   const next = source.indexOf("    public function ", start + 1);
   return source.slice(start, next < 0 ? undefined : next);
 }
+
+describe("fixture documentation claims about PHP behaviour (audit C74)", () => {
+  const stubPrep = readFileSync(join(repoRoot, "fixtures/stub-prep.md"), "utf8");
+  const fixturesDoc = readFileSync(join(repoRoot, "fixtures/FIXTURES.md"), "utf8");
+
+  test("stub-prep trap 3 does not claim an explicit (float) cast warns", () => {
+    // `(float) $row['total']` is an explicit cast; PHP never warns for those.
+    expect(stubPrep).not.toMatch(/with a warning on 8\.x/);
+    expect(stubPrep).toContain("explicit `(float)` cast");
+  });
+
+  test("Money::equals is documented as a loose-compare site that is not an observable trap", () => {
+    const row = stubPrep.split("\n").find((line) => line.includes("`Money::equals`"));
+    expect(row).toBeDefined();
+    expect(row).not.toContain("intentional loose compare");
+    expect(row).toContain("behave identically");
+    const idiom = fixturesDoc.split("\n").find((line) => line.startsWith("| Loose comparison"));
+    expect(idiom).toContain("behaves exactly like `===`");
+    const moneyTest = readFixture(PHP_SAMPLE, "tests/MoneyTest.php");
+    expect(moneyTest).not.toContain("testEqualsUsesLooseAmountComparison");
+    expect(moneyTest).toContain("testEqualsComparesAmountsAfterFloatCoercion");
+  });
+
+  test("banker's branch is documented as never changing the result for negatives, not as unreachable", () => {
+    expect(fixturesDoc).not.toMatch(/banker's branch is unreachable/);
+    expect(fixturesDoc).toContain("never changes the result for negatives");
+    const ledger = readFixture(CREATOREX, "tests/Payouts/EarningsLedgerTest.php");
+    expect(ledger).not.toMatch(/unreachable/);
+    expect(ledger).not.toContain("testBankersNeverTriggersForNegativeAmounts");
+    // An even-floor negative tie DOES enter the branch and lands on the half-away value.
+    expect(phpMethod(ledger, "testBankersNeverChangesTheResultForNegativeTies")).toContain(
+      "assertSame(-2.36, $ledger->roundForPayout(-2.355, EarningsLedger::ROUND_BANKERS))",
+    );
+  });
+
+  test("model of roundForPayout: a taken banker's branch on a negative tie equals half-away-from-zero", () => {
+    // Mirrors EarningsLedger::roundForPayout's ROUND_BANKERS path on IEEE doubles.
+    const branch = (value: number): number | null => {
+      const scaled = value * 100;
+      const lower = Math.floor(scaled);
+      const isTie = Math.abs(scaled - lower - 0.5) < 0.000001;
+      return isTie && lower % 2 === 0 ? lower / 100 : null; // null: falls through to round()
+    };
+    let taken = 0;
+    let fellThrough = 0;
+    for (let cents = 0; cents < 2000; cents += 1) {
+      const value = -(cents + 0.5) / 100; // a negative half-cent tie
+      const halfAway = -Math.round(cents + 0.5) / 100; // round half away from zero
+      const banker = branch(value);
+      if (banker === null) {
+        fellThrough += 1;
+      } else {
+        taken += 1;
+        expect(banker, `value ${value}`).toBe(halfAway);
+      }
+    }
+    // Both paths occur (so "unreachable" was wrong), and neither changes the result.
+    expect(taken).toBeGreaterThan(0);
+    expect(fellThrough).toBeGreaterThan(0);
+  });
+
+  test("php-sample tests are documented as not port units, and the stub source map agrees", () => {
+    expect(fixturesDoc).toMatch(/not port\s+units here/);
+    expect(fixturesDoc).not.toContain("ports the entire");
+    const map = parsePrepSourceMap(stubPrep);
+    expect(Object.keys(map).filter((php) => php.startsWith("tests/"))).toEqual([]);
+    expect(Object.keys(map).filter((php) => php.startsWith("src/")).length).toBe(10);
+  });
+});
 
 describe("php-sample PHP tests agree with their sources (audit C67)", () => {
   /** Short names a PHP file may use without an import: itself, plus the TestCase it extends is imported. */

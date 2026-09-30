@@ -57,7 +57,7 @@ Flags: `MISLEADING_DOC` `COERCION` `NULLABLE` `ASSOC_ARRAY` `MAGIC` `LSB`
 |---|---|---|---|---|---|
 | `Money::$amount` | prop | src/Money.php | ctor casts to float; class doc claims "always non-negative" but `subtract()` yields negatives (test asserts `-3.00 USD`) | `number` | MISLEADING_DOC, COERCION |
 | `Money::parse` | static | src/Money.php | strips spaces/commas; empty input returns zero | `(raw: string \| number, currency?: string) => Money` | COERCION |
-| `Money::equals` | method | src/Money.php | `$this->amount == $other->amount` — intentional loose compare; currency uses `===` | `(other: unknown) => boolean` | LOOSE_EQ |
+| `Money::equals` | method | src/Money.php | `$this->amount == $other->amount` is spelled as a loose compare, but the ctor casts both amounts to float, so `==` and `===` behave identically here (a `==` site, not an observable trap); currency uses `===` | `(other: unknown) => boolean` | LOOSE_EQ |
 | `Customer::$attributes` | prop | src/Customer.php | `array_merge` over defaults; magic `__get`/`__isset` expose unknown keys | `CustomerProps` interface + `Record<string, unknown>` extras | ASSOC_ARRAY, MAGIC |
 | `Customer::creditLimit` | method | src/Customer.php | stored as `'0.00'` numeric string; null passthrough | `() => Money \| null` | COERCION, NULLABLE |
 | `Product::$priceCents` | prop | src/Product.php | doc says "always integers in cents"; ctor accepts any scalar; rows may hold `"1999"`; `price()` divides by 100 | `number` (cents) | MISLEADING_DOC, COERCION |
@@ -79,8 +79,9 @@ Flags: `MISLEADING_DOC` `COERCION` `NULLABLE` `ASSOC_ARRAY` `MAGIC` `LSB`
 2. **Rounding** — `Money::percentage` uses PHP `round()` (half away from zero);
    a naive TS `toFixed` port behaves differently on ties. Tests pin
    `10.125 → 10.13`.
-3. **Formatted-string money** — `totalByCurrency` float-parses `"19.99 USD"`.
-   PHP reads the leading numeric part (with a warning on 8.x); TS `Number()`
+3. **Formatted-string money** — `totalByCurrency` float-parses `"19.99 USD"`
+   with an explicit `(float)` cast. PHP reads the leading numeric part
+   silently (an explicit cast raises no warning on any version); TS `Number()`
    produces `NaN`. The port must decide and document the gap.
 4. **Dead late static binding** — `PercentageDiscount` is `final` yet `of()`
    advertises subclass resolution via `new static`. The port should not invent

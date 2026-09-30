@@ -942,8 +942,10 @@ final class MoneyTest extends TestCase
         $this->assertSame('10.00 USD', (string) (new Money(4))->multiply('2.5'));
     }
 
-    public function testEqualsUsesLooseAmountComparison(): void
+    public function testEqualsComparesAmountsAfterFloatCoercion(): void
     {
+        // The constructor casts both amounts to float, so 10 and '10.0' are
+        // equal under == and under ===: the loose compare is not observable.
         $this->assertTrue((new Money(10))->equals(new Money('10.0')));
         $this->assertFalse((new Money(10, 'USD'))->equals(new Money(10, 'EUR')));
     }
