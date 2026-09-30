@@ -18,86 +18,8 @@ import { describe, expect, test } from "bun:test";
 
 import {
   runQueueVerifyWatcher,
-  type WatcherStreamEvent,
 } from "../src/watcher/queue-verify-watcher.js";
-
-const START: WatcherStreamEvent = {
-  eventKey: "pp-queue-verify#1",
-  stepId: "pp-queue-verify",
-  endedAt: null,
-};
-const DONE: WatcherStreamEvent = {
-  eventKey: "pp-queue-verify#1",
-  stepId: "pp-queue-verify",
-  endedAt: "2026-09-27T01:05:00.000Z",
-};
-
-function noise(i: number): WatcherStreamEvent {
-  return { eventKey: `pp-implement#${i}@src/a.php#1`, stepId: "pp-implement", endedAt: null };
-}
-
-interface ScheduledEvent {
-  /** Absolute virtual time (ms) at which the event is published. */
-  at: number;
-  event: WatcherStreamEvent;
-}
-
-/** Virtual-clock dex stream: blocking reads, publish schedule, recorded reads. */
-function virtualWorld(schedule: ScheduledEvent[]) {
-  let clock = 0;
-  let cursor = 0;
-  const reads: Array<{ at: number; timeoutMs: number }> = [];
-  const polls: number[] = [];
-  const firings: Array<{ via: string; at: number }> = [];
-  const logs: string[] = [];
-  return {
-    reads,
-    polls,
-    firings,
-    logs,
-    clock: () => clock,
-    options: (overrides: {
-      pollIntervalMs: number;
-      deadlineMs: number;
-      catchUpTimeoutMs?: number;
-      streamBlocks?: boolean;
-    }) => ({
-      pollIntervalMs: overrides.pollIntervalMs,
-      deadlineMs: overrides.deadlineMs,
-      ...(overrides.catchUpTimeoutMs !== undefined
-        ? { catchUpTimeoutMs: overrides.catchUpTimeoutMs }
-        : {}),
-      nextStreamEvent: async (timeoutMs: number) => {
-        reads.push({ at: clock, timeoutMs });
-        const next = schedule[cursor];
-        if (next !== undefined && next.at <= clock) {
-          cursor++; // retained: resolves immediately
-          return next.event;
-        }
-        if (next !== undefined && next.at <= clock + timeoutMs) {
-          clock = next.at; // published mid-wait: the read wakes up at once
-          cursor++;
-          return next.event;
-        }
-        clock += timeoutMs; // long-poll wake-up with nothing new
-        return null;
-      },
-      poll: async () => {
-        polls.push(clock);
-        return false;
-      },
-      fire: async ({ via }: { via: "stream" | "poll" }) => {
-        firings.push({ via, at: clock });
-      },
-      flowStatus: async () => "running" as const,
-      now: () => clock,
-      sleep: async (ms: number) => {
-        clock += ms;
-      },
-      log: (line: string) => logs.push(line),
-    }),
-  };
-}
+import { DONE, START, noise, virtualWorld } from "./helpers/virtual-stream.js";
 
 describe("C27: catch-up reads must not absorb the DONE that closes the kill window", () => {
   // The observed queue-verify windows were ~1.1-1.6 s. START is published at

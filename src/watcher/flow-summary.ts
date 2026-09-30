@@ -7,6 +7,8 @@
  * reader filtering by run id could never match it.
  */
 
+import type { WatcherFlowStatus } from "./queue-verify-watcher.js";
+
 export interface FlowSummary {
   /** Wire status, e.g. "FLOW_STATUS_RUNNING"; null when absent. */
   flowStatus: string | null;
@@ -40,4 +42,32 @@ export function resolveFlowRunId(
   if (explicit !== undefined && explicit !== "") return explicit;
   if (observed !== undefined && observed !== null && observed !== "") return observed;
   return undefined;
+}
+
+/**
+ * Maps the wire `flowStatus` (the SDK's FlowStatus enum names) to the
+ * watcher's status. Completed, failed, terminated, canceled and the
+ * server-side timeout are terminal (audit C34: only the first two used to
+ * be); RUNNING and CONTINUED_AS_NEW (the flow lives on in a new run) keep the
+ * watch going; anything absent or unrecognized is "unknown", which never
+ * terminates.
+ */
+export function flowStatusFromWire(wire: string | null | undefined): WatcherFlowStatus {
+  switch (wire) {
+    case "FLOW_STATUS_COMPLETED":
+      return "completed";
+    case "FLOW_STATUS_FAILED":
+      return "failed";
+    case "FLOW_STATUS_TERMINATED":
+      return "terminated";
+    case "FLOW_STATUS_CANCELED":
+      return "canceled";
+    case "FLOW_STATUS_SERVER_SIDE_TIMEOUT_INTERNAL_ONLY":
+      return "timeout";
+    case "FLOW_STATUS_RUNNING":
+    case "FLOW_STATUS_CONTINUED_AS_NEW":
+      return "running";
+    default:
+      return "unknown";
+  }
 }

@@ -7,12 +7,17 @@
  * dexcli polling retained as a 60 s FALLBACK probe. Bounded to 30 minutes.
  * Fires the chaos kill EXACTLY ONCE and exits cleanly:
  *
- *   exit 0  kill fired (via stream or poll)
- *   exit 1  flow reached COMPLETED/FAILED before the trigger (clean, no kill;
- *           this is the r1-review non-exiting-terminal-branch fix)
- *   exit 2  30-minute bound elapsed without trigger
- *   exit 3  trigger seen but the kill was a NO-OP (no live target PIDs; the
- *           sidecar's completed record says fired:false)
+ *   exit 0   kill fired (via stream or poll)
+ *   exit 1   flow reached a terminal status (COMPLETED, FAILED, TERMINATED,
+ *            CANCELED, server-side timeout) before the trigger (clean, no
+ *            kill; this is the r1-review non-exiting-terminal-branch fix)
+ *   exit 2   30-minute bound elapsed without trigger
+ *   exit 3   trigger seen but the kill was a NO-OP (no live target PIDs; the
+ *            sidecar's completed record says fired:false)
+ *   exit 64  usage error (bad/missing/unknown argument; nothing was started)
+ *   exit 70  fatal internal error
+ * Each outcome has its own code (audit C34: usage used to share 2 with "bound
+ * elapsed" and a fatal throw shared 1 with "flow terminal").
  *
  * Event visibility note: the envelope factory publishes the stream message
  * the moment PpQueueVerify STARTS — before any durable attribute could exist
@@ -47,6 +52,15 @@
  * from `dexcli flow summary` (overridable with `--flow-run-id`, omitted when
  * unknown) — never the flow id.
  *
+ * Numeric flags are validated: --deadline-minutes is a number > 0,
+ * --poll-seconds and --catch-up-seconds are whole numbers >= 1 (the SDK takes
+ * whole seconds; 0 would mean the 60 s server default). A flag without a value
+ * (or whose value is another flag) is a usage error.
+ *
+ * Probe cadence: the stream long-poll paces the loop, the dexcli poll +
+ * flow-status probes run about once per --poll-seconds, and their failures
+ * are logged (first, then every 10th) instead of swallowed.
+ *
  * Env: DEX_SERVER_ADDRESS / DEX_BLOB_CACHE_DIR (per-process cache dir is
  * deliberate — cross-process BlobCache sharing is not the guidance).
  */
@@ -66,11 +80,20 @@ import {
   type WatcherStreamEvent,
 } from "../src/watcher/queue-verify-watcher.js";
 import {
+  WATCHER_EXIT,
+  WATCHER_USAGE,
+  parseWatcherArgs,
+} from "../src/watcher/cli-args.js";
+import {
   DRAIN_PAGE_SIZE,
   drainRetainedBacklog,
   toWatcherEvent,
 } from "../src/watcher/drain-backlog.js";
-import { parseFlowSummary, resolveFlowRunId } from "../src/watcher/flow-summary.js";
+import {
+  flowStatusFromWire,
+  parseFlowSummary,
+  resolveFlowRunId,
+} from "../src/watcher/flow-summary.js";
 
 const execFileP = promisify(execFile);
 
@@ -90,11 +113,6 @@ function isLongPollWakeUp(err: unknown): boolean {
   );
 }
 
-function argValue(flag: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(flag);
-  return i >= 0 ? process.argv[i + 1] : fallback;
-}
-
 function log(line: string): void {
   console.log(`[watch-queue-verify ${new Date().toISOString()}] ${line}`);
 }
@@ -110,25 +128,32 @@ async function targetPids(): Promise<number[]> {
         const pid = Number.parseInt(line.trim(), 10);
         if (Number.isInteger(pid) && pid > 0 && !pids.includes(pid)) pids.push(pid);
       }
-    } catch {
-      // pgrep exits 1 on no match — no PIDs for this pattern.
+    } catch (err) {
+      // pgrep exits 1 on no match — no PIDs for this pattern. Anything else
+      // (missing binary, timeout) would make a live target look absent, so say so.
+      if ((err as { code?: unknown }).code !== 1) {
+        log(`pgrep for ${JSON.stringify(pattern)} failed: ${(err as Error).message}`);
+      }
     }
   }
   return pids;
 }
 
 async function main(): Promise<number> {
-  const flowId = argValue("--flow-id");
-  if (flowId === undefined || flowId === "") {
-    console.error("usage: watch-queue-verify.ts --flow-id <id> --run-id <runId> --events <sidecar>");
-    return 2;
+  const parsed = parseWatcherArgs(process.argv.slice(2), { eventsPath: DEFAULT_KILL_EVENTS_PATH });
+  if (!parsed.ok) {
+    console.error(`[watch-queue-verify] ${parsed.error}\n${WATCHER_USAGE}`);
+    return WATCHER_EXIT.usage;
   }
-  const runId = argValue("--run-id", "watch-queue-verify") as string;
-  const eventsPath = argValue("--events", DEFAULT_KILL_EVENTS_PATH) as string;
-  const flowRunIdOverride = argValue("--flow-run-id");
-  const deadlineMinutes = Number.parseInt(argValue("--deadline-minutes", "30") as string, 10);
-  const pollSeconds = Number.parseInt(argValue("--poll-seconds", "60") as string, 10);
-  const catchUpSeconds = Number.parseInt(argValue("--catch-up-seconds", "1") as string, 10);
+  const {
+    flowId,
+    runId,
+    eventsPath,
+    flowRunId: flowRunIdOverride,
+    deadlineMinutes,
+    pollSeconds,
+    catchUpSeconds,
+  } = parsed.options;
 
   // Read-side stream client: a registry with EXACTLY the flow type that owns
   // envelopeStream (port.Project — one-flow stream ownership, dex Registry
@@ -223,21 +248,16 @@ async function main(): Promise<number> {
       poll: async () => {
         // Old watcher predicate: an ACTIVE PpQueueVerify step execution.
         const state = await cli.flowState(flowId);
-        if (!state.ok) return false;
+        // Throw (do not return false): the watcher logs probe failures, so a
+        // missing/misconfigured dexcli no longer leaves this lane silently blind.
+        if (!state.ok) throw new Error(`dexcli flow state failed: ${state.error}`);
         return (state.value.activeStepExecutions ?? []).some(
           (s) => s.stepType === "PpQueueVerify",
         );
       },
-      flowStatus: async () => {
-        try {
-          const summary = await fetchFlowSummary();
-          if (summary.flowStatus === "FLOW_STATUS_COMPLETED") return "completed";
-          if (summary.flowStatus === "FLOW_STATUS_FAILED") return "failed";
-          return "running";
-        } catch {
-          return "unknown";
-        }
-      },
+      // Throws on a failed probe; the watcher logs it (rate-limited) and treats
+      // the status as "unknown".
+      flowStatus: async () => flowStatusFromWire((await fetchFlowSummary()).flowStatus),
       fire: async ({ via }) => {
         const pids = await targetPids();
         const flowRunId = resolveFlowRunId(flowRunIdOverride, observedRunId);
@@ -255,7 +275,11 @@ async function main(): Promise<number> {
         });
         return {
           killed: kill.fired,
-          detail: `no live target PID (pgrep found ${pids.length}); sidecar records fired=false`,
+          detail:
+            (pids.length === 0
+              ? "pgrep found no dexcli/worker PIDs"
+              : `none of pgrep's ${pids.length} PID(s) was alive`) +
+            "; the sidecar's completed record says fired=false",
         };
       },
       log,
@@ -263,18 +287,18 @@ async function main(): Promise<number> {
 
     if (result.outcome === "fired") {
       log(`done: kill fired once via ${result.via}`);
-      return 0;
+      return WATCHER_EXIT.fired;
     }
     if (result.outcome === "no-op") {
       log(`done: trigger seen via ${result.via} but NO kill happened (no live target PIDs)`);
-      return 3;
+      return WATCHER_EXIT.noop;
     }
     if (result.outcome === "terminal") {
       log("done: flow terminal before trigger");
-      return 1;
+      return WATCHER_EXIT.terminal;
     }
     log("done: bounded timeout without trigger");
-    return 2;
+    return WATCHER_EXIT.timeout;
   } finally {
     await runtime?.close();
   }
@@ -288,5 +312,5 @@ main()
   })
   .catch((err: unknown) => {
     console.error("[watch-queue-verify] fatal:", err);
-    process.exit(1);
+    process.exit(WATCHER_EXIT.fatal);
   });

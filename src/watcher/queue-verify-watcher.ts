@@ -89,6 +89,32 @@ export function activeAttemptStarts(events: readonly WatcherStreamEvent[]): Watc
   return [...open.values()];
 }
 
+/** Flow status as the watcher sees it ("unknown" = the probe failed / unrecognized). */
+export type WatcherFlowStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "terminated"
+  | "canceled"
+  | "timeout"
+  | "unknown";
+
+/**
+ * True when the flow can no longer reach a queue-verify START: completed,
+ * failed, terminated, canceled, or server-side timeout. (Audit C34: only
+ * completed/failed used to count, so a terminated flow was watched for the
+ * whole bound and exited "timeout" instead of the clean "terminal".)
+ */
+export function isTerminalFlowStatus(status: WatcherFlowStatus): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "terminated" ||
+    status === "canceled" ||
+    status === "timeout"
+  );
+}
+
 export interface QueueVerifyWatcherOptions {
   /**
    * Stream subscription: resolves the next event or null when the source is
@@ -112,7 +138,11 @@ export interface QueueVerifyWatcherOptions {
    * wherever the cursor ended up (worst case: the pre-US-010a behavior).
    */
   drainBacklog?: () => Promise<WatcherStreamEvent[]>;
-  /** 60 s poll fallback probe (dexcli): true when queue-verify is active. */
+  /**
+   * 60 s poll fallback probe (dexcli): true when queue-verify is active.
+   * THROW on a probe failure so the watcher can log it (rate-limited) instead
+   * of the fallback lane going silently blind.
+   */
   poll: () => Promise<boolean>;
   /**
    * The kill action. Called AT MOST once. Resolve `{ killed: false }` when the
@@ -121,8 +151,13 @@ export interface QueueVerifyWatcherOptions {
    * means the kill happened.
    */
   fire: (trigger: { via: "stream" | "poll"; atUtc: string }) => Promise<FireResult | void>;
-  /** Flow terminal probe; "unknown" (query failure) never terminates. */
-  flowStatus: () => Promise<"running" | "completed" | "failed" | "unknown">;
+  /**
+   * Flow status probe. THROW on a query failure (the watcher logs it,
+   * rate-limited, and treats the status as "unknown"); "unknown" never
+   * terminates. Terminal statuses end the watch cleanly — see
+   * {@link isTerminalFlowStatus}.
+   */
+  flowStatus: () => Promise<WatcherFlowStatus>;
   /** Hard bound on the whole watch (production: 30 min). */
   deadlineMs: number;
   /** Poll cadence (production: 60 s). */
@@ -174,6 +209,9 @@ export const DEFAULT_CATCH_UP_TIMEOUT_MS = 1_000;
 const DEFAULT_NOW = () => Date.now();
 const DEFAULT_SLEEP = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Log the first failure of a probe and then every Nth consecutive one. */
+const PROBE_FAILURE_LOG_EVERY = 10;
+
 export async function runQueueVerifyWatcher(
   options: QueueVerifyWatcherOptions,
 ): Promise<WatcherResult> {
@@ -187,6 +225,36 @@ export async function runQueueVerifyWatcher(
       : Math.min(options.pollIntervalMs, DEFAULT_CATCH_UP_TIMEOUT_MS);
   let fired = false;
   let streamUsable = true;
+
+  // Probe failures are LOGGED (audit C34) — a missing/misconfigured dexcli used
+  // to leave the fallback lane silently blind. Rate-limited: the first failure,
+  // then every PROBE_FAILURE_LOG_EVERY-th consecutive one; a recovery is logged.
+  const consecutiveFailures = new Map<string, number>();
+  const probeFailed = (probe: string, err: unknown): void => {
+    const count = (consecutiveFailures.get(probe) ?? 0) + 1;
+    consecutiveFailures.set(probe, count);
+    if (count === 1 || count % PROBE_FAILURE_LOG_EVERY === 0) {
+      log(
+        `${probe} probe failed (${count} consecutive; ignored, retried next cycle): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+  const probeSucceeded = (probe: string): void => {
+    const count = consecutiveFailures.get(probe) ?? 0;
+    if (count > 0) log(`${probe} probe recovered after ${count} consecutive failure(s)`);
+    consecutiveFailures.delete(probe);
+  };
+  /** Flow status with failures logged and mapped to "unknown" (never terminal). */
+  const probeStatus = async (): Promise<WatcherFlowStatus> => {
+    try {
+      const status = await options.flowStatus();
+      probeSucceeded("flow-status");
+      return status;
+    } catch (err) {
+      probeFailed("flow-status", err);
+      return "unknown"; // query failure never suppresses a live attempt
+    }
+  };
 
   const fireOnce = async (via: "stream" | "poll"): Promise<WatcherResult> => {
     if (fired) {
@@ -223,13 +291,8 @@ export async function runQueueVerifyWatcher(
       const startsInBacklog = backlog.filter((e) => isQueueVerifyStart(e)).length;
       const active = activeAttemptStarts(backlog);
       if (active.length > 0) {
-        let status: "running" | "completed" | "failed" | "unknown" = "unknown";
-        try {
-          status = await options.flowStatus();
-        } catch {
-          status = "unknown"; // query failure never suppresses a live attempt
-        }
-        if (status === "completed" || status === "failed") {
+        const status = await probeStatus();
+        if (isTerminalFlowStatus(status)) {
           log(
             `backlog start is stale — flow ${status} before the trigger; exiting cleanly (no kill)`,
           );
@@ -251,14 +314,18 @@ export async function runQueueVerifyWatcher(
     }
   }
 
+  let lastProbeAt: number | null = null;
   while (now() - start < options.deadlineMs) {
+    const cycleStart = now();
+    let streamEventsRead = 0;
     // 1. Stream subscription (primary): one bounded long-poll per cycle, then
     // a full CATCH-UP drain of everything already retained (fix-wave finding
     // 1) — consuming one message per pollInterval re-created the cx8 miss for
     // a backlog published AFTER arm, so the loop reads to exhaustion BEFORE
-    // any poll/terminal check or sleep. Each read uses the same bounded
-    // long-poll (retained events resolve immediately; only the final empty
-    // read waits) and the deadline still bounds the whole loop.
+    // any poll/terminal check or sleep. The first read long-polls for
+    // pollInterval; the catch-up reads use the short catchUpTimeoutMs
+    // (retained events resolve immediately; only the final empty read waits)
+    // and the deadline still bounds the whole loop.
     if (streamUsable) {
       try {
         let event = await options.nextStreamEvent(options.pollIntervalMs);
@@ -278,6 +345,7 @@ export async function runQueueVerifyWatcher(
             if (startSeenAt !== null && now() - startSeenAt >= catchUpTimeoutMs) break;
             event = await options.nextStreamEvent(catchUpTimeoutMs);
           }
+          streamEventsRead = batch.length;
           // Follow-path stale-start guard (fix-wave, same correlation as the
           // arm-time drain): fire only on a start whose attempt is UNMATCHED
           // in the batch (no same-key completion after it) AND whose flow has
@@ -287,13 +355,8 @@ export async function runQueueVerifyWatcher(
           const startsInBatch = batch.filter((e) => isQueueVerifyStart(e)).length;
           const active = activeAttemptStarts(batch);
           if (active.length > 0) {
-            let status: "running" | "completed" | "failed" | "unknown" = "unknown";
-            try {
-              status = await options.flowStatus();
-            } catch {
-              status = "unknown"; // query failure never suppresses a live attempt
-            }
-            if (status === "completed" || status === "failed") {
+            const status = await probeStatus();
+            if (isTerminalFlowStatus(status)) {
               log(
                 `follow start is stale — flow ${status} before the trigger; exiting cleanly (no kill)`,
               );
@@ -318,32 +381,47 @@ export async function runQueueVerifyWatcher(
       }
     }
 
-    // 2. Poll fallback (also a belt-and-braces echo while the stream works).
-    let pollHit = false;
-    try {
-      pollHit = await options.poll();
-    } catch (err) {
-      log(`poll probe failed (ignored, retried next cycle): ${err instanceof Error ? err.message : String(err)}`);
-    }
-    if (pollHit) {
-      return await fireOnce("poll");
-    }
+    // Probe cadence. A quiet cycle (nothing read) is ~pollInterval long, so it
+    // probes every cycle; a busy cycle loops straight back to the stream, so
+    // the dexcli probes are time-gated to once per pollInterval.
+    const probeDue =
+      streamEventsRead === 0 || lastProbeAt === null || now() - lastProbeAt >= options.pollIntervalMs;
+    if (probeDue) {
+      lastProbeAt = now();
 
-    // 3. Terminal branch — FIXED (r1 finding): the watcher EXITS cleanly when
-    // the flow ended before the trigger instead of looping to the deadline.
-    let status: "running" | "completed" | "failed" | "unknown" = "unknown";
-    try {
-      status = await options.flowStatus();
-    } catch {
-      status = "unknown";
-    }
-    if (status === "completed" || status === "failed") {
-      log(`flow ${status} before trigger — exiting cleanly (no kill)`);
-      return { outcome: "terminal", firings: 0 };
+      // 2. Poll fallback (also a belt-and-braces echo while the stream works).
+      let pollHit = false;
+      try {
+        pollHit = await options.poll();
+        probeSucceeded("poll");
+      } catch (err) {
+        probeFailed("poll", err);
+      }
+      if (pollHit) {
+        return await fireOnce("poll");
+      }
+
+      // 3. Terminal branch — FIXED (r1 finding): the watcher EXITS cleanly when
+      // the flow ended before the trigger instead of looping to the deadline.
+      const status = await probeStatus();
+      if (isTerminalFlowStatus(status)) {
+        log(`flow ${status} before trigger — exiting cleanly (no kill)`);
+        return { outcome: "terminal", firings: 0 };
+      }
     }
 
     if (now() - start >= options.deadlineMs) break;
-    await sleep(options.pollIntervalMs);
+
+    // Pacing. After a busy cycle go straight back to the stream: its long-poll
+    // wakes the moment a message is published, whereas a sleep here leaves the
+    // watcher deaf for up to pollInterval — any START published meanwhile
+    // would be read only after its ~1.5 s window closed. After a quiet cycle
+    // sleep only the REMAINDER of pollInterval: the stream long-poll already
+    // used most of it (the old unconditional sleep(pollInterval) doubled the
+    // cadence to 2x the documented 60 s — audit C34).
+    if (streamEventsRead > 0) continue;
+    const remainingMs = options.pollIntervalMs - (now() - cycleStart);
+    if (remainingMs > 0) await sleep(remainingMs);
   }
 
   log(`deadline reached without trigger — bounded exit`);
