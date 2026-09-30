@@ -440,7 +440,7 @@ export type QueueKind = "tsc" | "vitest";
  * US-010 honest vitest accounting carried on vitest burn-down samples. A
  * queue that did not RUN is never presented as a bare error_count 0: the
  * state plus the explicit reason travel with the sample, and renderers show
- * them. tsc rows carry no such field (tsc keeps its own semantics).
+ * them. tsc has its own accounting ({@link TscRunAccounting}) on its TOTAL row.
  */
 export interface VitestRunAccounting {
   state: "ran" | "not-run";
@@ -449,6 +449,27 @@ export interface VitestRunAccounting {
   passed: number | null;
   failed: number | null;
   total: number | null;
+}
+
+/**
+ * Contract A: honest tsc accounting carried on the tsc TOTAL burn-down row
+ * (file null), mirroring {@link VitestRunAccounting}. `state` is "not-run"
+ * whenever tsc could not produce a trustworthy count: spawn error / ENOENT,
+ * timeout or kill, or a non-zero exit with zero located diagnostics. A not-run
+ * row is never rendered as PASS or as "0 errors".
+ */
+export interface TscRunAccounting {
+  state: "ran" | "not-run";
+  /**
+   * Explicit reason when not-run, e.g. "tsc exited 2 with no located
+   * diagnostics: error TS18003: No inputs were found...", "tsc timed out after
+   * 180s", "tsc binary not found (ENOENT)". null when ran.
+   */
+  reason: string | null;
+  /** Process exit code; null when killed / not spawned. */
+  exit_code: number | null;
+  /** Count of global (file-less) `error TSnnnn:` diagnostics seen. */
+  unlocated: number;
 }
 
 /**
@@ -471,6 +492,8 @@ export interface QueueBurnDownEvent {
   recorded_at: string;
   /** US-010; absent on tsc rows and on legacy vitest rows (pre-US-010 runs). */
   vitest?: VitestRunAccounting;
+  /** Contract A; only on the tsc TOTAL row (file null); absent on legacy rows. */
+  tsc?: TscRunAccounting;
 }
 
 /**

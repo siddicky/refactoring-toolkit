@@ -38,6 +38,7 @@ import {
   type QueueBurnDownEvent,
   type QueueKind,
   type TokenUsage,
+  type TscRunAccounting,
   type VerdictRecord,
   type VerdictTombstone,
   type VitestRunAccounting,
@@ -111,8 +112,12 @@ export interface ReportJson {
      * run's evidence is typecheck-only at best).
      */
     verification: {
+      /** null = no tsc samples OR the final tsc run did not run (see `tsc`). */
       tsc_final_error_count: number | null;
+      /** null = unknown: no tsc samples, or tsc NOT RUN (never a pass). */
       tsc_verified: boolean | null;
+      /** Contract A accounting of the final tsc iteration; absent on legacy rows / no samples. */
+      tsc?: TscRunAccounting;
       vitest: VitestRunAccounting | null;
     };
   };
@@ -167,6 +172,8 @@ export interface ReportJson {
        * state + reason, never a bare 0.
        */
       vitest?: VitestRunAccounting;
+      /** Contract A tsc accounting for this iteration; not-run => count is vacuous. */
+      tsc?: TscRunAccounting;
       /** Breakdown rows only; `error_count` above is the authoritative total. */
       per_file: Array<{ file: string; error_count: number }>;
     }>;
@@ -511,6 +518,8 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     perFile: Array<{ file: string; error_count: number }>;
     /** US-010: vitest accounting for this iteration (first sample with one wins). */
     vitest?: VitestRunAccounting;
+    /** Contract A: tsc accounting (rides on the tsc total row; first wins). */
+    tsc?: TscRunAccounting;
   }
   interface QueueAgg {
     queue: QueueKind;
@@ -538,6 +547,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
       it.perFile.push({ file: sample.file, error_count: sample.error_count });
     }
     if (sample.vitest !== undefined && it.vitest === undefined) it.vitest = sample.vitest;
+    if (sample.tsc !== undefined && it.tsc === undefined) it.tsc = sample.tsc;
   }
   const burnDownJson: ReportJson["queue_burn_down"] = [...queueAggs.values()]
     .sort((p, q) => compareStrings(p.queue, q.queue))
@@ -549,6 +559,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
           iteration,
           error_count: iterationCount(it),
           ...(it.vitest !== undefined ? { vitest: it.vitest } : {}),
+          ...(it.tsc !== undefined ? { tsc: it.tsc } : {}),
           per_file: [...it.perFile].sort((p, q) => compareStrings(p.file, q.file)),
         })),
     }));
@@ -556,10 +567,16 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   // ---- US-010 verification: what the run was verified BY --------------------
   const tscAgg = queueAggs.get("tsc");
   let tscFinalErrorCount: number | null = null;
+  let tscFinalAccounting: TscRunAccounting | null = null;
   if (tscAgg !== undefined && tscAgg.iterations.size > 0) {
     const last = Math.max(...tscAgg.iterations.keys());
     const lastIteration = tscAgg.iterations.get(last);
-    tscFinalErrorCount = lastIteration === undefined ? null : iterationCount(lastIteration);
+    if (lastIteration !== undefined) {
+      tscFinalAccounting = lastIteration.tsc ?? null;
+      // A tsc run that did not RUN has no trustworthy count: never 0, never PASS.
+      tscFinalErrorCount =
+        tscFinalAccounting?.state === "not-run" ? null : iterationCount(lastIteration);
+    }
   }
   const vitestIterations = [...(queueAggs.get("vitest")?.iterations.entries() ?? [])].filter(
     ([, it]) => it.vitest !== undefined,
@@ -568,7 +585,11 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   const vitestVerification = lastVitest?.[1].vitest ?? null;
   const verification: ReportJson["summary"]["verification"] = {
     tsc_final_error_count: tscFinalErrorCount,
-    tsc_verified: tscFinalErrorCount === null ? null : tscFinalErrorCount === 0,
+    tsc_verified:
+      tscFinalErrorCount === null
+        ? null
+        : tscFinalErrorCount === 0 && (tscFinalAccounting?.unlocated ?? 0) === 0,
+    ...(tscFinalAccounting !== null ? { tsc: tscFinalAccounting } : {}),
     vitest: vitestVerification,
   };
 
@@ -777,6 +798,14 @@ function renderMarkdown(report: ReportJson): string {
           it.vitest.state === "ran"
             ? `${it.error_count} failed (${it.vitest.passed ?? "?"} passed / ${it.vitest.total ?? "?"} total)`
             : `NOT RUN — ${mdCell(it.vitest.reason ?? "reason unrecorded")}`;
+      } else if (q.queue === "tsc" && it.tsc !== undefined) {
+        // Contract A: a not-run tsc iteration NEVER presents as a bare count.
+        total =
+          it.tsc.state === "ran"
+            ? it.tsc.unlocated > 0
+              ? `${it.error_count} (+${it.tsc.unlocated} unlocated)`
+              : String(it.error_count)
+            : `NOT RUN — ${mdCell(it.tsc.reason ?? "reason unrecorded")}`;
       } else {
         total = String(it.error_count);
       }
@@ -788,13 +817,19 @@ function renderMarkdown(report: ReportJson): string {
   // US-010: typecheck-verified vs test-verified are DIFFERENT evidence claims.
   lines.push("## Verification");
   const verification = report.summary.verification;
-  if (verification.tsc_verified === null) {
+  if (verification.tsc?.state === "not-run") {
+    lines.push(
+      `- typecheck (tsc): NOT RUN (${mdCell(verification.tsc.reason ?? "reason unrecorded")}) — typecheck status unknown, never a pass`,
+    );
+  } else if (verification.tsc_verified === null) {
     lines.push("- typecheck (tsc): no queue samples — typecheck status unknown");
   } else if (verification.tsc_verified) {
     lines.push("- typecheck (tsc): PASS at final iteration (0 remaining errors)");
   } else {
+    const unlocated = verification.tsc?.unlocated ?? 0;
+    const unlocatedNote = unlocated > 0 ? ` (+${unlocated} unlocated diagnostic(s))` : "";
     lines.push(
-      `- typecheck (tsc): ${verification.tsc_final_error_count} error(s) remain at final iteration — NOT typecheck-clean`,
+      `- typecheck (tsc): ${verification.tsc_final_error_count} error(s)${unlocatedNote} remain at final iteration — NOT typecheck-clean`,
     );
   }
   if (verification.vitest === null) {

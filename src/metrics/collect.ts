@@ -62,6 +62,22 @@ export function collectBurnDown(attrs: readonly StateAttribute[]): QueueBurnDown
         total: typeof v.vitest.total === "number" ? v.vitest.total : null,
       };
     }
+    // Contract A: honest tsc accounting rides on the tsc TOTAL row (legacy
+    // rows keep the field absent and render as before).
+    let tsc: QueueBurnDownEvent["tsc"];
+    if (
+      v.tsc !== undefined &&
+      typeof v.tsc === "object" &&
+      v.tsc !== null &&
+      (v.tsc.state === "ran" || v.tsc.state === "not-run")
+    ) {
+      tsc = {
+        state: v.tsc.state,
+        reason: typeof v.tsc.reason === "string" ? v.tsc.reason : null,
+        exit_code: typeof v.tsc.exit_code === "number" ? v.tsc.exit_code : null,
+        unlocated: typeof v.tsc.unlocated === "number" ? v.tsc.unlocated : 0,
+      };
+    }
     out.push({
       queue,
       file: typeof v.file === "string" && v.file !== "" ? v.file : null,
@@ -69,6 +85,7 @@ export function collectBurnDown(attrs: readonly StateAttribute[]): QueueBurnDown
       error_count: v.error_count,
       recorded_at: v.recorded_at,
       ...(vitest !== undefined ? { vitest } : {}),
+      ...(tsc !== undefined ? { tsc } : {}),
     });
   }
   return out;

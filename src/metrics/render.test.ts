@@ -490,3 +490,71 @@ describe("renderReport queue burn-down totals (aggregate row authoritative)", ()
     expect(rendered.json.summary.verification.tsc_final_error_count).toBe(4);
   });
 });
+
+// ---------------------------------------------------------------------------
+// C06 / Contract A: tsc run accounting. A not-run tsc is never PASS / 0 errors.
+// ---------------------------------------------------------------------------
+
+describe("renderReport tsc accounting (Contract A)", () => {
+  const tscRow = (
+    iteration: number,
+    error_count: number,
+    tsc?: QueueBurnDownEvent["tsc"],
+  ): QueueBurnDownEvent => ({
+    queue: "tsc",
+    file: null,
+    iteration,
+    error_count,
+    recorded_at: `2026-09-26T10:0${iteration}:00Z`,
+    ...(tsc !== undefined ? { tsc } : {}),
+  });
+  const render = (burnDown: QueueBurnDownEvent[]) =>
+    renderReport({ envelopes: [], verdicts: [], burnDown });
+
+  test("not-run tsc (TS18003, 0 parsed errors) renders NOT RUN with its reason, never PASS", () => {
+    const reason = "tsc exited 2 with no located diagnostics: error TS18003: No inputs were found";
+    const rendered = render([tscRow(1, 0, { state: "not-run", reason, exit_code: 2, unlocated: 1 })]);
+    const v = rendered.json.summary.verification;
+    expect(v.tsc_verified).toBeNull();
+    expect(v.tsc_final_error_count).toBeNull();
+    expect(v.tsc?.state).toBe("not-run");
+    expect(rendered.markdown).toContain(`typecheck (tsc): NOT RUN (${reason})`);
+    expect(rendered.markdown).not.toContain("typecheck (tsc): PASS");
+    expect(rendered.markdown).toContain("| 1 | NOT RUN — tsc exited 2");
+    expect(rendered.json.queue_burn_down[0]?.iterations[0]?.tsc?.state).toBe("not-run");
+  });
+
+  test("timeout and ENOENT reasons pass through verbatim", () => {
+    for (const reason of ["tsc timed out after 180s", "tsc binary not found (ENOENT)"]) {
+      const rendered = render([tscRow(1, 0, { state: "not-run", reason, exit_code: null, unlocated: 0 })]);
+      expect(rendered.markdown).toContain(`typecheck (tsc): NOT RUN (${reason})`);
+    }
+  });
+
+  test("a ran tsc with 0 errors still PASSes; unlocated diagnostics block the PASS", () => {
+    const pass = render([tscRow(1, 0, { state: "ran", reason: null, exit_code: 0, unlocated: 0 })]);
+    expect(pass.json.summary.verification.tsc_verified).toBe(true);
+    expect(pass.markdown).toContain("typecheck (tsc): PASS at final iteration");
+    const dirty = render([tscRow(1, 0, { state: "ran", reason: null, exit_code: 2, unlocated: 2 })]);
+    expect(dirty.json.summary.verification.tsc_verified).toBe(false);
+    expect(dirty.markdown).toContain("(+2 unlocated diagnostic(s))");
+    expect(dirty.markdown).not.toContain("typecheck (tsc): PASS");
+  });
+
+  test("only the FINAL iteration decides the verification; earlier not-run rows stay visible", () => {
+    const rendered = render([
+      tscRow(1, 0, { state: "not-run", reason: "tsc timed out after 180s", exit_code: null, unlocated: 0 }),
+      tscRow(2, 3, { state: "ran", reason: null, exit_code: 2, unlocated: 0 }),
+    ]);
+    expect(rendered.json.summary.verification.tsc_final_error_count).toBe(3);
+    expect(rendered.markdown).toContain("| 1 | NOT RUN — tsc timed out after 180s");
+  });
+
+  test("legacy rows without tsc accounting render exactly as before", () => {
+    const rendered = render([tscRow(1, 0)]);
+    expect(rendered.json.summary.verification.tsc).toBeUndefined();
+    expect(rendered.json.summary.verification.tsc_verified).toBe(true);
+    expect(rendered.markdown).toContain("typecheck (tsc): PASS at final iteration (0 remaining errors)");
+    expect(rendered.markdown).toContain("| 1 | 0 |");
+  });
+});

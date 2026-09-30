@@ -116,3 +116,25 @@ describe("collectVerdicts / collectTombstones / collectEnvelopes", () => {
     expect(out.map((e) => e.stepId)).toEqual(["a", "b"]);
   });
 });
+
+describe("collectBurnDown tsc accounting (Contract A)", () => {
+  test("carries tsc accounting from the total row; legacy rows stay without it", () => {
+    const base = { queue: "tsc", iteration: 1, error_count: 0, file: null, recorded_at: "2026-09-26T10:00:00Z" };
+    const rows = collectBurnDown([
+      attr("queue-burndown/tsc-1", {
+        ...base,
+        tsc: { state: "not-run", reason: "tsc timed out after 180s", exit_code: null, unlocated: 0 },
+      }),
+      attr("queue-burndown/tsc-2", { ...base, iteration: 2 }),
+      attr("queue-burndown/tsc-3", { ...base, iteration: 3, tsc: { state: "bogus" } }),
+    ]);
+    expect(rows[0]?.tsc).toEqual({
+      state: "not-run",
+      reason: "tsc timed out after 180s",
+      exit_code: null,
+      unlocated: 0,
+    });
+    expect(rows[1]?.tsc).toBeUndefined();
+    expect(rows[2]?.tsc).toBeUndefined();
+  });
+});
