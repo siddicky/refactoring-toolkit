@@ -10,7 +10,9 @@ import { FIXER } from "../harness/agents/fixer.js";
 import { IMPLEMENTER } from "../harness/agents/implementer.js";
 import { REVIEWER } from "../harness/agents/reviewer.js";
 import { TOOL_CATEGORIES } from "../harness/agents/types.js";
+import { PHP_TO_TS_TYPE_MAP } from "../harness/skills/php-ts-type-map.js";
 import { PORTING_CONVENTIONS } from "../harness/skills/porting-conventions.js";
+import { phpTypeToTsType } from "../src/typesafe/symbol-types.js";
 import { composeAgentTurn, configurePortHarness, runAgentTurn } from "../flows/port-project.js";
 import type { AgentSessionClient, PromptOptions } from "../src/harness/opencode.js";
 import { evaluateSuspicion } from "../src/metrics/suspicion.js";
@@ -500,5 +502,46 @@ describe("C16: reviewer prompt vs reviewer turn consistency", () => {
     // the turn indeed contains no PHP source block
     expect(turn).not.toContain("```php");
     expect(body).not.toContain("PHP source (read-only, by value)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C23 — one PHP -> TS type map shared by the conventions and the symbol table
+// ---------------------------------------------------------------------------
+
+describe("C23: conventions and per-symbol recall agree on PHP type hints", () => {
+  test("every key of the shared map maps identically through phpTypeToTsType", () => {
+    for (const [php, ts] of Object.entries(PHP_TO_TS_TYPE_MAP)) {
+      expect([php, phpTypeToTsType(php)]).toEqual([php, ts]);
+    }
+  });
+
+  test("the conventions text given to the implementer renders every entry of that same map", () => {
+    for (const [php, ts] of Object.entries(PHP_TO_TS_TYPE_MAP)) {
+      expect(PORTING_CONVENTIONS.instructions).toContain(`\`${php}\` → \`${ts}\``);
+    }
+  });
+
+  test("self/static/iterable have ONE mapping, and it is a valid TS annotation", () => {
+    expect(phpTypeToTsType("self")).toBe("this");
+    expect(phpTypeToTsType("static")).toBe("this");
+    expect(phpTypeToTsType("?self")).toBe("this | null");
+    expect(phpTypeToTsType("iterable")).toBe("Iterable<unknown>");
+    expect(PHP_TO_TS_TYPE_MAP.iterable).toBe("Iterable<unknown>");
+    for (const bare of ["self", "static"]) {
+      expect(Object.values(PHP_TO_TS_TYPE_MAP)).not.toContain(bare);
+    }
+  });
+
+  test("keys only one side used to know are now shared (long/real/numeric/scalar/true/false/list)", () => {
+    for (const key of ["long", "real", "number", "numeric", "scalar", "true", "false", "list", "void"]) {
+      expect(Object.hasOwn(PHP_TO_TS_TYPE_MAP, key)).toBe(true);
+    }
+  });
+
+  test("a class whose lower-cased name collides with an Object.prototype key is passed through, not mapped to a function", () => {
+    expect(phpTypeToTsType("Constructor")).toBe("Constructor");
+    expect(phpTypeToTsType("App\\Constructor")).toBe("Constructor");
+    expect(phpTypeToTsType("__proto__")).toBe("__proto__");
   });
 });

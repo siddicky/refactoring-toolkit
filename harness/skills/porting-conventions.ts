@@ -9,30 +9,11 @@
  */
 
 import type { SkillModule } from "./types.js";
+import { PHP_TO_TS_TYPE_MAP } from "./php-ts-type-map.js";
 
-/**
- * PHP type-hint vocabulary → TS annotation. `array` maps to `unknown[]` on
- * purpose: the per-symbol table (prep artifact) is expected to narrow it;
- * staying `unknown[]` keeps implicit guesses out of `tsc --strict`.
- */
-export const PHP_TO_TS_TYPE_MAP: Readonly<Record<string, string>> = {
-  string: "string",
-  int: "number",
-  integer: "number",
-  float: "number",
-  double: "number",
-  bool: "boolean",
-  boolean: "boolean",
-  array: "unknown[]",
-  iterable: "Iterable<unknown>",
-  callable: "(...args: unknown[]) => unknown",
-  object: "Record<string, unknown>",
-  mixed: "unknown",
-  null: "null",
-  void: "void",
-  self: "this",
-  static: "this",
-};
+// The PHP → TS type map is shared with src/typesafe/symbol-types.ts (audit
+// C23): one module, one mapping. Re-exported here for the existing import path.
+export { PHP_TO_TS_TYPE_MAP };
 
 export const PORTING_CONVENTIONS: SkillModule = {
   name: "porting-conventions",

@@ -15,6 +15,7 @@
  *    implementer agent).
  */
 import { choice, noul, type ChoiceCriteria, type ChoiceResponse, type JudgmentClient } from "./client.js";
+import { lookupPhpTypeHint } from "../../harness/skills/php-ts-type-map.js";
 
 // ---- inputs -----------------------------------------------------------------
 
@@ -56,8 +57,9 @@ export interface RecallResult {
 /**
  * PHPDoc/PHP type hint -> TypeScript type. Handles nullable (`?T`), unions,
  * indexed sugar (`T[]`), common generics (`array<K,V>`, `list<T>`,
- * `iterable<T>`), PHPDoc keywords, and class-name passthrough (last
- * namespace segment).
+ * `iterable<T>`), PHPDoc keywords (from the map SHARED with the porting
+ * conventions: harness/skills/php-ts-type-map.ts), and class-name passthrough
+ * (last namespace segment).
  */
 export function phpTypeToTsType(phpType: string): string {
   const t = phpType.trim();
@@ -78,44 +80,18 @@ export function phpTypeToTsType(phpType: string): string {
       .filter((a) => a.length > 0);
     if (head === "array" || head === "list" || head === "iterable") {
       const firstArg = args[0];
-      if (args.length === 1 && firstArg !== undefined) return `${phpTypeToTsType(firstArg)}[]`;
-      return "unknown[]";
+      const element = args.length === 1 && firstArg !== undefined ? phpTypeToTsType(firstArg) : null;
+      if (head === "iterable") return element === null ? "Iterable<unknown>" : `Iterable<${element}>`;
+      return element === null ? "unknown[]" : `${element}[]`;
     }
     return t; // unknown generic class: passthrough
   }
 
-  const simple = PHP_TYPE_TO_TS[t.toLowerCase()];
+  const simple = lookupPhpTypeHint(t);
   if (simple !== undefined) return simple;
   const segments = t.split("\\");
   return segments[segments.length - 1] ?? t;
 }
-
-const PHP_TYPE_TO_TS: Readonly<Record<string, string>> = {
-  int: "number",
-  integer: "number",
-  long: "number",
-  float: "number",
-  double: "number",
-  real: "number",
-  number: "number",
-  numeric: "number",
-  string: "string",
-  bool: "boolean",
-  boolean: "boolean",
-  true: "true",
-  false: "false",
-  null: "null",
-  mixed: "unknown",
-  array: "unknown[]",
-  list: "unknown[]",
-  iterable: "unknown[]",
-  callable: "(...args: unknown[]) => unknown",
-  object: "Record<string, unknown>",
-  scalar: "string | number",
-  void: "void",
-  self: "self",
-  static: "static",
-};
 
 /** Classify one PHP literal (source text) into a TS type; null when unrecognizable. */
 export function literalTypeToTs(literal: string): string | null {
