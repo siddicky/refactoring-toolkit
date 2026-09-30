@@ -5,14 +5,15 @@
  * top-level side effects — so they can be unit-tested (the driver script runs
  * its `main()` on import and cannot be).
  */
-import type {
-  EnvelopeEvent,
-  JevUsageEntry,
-  QueueBurnDownEvent,
-  QueueKind,
-  TokenUsage,
-  VerdictRecord,
-  VerdictTombstone,
+import {
+  type EnvelopeEvent,
+  fileFromSanitizedKey,
+  type JevUsageEntry,
+  type QueueBurnDownEvent,
+  type QueueKind,
+  type TokenUsage,
+  type VerdictRecord,
+  type VerdictTombstone,
 } from "./types.js";
 
 /** One durable attribute of a flow (`flow state` wire shape). */
@@ -117,9 +118,9 @@ export function collectVerdicts(attrs: readonly StateAttribute[]): VerdictRecord
  * US-006 tombstones (discarded reviewer verdicts) stored under the same
  * pp-verdict / pp-prep-verdict keys a completed tuple would use. The value
  * carries {reviewer, discarded, reason, attempt, tokens}; file+round are
- * recovered from the attribute key (`<sanitized-file>#<round>#<reviewer>` —
- * "__" -> "/" is lossy for filenames containing "__", documented pattern of
- * fileFromIdentity). Tombstones never enter the VerdictRecord stream; the
+ * recovered from the attribute key (`<sanitized-file>#<round>#<reviewer>`,
+ * inverted by the shared fileFromSanitizedKey — lossy for filenames containing
+ * "__"; the renderer prefers a verdict record's authoritative file). Tombstones never enter the VerdictRecord stream; the
  * renderer uses them for the degraded marker and the exhaustion under-count
  * note.
  */
@@ -137,9 +138,11 @@ export function collectTombstones(
     if (v === null || typeof v !== "object" || v.discarded !== true) continue;
     if (typeof v.reviewer !== "string" || typeof v.reason !== "string") continue;
     if (typeof v.attempt !== "number") continue;
+    const roundPart = suffix.slice(roundSep + 1, reviewerSep);
+    if (!/^\d+$/.test(roundPart)) continue;
     out.push({
-      file: suffix.slice(0, roundSep).replace(/__/g, "/"),
-      round: Number(suffix.slice(roundSep + 1, reviewerSep)),
+      file: fileFromSanitizedKey(suffix.slice(0, roundSep)),
+      round: Number(roundPart),
       reviewer: v.reviewer,
       discarded: true,
       reason: v.reason,

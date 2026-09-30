@@ -30,6 +30,7 @@ import {
   fileFromIdentity,
   isFiredKill,
   isModelCallingRole,
+  sanitizeFileKey,
   type CitationCheckResult,
   type EnvelopeEvent,
   type EnvelopeRole,
@@ -303,13 +304,37 @@ export function runProvenanceCrossCheck(input: {
  * The live factory leaves file/round null on per-file steps — identity is
  * the authoritative target key.
  */
-function envelopeTarget(env: EnvelopeEvent): { file: string; round: number | null } | null {
-  if (env.file !== null) return { file: env.file, round: env.round };
+function envelopeTarget(
+  env: EnvelopeEvent,
+  canonicalFile: (file: string) => string,
+): { file: string; round: number | null } | null {
+  if (env.file !== null) return { file: canonicalFile(env.file), round: env.round };
   if (env.identity !== null) {
     const parsed = fileFromIdentity(env.identity);
-    if (parsed !== null) return { file: parsed.file, round: env.round ?? parsed.round };
+    if (parsed !== null) {
+      return { file: canonicalFile(parsed.file), round: env.round ?? parsed.round };
+    }
   }
   return null;
+}
+
+/**
+ * Resolves a (possibly lossy) recovered file path to the AUTHORITATIVE one: a
+ * verdict record carries the true `file`, while the sanitized identity's
+ * "__" -> "/" inverse corrupts any path containing "__" (src/__tests__/Foo.php
+ * -> src//tests//Foo.php) and would split one file-round in two. The
+ * sanitized forms are compared (sanitize(inverse(x)) === x always holds); two
+ * distinct authoritative files that sanitize identically are ambiguous and
+ * left alone.
+ */
+function canonicalFileResolver(verdicts: readonly VerdictRecord[]): (file: string) => string {
+  const bySanitized = new Map<string, string | null>();
+  for (const v of verdicts) {
+    const key = sanitizeFileKey(v.file);
+    const known = bySanitized.get(key);
+    bySanitized.set(key, known === undefined || known === v.file ? v.file : null);
+  }
+  return (file) => bySanitized.get(sanitizeFileKey(file)) ?? file;
 }
 
 function compareStrings(a: string, b: string): number {
@@ -363,12 +388,13 @@ function summarizeAnchor(anchor: DispatchAnchorResult): DispatchAnchorSummary {
 function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck | null): ReportJson {
   const { envelopes, verdicts, burnDown } = input;
   const provenanceFailures = cross === null ? validateProvenance(envelopes) : cross.failures;
+  const canonicalFile = canonicalFileResolver(verdicts);
 
   // ---- universe of file+round pairs (envelopes + verdicts) ---------------
   const fileRoundKeys = new Set<string>();
   const files = new Set<string>();
   for (const env of envelopes) {
-    const target = envelopeTarget(env);
+    const target = envelopeTarget(env, canonicalFile);
     if (target === null || target.round === null) continue; // flow-level step
     fileRoundKeys.add(`${target.file}\u0000${target.round}`);
     files.add(target.file);
@@ -377,7 +403,8 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     fileRoundKeys.add(`${v.file}\u0000${v.round}`);
     files.add(v.file);
   }
-  for (const t of input.tombstones ?? []) {
+  const tombstones = (input.tombstones ?? []).map((t) => ({ ...t, file: canonicalFile(t.file) }));
+  for (const t of tombstones) {
     fileRoundKeys.add(`${t.file}\u0000${t.round}`);
     files.add(t.file);
   }
@@ -393,7 +420,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
 
   // ---- US-006 tombstones grouped by file+round ---------------------------
   const tombstonesByGroup = new Map<string, Array<VerdictTombstone>>();
-  for (const t of input.tombstones ?? []) {
+  for (const t of tombstones) {
     const key = `${t.file}\u0000${t.round}`;
     const list = tombstonesByGroup.get(key);
     if (list) list.push(t);
@@ -447,7 +474,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   const fileRoleAggs = new Map<string, FileRoleAgg>();
   for (const env of envelopes) {
     if (env.attempt === 0) continue; // M4 start markers are not step work
-    const file = envelopeTarget(env)?.file ?? "(flow)";
+    const file = envelopeTarget(env, canonicalFile)?.file ?? "(flow)";
     const key = `${file}\u0000${env.role}`;
     let agg = fileRoleAggs.get(key);
     if (!agg) {
@@ -575,7 +602,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   const retriesByFile = new Map<string, number>();
   for (const env of envelopes) {
     if (env.stepId !== FIXER_STEP_ID || env.attempt === 0) continue;
-    const file = envelopeTarget(env)?.file;
+    const file = envelopeTarget(env, canonicalFile)?.file;
     if (file === undefined) continue;
     if (env.attempt > 1) {
       retriesByFile.set(file, (retriesByFile.get(file) ?? 0) + 1);

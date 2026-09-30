@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { renderReport, runProvenanceCrossCheck, validateProvenance } from "./render.js";
-import { type EnvelopeEvent, type KillEventsFile, type QueueBurnDownEvent, type VerdictRecord } from "./types.js";
+import {
+  type EnvelopeEvent,
+  identityKeyOf,
+  type KillEventsFile,
+  type QueueBurnDownEvent,
+  type VerdictRecord,
+} from "./types.js";
 import runARaw from "./fixtures/event-stream-run-a.json" with { type: "json" };
 import runBRaw from "./fixtures/event-stream-run-b.json" with { type: "json" };
 import killARaw from "./fixtures/kill-events-run-a.json" with { type: "json" };
@@ -678,5 +684,77 @@ describe("renderReport judgment (Jev) usage", () => {
     expect(rendered.json.jev_usage).toBeNull();
     expect(rendered.markdown).toContain("- judgment (Jev) tokens: none recorded");
     expect(rendered.markdown).toContain("_none recorded (naive judgment path or no live Jev spend)_");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C46: a path containing "__" must not split one file-round into a phantom
+// "unreviewed" one (the sanitized-identity inverse is lossy).
+// ---------------------------------------------------------------------------
+
+describe("renderReport prefers the authoritative verdict file over the lossy identity inverse", () => {
+  const FILE = "src/__tests__/Foo.php";
+  const identity = identityKeyOf(FILE, 1);
+  const reviewEnv = (stepId: string): EnvelopeEvent => ({
+    stepId,
+    role: "review",
+    file: null,
+    round: null,
+    attempt: 1,
+    started_at: "2026-09-26T10:00:00Z",
+    ended_at: "2026-09-26T10:01:00Z",
+    outcome: "completed",
+    tokens: 10,
+    wall_clock_ms: 1000,
+    identity,
+  });
+  const verdict = (reviewer: string): VerdictRecord => ({
+    file: FILE,
+    reviewer,
+    round: 1,
+    diff_id: "d1",
+    findings: [],
+    citation_check: [],
+  });
+
+  test("two reviewers on src/__tests__/Foo.php yield ONE agree-clean file-round, not a phantom unreviewed twin", () => {
+    const rendered = renderReport({
+      envelopes: [reviewEnv("pp-review-a"), reviewEnv("pp-review-b")],
+      verdicts: [verdict("reviewer-A"), verdict("reviewer-B")],
+      burnDown: [],
+    });
+    expect(rendered.json.file_rounds.map((fr) => `${fr.file}#${fr.round}:${fr.agreement.outcome}`)).toEqual([
+      `${FILE}#1:agree-clean`,
+    ]);
+    expect(rendered.json.summary.files).toEqual([FILE]);
+    expect(rendered.json.tokens_by_file_role.map((r) => r.file)).toEqual([FILE]);
+    expect(rendered.markdown).not.toContain("src//tests//Foo.php");
+  });
+
+  test("a tombstone whose file was recovered lossily from its attribute key joins the authoritative file-round", () => {
+    const rendered = renderReport({
+      envelopes: [],
+      verdicts: [verdict("reviewer-A")],
+      tombstones: [
+        // What collectTombstones derives from `pp-verdict/src____tests____Foo.php#1#reviewer-B`.
+        { file: "src//tests//Foo.php", round: 1, reviewer: "reviewer-B", discarded: true, reason: "x", attempt: 2, tokens: null },
+      ],
+      burnDown: [],
+    });
+    expect(rendered.json.file_rounds.length).toBe(1);
+    expect(rendered.json.file_rounds[0]?.file).toBe(FILE);
+    expect(rendered.json.file_rounds[0]?.tombstones.length).toBe(1);
+  });
+
+  test("with no verdict record to consult the lossy inverse is the documented fallback", () => {
+    const rendered = renderReport({ envelopes: [reviewEnv("pp-review-a")], verdicts: [], burnDown: [] });
+    expect(rendered.json.file_rounds.map((fr) => fr.file)).toEqual(["src//tests//Foo.php"]);
+  });
+
+  test("two distinct authoritative files that sanitize identically are left alone (ambiguous)", () => {
+    const a = { ...verdict("reviewer-A"), file: "a__b/c.php" };
+    const b = { ...verdict("reviewer-A"), file: "a/b__c.php" };
+    const rendered = renderReport({ envelopes: [], verdicts: [a, b], burnDown: [] });
+    expect(rendered.json.summary.files).toEqual(["a/b__c.php", "a__b/c.php"]);
   });
 });

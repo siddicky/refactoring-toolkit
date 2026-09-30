@@ -318,25 +318,43 @@ export function tokenTotalOf(tokens: number | TokenUsage | null): number | null 
 }
 
 /**
+ * Forward half of the flow's identity sanitizer (mirror of markerKeyOf):
+ * AttributeMap keys prohibit `/`, so it is replaced with "__".
+ */
+export function sanitizeFileKey(file: string): string {
+  return file.replace(/\//g, "__");
+}
+
+/**
+ * The ONE inverse of {@link sanitizeFileKey} ("__" -> "/"). It is lossy for a
+ * file whose own name contains "__" (`src/__tests__/Foo.php` inverts to
+ * `src//tests//Foo.php`): prefer the authoritative `file` of a verdict record
+ * and use this only when no record carries it (see renderReport).
+ */
+export function fileFromSanitizedKey(sanitized: string): string {
+  return sanitized.replace(/__/g, "/");
+}
+
+/**
  * Sanitized identity key for a file-round (mirror of the flow's
- * markerKeyOf: AttributeMap keys prohibit `/`, so it is replaced with "__").
+ * markerKeyOf): `<sanitized file>#<round>`.
  */
 export function identityKeyOf(file: string, round: number): string {
-  return `${file.replace(/\//g, "__")}#${round}`;
+  return `${sanitizeFileKey(file)}#${round}`;
 }
 
 /**
  * Best-effort inverse of {@link identityKeyOf}: recover the file path and
- * round from a sanitized identity. "__" -> "/" is lossy if a filename itself
- * contains "__"; acceptable for v1 grouping and documented as such.
+ * round from a sanitized identity (see {@link fileFromSanitizedKey} for the
+ * lossy "__" caveat). The round must be plain decimal digits: "1e2", "0x10"
+ * and "-1" are rejected, not coerced by Number().
  */
 export function fileFromIdentity(identity: string): { file: string; round: number } | null {
   const hash = identity.lastIndexOf("#");
   if (hash <= 0) return null;
   const roundPart = identity.slice(hash + 1);
-  const round = Number(roundPart);
-  if (!Number.isInteger(round) || roundPart === "") return null;
-  return { file: identity.slice(0, hash).replace(/__/g, "/"), round };
+  if (!/^\d+$/.test(roundPart)) return null;
+  return { file: fileFromSanitizedKey(identity.slice(0, hash)), round: Number(roundPart) };
 }
 
 /**

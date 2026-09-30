@@ -211,3 +211,21 @@ describe("flowFactsFromSummary (run ids and terminal status come from `flow summ
     expect(flowFactsFromSummary("f", statePayload).flowCompleted).toBe(false);
   });
 });
+
+describe("collectTombstones key parsing (C46)", () => {
+  const tomb = { reviewer: "reviewer-B", discarded: true, reason: "x", attempt: 1, tokens: null };
+
+  test("a non-decimal round in the attribute key is skipped instead of coerced by Number()", () => {
+    const out = collectTombstones([
+      attr("pp-verdict/src__a.php#1e2#reviewer-B", tomb),
+      attr("pp-verdict/src__a.php#0x10#reviewer-B", tomb),
+      attr("pp-verdict/src__a.php#3#reviewer-B", tomb),
+    ]);
+    expect(out.map((t) => t.round)).toEqual([3]);
+  });
+
+  test("the file is recovered with the shared (lossy for __) inverse", () => {
+    const out = collectTombstones([attr("pp-verdict/src____tests____Foo.php#1#reviewer-B", tomb)]);
+    expect(out[0]?.file).toBe("src//tests//Foo.php");
+  });
+});
