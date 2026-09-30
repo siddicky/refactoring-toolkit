@@ -322,7 +322,7 @@ export class WorktreePool {
       epoch,
       // The base the worktree really starts from (the branch tip), which is the
       // integration tip only for a new or fast-forwarded branch.
-      baseSha: (await runner.run(["rev-parse", branch])).trim(),
+      baseSha: (await runner.run(["rev-parse", `refs/heads/${branch}`])).trim(),
       holderExecutionId,
       acquiredAtUtc: now().toISOString(),
     };
@@ -554,7 +554,7 @@ async function fastForwardIntegratedBranch(
   base: string,
   worktreePath: string | undefined,
 ): Promise<void> {
-  const tip = (await runner.run(["rev-parse", branch])).trim();
+  const tip = (await runner.run(["rev-parse", `refs/heads/${branch}`])).trim();
   if (tip === base) return;
   if (!(await isAncestor(runner, tip, base))) return;
   const args =

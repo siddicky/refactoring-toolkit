@@ -522,10 +522,14 @@ export function flowOutcome(
   const tsc = port.verification?.tscTotal ?? 0;
   const vitest = port.verification?.vitestTotal ?? 0;
   const unresolved = blocked > 0 || tsc > 0 || vitest > 0;
+  // A vitest pass that never executed is not "0 failures": say so in the line
+  // (the exit code only reflects counted failures and blocked files).
+  const run = port.verification?.vitestRun;
+  const vitestState = run == null ? "" : run.kind === "ran" ? ` (ran ${run.passed}/${run.total})` : ` (NOT RUN: ${run.reason})`;
   return {
     code: unresolved ? EXIT_UNRESOLVED : 0,
     lines: [
-      `${head} completed=${port.completed.length} blocked=${blocked} tsc=${tsc} vitest=${vitest}${unresolved ? " (unresolved work remains)" : ""}`,
+      `${head} completed=${port.completed.length} blocked=${blocked} tsc=${tsc} vitest=${vitest}${vitestState}${unresolved ? " (unresolved work remains)" : ""}`,
       `[${label}] result: ${JSON.stringify(port)}`,
     ],
   };
@@ -1017,14 +1021,16 @@ export function redispatchCommand(o: {
   if (o.prepPath !== undefined) parts.push(`--prep ${shellWord(o.prepPath)}`);
   else if (!impliedFixtures) parts.push("--prep <prepPath>");
   parts.push(`--flow-id ${o.flowId !== undefined ? shellWord(o.flowId) : "<new-flow-id>"}`);
-  if (o.maxRounds !== undefined) parts.push(`--max-rounds ${shellWord(o.maxRounds)}`);
+  // The demo default is 1 round: a run that used more must say so again, or the
+  // re-dispatch silently schedules no fix rounds.
+  parts.push(`--max-rounds ${o.maxRounds !== undefined ? shellWord(o.maxRounds) : "<maxRounds>"}`);
   return parts.join(" ");
 }
 
 async function recoverPort(): Promise<number> {
   const dir = argValue("--dir");
   if (dir === undefined) throw new Error("recover-port requires --dir <projectRepoDir>");
-  const epoch = Number.parseInt(argValue("--epoch", "2") as string, 10);
+  const epoch = parsePositiveInt("--epoch", argValue("--epoch", "2") as string);
   const filesArg = argValue("--files");
   // Same expansion as `demo` (`--files creatorex` is the 10-file fixture set).
   const files = expandFilesArg(filesArg ?? "");

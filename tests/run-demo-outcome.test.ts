@@ -115,6 +115,32 @@ describe("flowOutcome", () => {
     );
   });
 
+  test("a vitest pass that never ran is shown as NOT RUN, never as a bare 0", () => {
+    const notRun = portResult({
+      verification: {
+        iteration: 1,
+        tscTotal: 0,
+        vitestTotal: 0,
+        vitestNote: null,
+        vitestRun: { kind: "not-run", reason: "no ported test files" },
+      },
+    });
+    const o = flowOutcome("demo", "f1", flowResult("completed", [completion("PpFinal", notRun)]));
+    expect(o.lines[0]).toContain("vitest=0 (NOT RUN: no ported test files)");
+    const ran = portResult({
+      verification: {
+        iteration: 1,
+        tscTotal: 0,
+        vitestTotal: 0,
+        vitestNote: null,
+        vitestRun: { kind: "ran", passed: 7, failed: 0, total: 7 },
+      },
+    });
+    expect(flowOutcome("demo", "f1", flowResult("completed", [completion("PpFinal", ran)])).lines[0]).toContain(
+      "vitest=0 (ran 7/7)",
+    );
+  });
+
   test("a non-terminal result reports 'still running' with the wait-flow hint and the distinct code", () => {
     const o = flowOutcome("demo", "f1", flowResult("continuedAsNew"));
     expect(o.code).toBe(EXIT_STILL_RUNNING);

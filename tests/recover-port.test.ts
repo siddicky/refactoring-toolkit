@@ -209,6 +209,7 @@ describe("redispatchCommand", () => {
     expect(plain).toContain("--source-root <sourceRoot>");
     expect(plain).toContain("--prep <prepPath>");
     expect(plain).toContain("--flow-id <new-flow-id>");
+    expect(plain).toContain("--max-rounds <maxRounds>");
     const creatorex = redispatchCommand({ dir: "/proj", epoch: 2, filesArg: "creatorex" });
     expect(creatorex).toContain("--files creatorex");
     expect(creatorex).not.toContain("<sourceRoot>");
