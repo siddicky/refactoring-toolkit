@@ -20,7 +20,7 @@
  * 5. WriteStream outage cannot fail a durable step (try/catch-swallow).
  */
 
-import { describe, expect, test, afterEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   OpencodeHarness,
   OpencodePromptError,
@@ -35,6 +35,16 @@ import {
   type EnvelopeStreamMessage,
 } from "../flows/steps/envelope.js";
 import type { Context } from "@superdurable/dex";
+import { clearHarnessEnv } from "./support/opencode-env.js";
+
+// The harness reads OPENCODE_PROMPT_* at call time and lane routing reads
+// OPENCODE_*: start every test from a clean env regardless of the operator's
+// .env (audit C22/C78).
+let restoreEnv: () => void;
+beforeEach(() => {
+  restoreEnv = clearHarnessEnv();
+});
+afterEach(() => restoreEnv());
 
 // ---------------------------------------------------------------------------
 // SDK-boundary double: raw {info, parts} shapes, real extractors downstream.

@@ -14,7 +14,7 @@
  *    (server 1.18.32 field; SDK type lags) and is ABSENT when unset.
  */
 
-import { describe, expect, test, afterEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   executorPromptOpts,
   isDemotedAttempt,
@@ -24,21 +24,16 @@ import {
   reviewLaneRouting,
 } from "../src/harness/lanes.js";
 import { OpencodeHarness } from "../src/harness/opencode.js";
+import { clearHarnessEnv } from "./support/opencode-env.js";
 
-const ENV_KEYS = [
-  "OPENCODE_PLANNER_MODEL",
-  "OPENCODE_PLANNER_VARIANT",
-  "OPENCODE_EXECUTOR_MODEL",
-  "OPENCODE_EXECUTOR_VARIANT",
-  "OPENCODE_REVIEWER_MODEL",
-  "OPENCODE_REVIEWER_VARIANT",
-  "OPENCODE_REVIEWER_MODEL_FALLBACK",
-  "OPENCODE_REVIEWER_MODEL_FALLBACK_VARIANT",
-] as const;
-
-afterEach(() => {
-  for (const k of ENV_KEYS) delete process.env[k];
+// Bun auto-loads the operator's .env, which README tells them to fill with
+// OPENCODE_*_MODEL/VARIANT overrides: clear BEFORE each test (not only after)
+// so the "defaults (no env required)" tests really see no env (audit C22/C78).
+let restoreEnv: () => void;
+beforeEach(() => {
+  restoreEnv = clearHarnessEnv();
 });
+afterEach(() => restoreEnv());
 
 describe("lane defaults (in code — no env required)", () => {
   test("planner = glm-5.3 @ high", () => {
