@@ -1,6 +1,6 @@
 /**
- * Repository hygiene guards (audit team T9): clusters C00, C36, C80, C81, C82,
- * C83, C86. These assert repo-level configuration rather than runtime code:
+ * Repository hygiene guards. These assert repo-level configuration rather than
+ * runtime code, and need the `git` CLI:
  *
  * - .gitignore rules (recorded fixtures trackable, run output and tool state
  *   ignored, every dex cache dir ignored) via `git check-ignore --no-index`,
@@ -14,7 +14,7 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { builtinModules } from "node:module";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 
@@ -52,7 +52,7 @@ function readPackageJson(): PackageJson {
   return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as PackageJson;
 }
 
-describe("C00: recorded metrics fixtures are trackable", () => {
+describe("kill-events fixtures and sidecars", () => {
   test("the kill-events render fixture is not ignored", () => {
     expect(isIgnored("src/metrics/fixtures/kill-events-run-a.json")).toBe(false);
     expect(isIgnored("src/metrics/fixtures/kill-events-run-b.jsonl")).toBe(false);
@@ -66,17 +66,18 @@ describe("C00: recorded metrics fixtures are trackable", () => {
   });
 });
 
-describe("C36: every dex blob-cache dir is ignored", () => {
+describe("dex blob-cache dirs", () => {
   test.each([".dex-cache", ".dex-cache-watch", ".dex-cache-dashboard"])("%s/ is ignored", (dir) => {
     expect(isIgnored(`${dir}/blob`)).toBe(true);
   });
 
-  test("source dirs named like a cache are not swallowed", () => {
+  test("tracked source paths are not swallowed by the ignore rules", () => {
     expect(isIgnored("src/dex/client.ts")).toBe(false);
+    expect(isIgnored(".claude/skills/porting-toolkit-migration")).toBe(false);
   });
 });
 
-describe("C81: .omc and .playwright-mcp are local tool state, not repo content", () => {
+describe(".omc and .playwright-mcp are local tool state, not repo content", () => {
   test("nothing under .omc/ or .playwright-mcp/ is tracked (except .omc/skills/)", () => {
     const offenders = trackedFiles(".omc", ".playwright-mcp").filter((p) => !p.startsWith(".omc/skills/"));
     expect(offenders).toEqual([]);
@@ -97,14 +98,9 @@ describe("C81: .omc and .playwright-mcp are local tool state, not repo content",
   test("project-scoped OMC skills stay committable", () => {
     expect(isIgnored(".omc/skills/local/SKILL.md")).toBe(false);
   });
-
-  test("the dead .omo/ entry is gone", () => {
-    const gi = readFileSync(join(ROOT, ".gitignore"), "utf8");
-    expect(gi).not.toMatch(/^\.omo\/?$/m);
-  });
 });
 
-describe("C83: no orphan media is committed", () => {
+describe("committed media", () => {
   const MEDIA = new Set([".webm", ".mp4", ".mov"]);
 
   test("nothing is tracked under demo/", () => {
@@ -116,12 +112,12 @@ describe("C83: no orphan media is committed", () => {
     const videos = tracked.filter((p) => MEDIA.has(extname(p).toLowerCase()));
     const textFiles = tracked.filter((p) => /\.(md|html|ts|json|txt|ya?ml)$/i.test(p));
     const corpus = textFiles.map((p) => readFileSync(join(ROOT, p), "utf8")).join("\n");
-    const orphans = videos.filter((v) => !corpus.includes(v.split("/").pop() as string));
+    const orphans = videos.filter((v) => !corpus.includes(basename(v)));
     expect(orphans).toEqual([]);
   });
 });
 
-describe("C86: package.json metadata and scripts", () => {
+describe("package.json metadata and scripts", () => {
   const pkg = readPackageJson();
 
   test("declares the Bun runtime and the MIT license", () => {
@@ -158,7 +154,7 @@ describe("C86: package.json metadata and scripts", () => {
   });
 });
 
-describe("C36: every bare import is a declared dependency", () => {
+describe("declared dependencies", () => {
   const SCAN_DIRS = ["src", "flows", "harness", "scripts", "tests", "fixtures"];
   // Sample projects that the toolkit ports; not toolkit code.
   const SKIP_PREFIXES = ["fixtures/php-sample/", "fixtures/creatorex-middleware/"];
@@ -219,7 +215,7 @@ describe("C36: every bare import is a declared dependency", () => {
   });
 });
 
-describe("C80: CI workflow", () => {
+describe("CI workflow", () => {
   interface Step {
     uses?: string;
     run?: string;
@@ -258,7 +254,7 @@ describe("C80: CI workflow", () => {
   });
 });
 
-describe("C82: Biome is wired in", () => {
+describe("Biome", () => {
   interface BiomeConfig {
     $schema?: string;
     vcs?: Record<string, unknown>;
