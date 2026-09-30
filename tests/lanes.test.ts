@@ -97,6 +97,27 @@ describe("env overrides", () => {
     expect(laneRouting("executor").variant).toBe("low");
   });
 
+  test("variant 'none' (any case) omits the variant so a non-glm model override is not sent 'max' (C24)", () => {
+    process.env.OPENCODE_EXECUTOR_MODEL = "acme/no-variant-ladder";
+    for (const none of ["none", "NONE", "None"]) {
+      process.env.OPENCODE_EXECUTOR_VARIANT = none;
+      expect(laneRouting("executor")).toEqual({
+        model: { providerID: "acme", modelID: "no-variant-ladder" },
+        variant: undefined,
+      });
+      // The spread helper drops the field entirely (exactOptionalPropertyTypes-clean).
+      expect("variant" in executorPromptOpts()).toBe(false);
+    }
+  });
+
+  test("a blank variant env keeps the lane default; 'none' only affects its own lane", () => {
+    process.env.OPENCODE_EXECUTOR_VARIANT = "   ";
+    expect(laneRouting("executor").variant).toBe("max");
+    process.env.OPENCODE_PLANNER_VARIANT = "none";
+    expect(laneRouting("planner").variant).toBeUndefined();
+    expect(laneRouting("reviewer").variant).toBe("high");
+  });
+
   test("parseModelRef contract", () => {
     expect(parseModelRef("a/b/c")).toEqual({ providerID: "a", modelID: "b/c" });
     expect(parseModelRef(undefined)).toBeUndefined();
@@ -132,6 +153,14 @@ describe("review demotion over lanes (f(attempt), US-002)", () => {
     });
     process.env.OPENCODE_REVIEWER_MODEL_FALLBACK_VARIANT = "low";
     expect(reviewLaneRouting(2)?.variant).toBe("low");
+  });
+
+  test("fallback variant 'none' omits the variant on the demoted turn (C24)", () => {
+    process.env.OPENCODE_REVIEWER_MODEL_FALLBACK = "acme/plain-model";
+    process.env.OPENCODE_REVIEWER_MODEL_FALLBACK_VARIANT = "none";
+    const demoted = reviewLaneRouting(2);
+    expect(demoted).toEqual({ model: { providerID: "acme", modelID: "plain-model" } });
+    expect("variant" in demoted).toBe(false);
   });
 });
 

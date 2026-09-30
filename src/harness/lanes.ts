@@ -21,6 +21,10 @@
  * Variants are the opencode per-model reasoning-effort ladders (server 1.18.32
  * exposes `variant` on the prompt body; glm models carry low/high/max). The
  * SDK's body type lags the server, hence the `as never` cast at the call site.
+ * Every lane default carries a variant, so a model override onto a model
+ * without that ladder needs `OPENCODE_<LANE>_VARIANT=none` (case-insensitive)
+ * to omit the field; the same sentinel works for
+ * `OPENCODE_REVIEWER_MODEL_FALLBACK_VARIANT`.
  */
 
 export type LaneName = "planner" | "executor" | "reviewer";
@@ -29,7 +33,7 @@ export type LaneName = "planner" | "executor" | "reviewer";
 export interface LaneRouting {
   /** undefined = omit the body field (server default model). */
   model: { providerID: string; modelID: string } | undefined;
-  /** undefined = omit the body field (model default variant). */
+  /** undefined = omit the body field (model default variant); set by `OPENCODE_<LANE>_VARIANT=none`. */
   variant: string | undefined;
 }
 
@@ -48,6 +52,18 @@ function env(name: string): string | undefined {
   const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
   const v = proc?.env?.[name]?.trim();
   return v === "" ? undefined : v;
+}
+
+/**
+ * Variant env semantics: unset/blank keeps `defaultVariant`, the sentinel
+ * `none` (any case) means "send no variant", anything else is used verbatim.
+ */
+function variantFrom(
+  envValue: string | undefined,
+  defaultVariant: string | undefined,
+): string | undefined {
+  if (envValue === undefined) return defaultVariant;
+  return envValue.toLowerCase() === "none" ? undefined : envValue;
 }
 
 /** In-code policy defaults (see header). Not env-readable. */
@@ -77,7 +93,7 @@ export function laneRouting(lane: LaneName): LaneRouting {
   const variantEnv = env(`OPENCODE_${lane.toUpperCase()}_VARIANT`);
   return {
     model: parseModelRef(modelEnv) ?? defaults.model,
-    variant: variantEnv ?? defaults.variant,
+    variant: variantFrom(variantEnv, defaults.variant),
   };
 }
 
@@ -103,7 +119,10 @@ function reviewLaneRoutingLoose(attempt: number | undefined): LaneRouting {
   if ((attempt ?? 1) < 2) return reviewer;
   const fallbackModel = parseModelRef(env("OPENCODE_REVIEWER_MODEL_FALLBACK"));
   if (fallbackModel !== undefined) {
-    return { model: fallbackModel, variant: env("OPENCODE_REVIEWER_MODEL_FALLBACK_VARIANT") ?? reviewer.variant };
+    return {
+      model: fallbackModel,
+      variant: variantFrom(env("OPENCODE_REVIEWER_MODEL_FALLBACK_VARIANT"), reviewer.variant),
+    };
   }
   return laneRouting("executor");
 }

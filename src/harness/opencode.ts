@@ -123,19 +123,28 @@ export interface PromptOptions {
   variant?: string;
 }
 
-/** How long prompt() polls for a completed assistant reply (0(g) provenance). */
-const PROMPT_WAIT_MS = parseWaitMs(
-  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
-    ?.OPENCODE_PROMPT_WAIT_MS,
-);
+/** Default window prompt() polls for a completed assistant reply (0(g) provenance): 15 min. */
+export const DEFAULT_PROMPT_WAIT_MS = 900_000;
+/** Default hard ceiling on ONE SDK prompt call: 20 min. */
+export const DEFAULT_PROMPT_CALL_TIMEOUT_MS = 1_200_000;
+/** Gap between polls of a usage-less prompt. */
+export const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
-/** m4: invalid values (NaN, ≤0, absurdly large) fall back to 15 minutes. */
-function parseWaitMs(raw: string | undefined): number {
+/**
+ * m4: invalid values (NaN, <=0, above 24h) fall back to `fallbackMs`. A valid
+ * value is used exactly as given — never scaled.
+ */
+export function parseWaitMs(raw: string | undefined, fallbackMs: number): number {
   const parsed = Number.parseInt(raw ?? "", 10);
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 24 * 60 * 60_000) {
-    return 900_000;
+    return fallbackMs;
   }
   return parsed;
+}
+
+/** OPENCODE_PROMPT_WAIT_MS, read at call time; default 15 minutes. */
+export function promptWaitMs(): number {
+  return parseWaitMs(readEnvVar("OPENCODE_PROMPT_WAIT_MS"), DEFAULT_PROMPT_WAIT_MS);
 }
 
 /**
@@ -144,25 +153,39 @@ function parseWaitMs(raw: string | undefined): number {
  * assistant message has completed server-side — the turn hangs, heartbeats
  * keep the step alive, and the flow stalls. Race the call against this
  * deadline and fail RETRYABLE so dex re-dispatches on a fresh attempt.
- * OPENCODE_PROMPT_CALL_TIMEOUT_MS; default 20 minutes.
+ * OPENCODE_PROMPT_CALL_TIMEOUT_MS, read at call time; default 20 minutes.
  */
-const PROMPT_CALL_TIMEOUT_MS = parseWaitMs(
-  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
-    ?.OPENCODE_PROMPT_CALL_TIMEOUT_MS,
-) *  (4 / 3); // 20 min default (parseWaitMs falls back to 15 min; ×4/3 = 20)
+export function promptCallTimeoutMs(): number {
+  return parseWaitMs(readEnvVar("OPENCODE_PROMPT_CALL_TIMEOUT_MS"), DEFAULT_PROMPT_CALL_TIMEOUT_MS);
+}
 
 /** Races one promise against the prompt-call deadline (retryable timeout). */
-function withCallTimeout<T>(promise: Promise<T>, what: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) => {
-      const t = setTimeout(
-        () => reject(new OpencodePromptError(`SDK call timed out after ${PROMPT_CALL_TIMEOUT_MS}ms (${what})`, true)),
-        PROMPT_CALL_TIMEOUT_MS,
-      );
-      void (t as unknown as { unref?: () => void }).unref?.();
-    }),
-  ]);
+function withCallTimeout<T>(promise: Promise<T>, what: string, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new OpencodePromptError(`SDK call timed out after ${timeoutMs}ms (${what})`, true)),
+      timeoutMs,
+    );
+    void (timer as unknown as { unref?: () => void }).unref?.();
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Optional per-harness knobs. Unset fields resolve at call time from the
+ * environment (wait / call timeout) or the defaults above, so tests and
+ * operators can shrink them without touching module state.
+ */
+export interface OpencodeHarnessOptions {
+  /** Server base URL this harness talks to (informational; set by connect()). */
+  baseUrl?: string | undefined;
+  /** Poll window for a usage-less prompt (default OPENCODE_PROMPT_WAIT_MS / 15 min). */
+  waitMs?: number | undefined;
+  /** Hard ceiling on one session.prompt call (default OPENCODE_PROMPT_CALL_TIMEOUT_MS / 20 min). */
+  callTimeoutMs?: number | undefined;
+  /** Gap between polls (default 5 s). */
+  pollIntervalMs?: number | undefined;
 }
 
 /**
@@ -255,24 +278,35 @@ export class OpencodeHarness {
   readonly #model: { providerID: string; modelID: string } | undefined;
   /** Default opencode agent for turns (OPENCODE_AGENT env), if configured. */
   readonly defaultAgent: string | undefined;
+  /** Server base URL when built through connect(); undefined for a bare client. */
+  readonly baseUrl: string | undefined;
+  readonly #options: OpencodeHarnessOptions;
 
   constructor(
     client: OpencodeClient,
     model?: { providerID: string; modelID: string } | undefined,
     defaultAgent?: string | undefined,
+    options: OpencodeHarnessOptions = {},
   ) {
     this.#client = client;
     this.#model = model;
     this.defaultAgent = defaultAgent;
+    this.baseUrl = options.baseUrl;
+    this.#options = options;
   }
 
+  /**
+   * Builds the SDK client for `baseUrl`. Performs NO I/O and cannot fail for
+   * an unreachable or malformed server — use {@link probe} (or
+   * selectHarness in select.ts) to learn whether the server answers.
+   */
   static async connect(
     baseUrl: string = DEFAULT_OPENCODE_BASE_URL,
     model?: { providerID: string; modelID: string } | undefined,
   ): Promise<OpencodeHarness> {
     const client = createOpencodeClient({ baseUrl } as never);
     const defaultAgent = readEnvVar("OPENCODE_AGENT");
-    return new OpencodeHarness(client, model, defaultAgent);
+    return new OpencodeHarness(client, model, defaultAgent, { baseUrl });
   }
 
   /** Creates a session with an epoch-tagged label as its title (fencing tag). */
@@ -301,6 +335,9 @@ export class OpencodeHarness {
   async prompt(sessionId: string, text: string, opts?: PromptOptions): Promise<PromptResult> {
     const agent = opts?.agent ?? this.defaultAgent;
     const model = opts?.model ?? this.#model;
+    const waitMs = this.#options.waitMs ?? promptWaitMs();
+    const callTimeoutMs = this.#options.callTimeoutMs ?? promptCallTimeoutMs();
+    const pollIntervalMs = this.#options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     const res = await withCallTimeout(
       this.#client.session.prompt({
         path: { id: sessionId },
@@ -313,6 +350,7 @@ export class OpencodeHarness {
         },
       } as never),
       `session.prompt (session=${sessionId})`,
+      callTimeoutMs,
     );
     const data = unwrap(res) as
       | { info?: unknown; parts?: unknown }
@@ -331,10 +369,10 @@ export class OpencodeHarness {
     let textOut = extractText(data.parts);
 
     if (usage === null && !aborted) {
-      const deadline = Date.now() + PROMPT_WAIT_MS;
+      const deadline = Date.now() + waitMs;
       let polls = 0;
       while (usage === null && !aborted && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 5_000));
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
         polls++;
         let last: { info: unknown; parts: unknown } | undefined;
         try {
@@ -359,7 +397,7 @@ export class OpencodeHarness {
         if (completed.length > 0) textOut = completed;
       }
       console.error(
-        `[opencode] poll loop exit (session=${sessionId}) usage=${usage === null ? "null" : "present"} aborted=${aborted} waitedMs=${Date.now() - (deadline - PROMPT_WAIT_MS)}`,
+        `[opencode] poll loop exit (session=${sessionId}) usage=${usage === null ? "null" : "present"} aborted=${aborted} waitedMs=${Date.now() - (deadline - waitMs)}`,
       );
       if (usage === null && !aborted) {
         if (textOut.length === 0) {
