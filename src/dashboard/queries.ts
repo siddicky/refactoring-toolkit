@@ -22,6 +22,7 @@ import { execFile } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { promisify } from "node:util";
 
+import { burnDownFromUnknown } from "./state.js";
 import type {
   BurnDownSample,
   DexHistoryWire,
@@ -389,22 +390,14 @@ export async function readBurnDownFile(path: string): Promise<QueryResult<BurnDo
   return ok(samples);
 }
 
-/** Shape check (not a cast): queue must be a known kind, counts numeric. */
+/**
+ * Shape check (not a cast): queue must be a known kind, counts numeric. The
+ * parser is shared with the history-attribute path (state.ts) so the ran/
+ * not-run accounting fields cannot be dropped by one adapter and kept by the
+ * other.
+ */
 export function normalizeBurnDown(obj: unknown, _source: string): BurnDownSample | null {
-  if (obj === null || typeof obj !== "object") return null;
-  const rec = obj as Record<string, unknown>;
-  const queue = rec.queue;
-  if (typeof queue !== "string" || (queue !== "tsc" && queue !== "vitest")) return null;
-  const iteration = rec.iteration;
-  const errorCount = rec.error_count;
-  if (typeof iteration !== "number" || typeof errorCount !== "number") return null;
-  return {
-    queue,
-    file: typeof rec.file === "string" ? rec.file : null,
-    iteration,
-    error_count: errorCount,
-    recorded_at: typeof rec.recorded_at === "string" ? rec.recorded_at : null,
-  };
+  return burnDownFromUnknown(obj);
 }
 
 /** Reads every existing burn-down file; absent files are optional. */

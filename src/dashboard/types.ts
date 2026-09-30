@@ -156,6 +156,20 @@ export interface NormalizedKillEvent {
 // burn-down samples (QueueBurnDownEvent-compatible, src/metrics/types.ts)
 // ---------------------------------------------------------------------------
 
+/**
+ * Mirror of metrics VitestRunAccounting (src/metrics/types.ts, US-010). The
+ * dashboard does not import the metrics module (same rationale as the envelope
+ * mirror in state.ts). When `state` is "not-run" the row's error_count is
+ * vacuous and must never be plotted or read as zero failures.
+ */
+export interface VitestAccountingSample {
+  state: "ran" | "not-run";
+  reason: string | null;
+  passed: number | null;
+  failed: number | null;
+  total: number | null;
+}
+
 /** Minimal shape check target; matches metrics QueueBurnDownEvent fields. */
 export interface BurnDownSample {
   queue: string;
@@ -163,6 +177,8 @@ export interface BurnDownSample {
   iteration: number;
   error_count: number;
   recorded_at: string | null;
+  /** Vitest rows only; absent on legacy rows (pre-US-010 runs). */
+  vitest?: VitestAccountingSample;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,9 +277,20 @@ export interface AgentUsageView {
   estimated: boolean;
 }
 
+export interface BurnDownPointView {
+  iteration: number;
+  /** null when state is "not-run": the count is vacuous and must not be plotted. */
+  errorCount: number | null;
+  recordedAt: string | null;
+  /** "not-run": the queue could not produce a trustworthy count this iteration. */
+  state: "ran" | "not-run";
+  /** Explicit not-run reason; null when ran. */
+  reason: string | null;
+}
+
 export interface BurnDownSeriesView {
   queue: string;
-  points: Array<{ iteration: number; errorCount: number; recordedAt: string | null }>;
+  points: BurnDownPointView[];
 }
 
 export interface CommitView {

@@ -12,6 +12,7 @@
  */
 
 import type {
+  BurnDownPointView,
   BurnDownSample,
   BurnDownSeriesView,
   CommitView,
@@ -35,6 +36,7 @@ import type {
   SourceStatus,
   AgentUsageView,
   UsageSplitView,
+  VitestAccountingSample,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -301,20 +303,54 @@ function collectUpsert(
   }
 }
 
-/** Shape-checks an attribute value into a burn-down sample. */
+function finiteOrNull(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Vitest ran/not-run accounting (US-010). Absent/null = legacy row. A present
+ * but malformed object is NOT silently read as a clean run: it degrades to
+ * not-run with an explicit reason.
+ */
+function parseVitestAccounting(raw: unknown): VitestAccountingSample | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const rec = typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  if (rec.state !== "ran" && rec.state !== "not-run") {
+    return { state: "not-run", reason: "malformed vitest accounting", passed: null, failed: null, total: null };
+  }
+  return {
+    state: rec.state,
+    reason: typeof rec.reason === "string" ? rec.reason : null,
+    passed: finiteOrNull(rec.passed),
+    failed: finiteOrNull(rec.failed),
+    total: finiteOrNull(rec.total),
+  };
+}
+
+/**
+ * Shape-checks an attribute value into a burn-down sample. The single parser
+ * for both the history attributes and the burn-down file sources
+ * (queries.ts normalizeBurnDown delegates here), so accounting fields are
+ * carried in exactly one place.
+ */
 export function burnDownFromUnknown(value: unknown): BurnDownSample | null {
   if (value === null || typeof value !== "object") return null;
   const rec = value as Record<string, unknown>;
   const queue = rec.queue;
   if (typeof queue !== "string" || (queue !== "tsc" && queue !== "vitest")) return null;
   if (typeof rec.iteration !== "number" || typeof rec.error_count !== "number") return null;
-  return {
+  const sample: BurnDownSample = {
     queue,
     file: typeof rec.file === "string" ? rec.file : null,
     iteration: rec.iteration,
     error_count: rec.error_count,
     recorded_at: typeof rec.recorded_at === "string" ? rec.recorded_at : null,
   };
+  if (queue === "vitest") {
+    const vitest = parseVitestAccounting(rec.vitest);
+    if (vitest !== undefined) sample.vitest = vitest;
+  }
+  return sample;
 }
 
 /**
@@ -632,6 +668,23 @@ function findWorktree(
 // Burn-down series
 // ---------------------------------------------------------------------------
 
+/**
+ * One chart point. A not-run iteration (US-010 vitest accounting) keeps its
+ * state and reason and carries NO count: the row's error_count is vacuous
+ * (the flow writes 0 alongside the marker) and must never be plotted.
+ */
+function burnDownPoint(s: BurnDownSample): BurnDownPointView {
+  const notRunReason = s.vitest?.state === "not-run" ? (s.vitest.reason ?? "no reason recorded") : null;
+  const notRun = s.vitest?.state === "not-run";
+  return {
+    iteration: s.iteration,
+    errorCount: notRun ? null : s.error_count,
+    recordedAt: s.recorded_at,
+    state: notRun ? "not-run" : "ran",
+    reason: notRunReason,
+  };
+}
+
 export function burnDownSeries(samples: readonly BurnDownSample[]): BurnDownSeriesView[] {
   const byQueue = new Map<string, BurnDownSample[]>();
   for (const sample of samples) {
@@ -646,11 +699,7 @@ export function burnDownSeries(samples: readonly BurnDownSample[]): BurnDownSeri
     );
     series.push({
       queue,
-      points: list.slice(-50).map((s) => ({
-        iteration: s.iteration,
-        errorCount: s.error_count,
-        recordedAt: s.recorded_at,
-      })),
+      points: list.slice(-50).map(burnDownPoint),
     });
   }
   series.sort((a, b) => a.queue.localeCompare(b.queue));

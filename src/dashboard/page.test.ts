@@ -208,6 +208,41 @@ describe("headline styling (C54)", () => {
   });
 });
 
+describe("burn-down chart not-run points (C56)", () => {
+  const series = (points: unknown[]) => [{ queue: "vitest", points }];
+  const ran = { iteration: 1, errorCount: 3, recordedAt: null, state: "ran", reason: null };
+  const notRun = { iteration: 2, errorCount: null, recordedAt: null, state: "not-run", reason: "runner unavailable" };
+
+  test("a not-run point is a hollow marker with the reason, never a plotted 0", () => {
+    const page = loadPage();
+    page.api.renderBurnDown(series([ran, notRun]));
+    const html = page.el("burndown").innerHTML;
+    expect(html).toContain("runner unavailable");
+    expect(html).toContain('fill="none"'); // hollow marker
+    expect(html).toContain("NOT RUN");
+    // The last point is not-run: the headline label must say so, not "0 errors".
+    expect(html).toMatch(/latest\s*<span class="amber">NOT RUN/);
+    expect(html).not.toMatch(/latest 0 errors/);
+  });
+
+  test("the polyline breaks at a not-run point (a gap, not a line to zero)", () => {
+    const page = loadPage();
+    const after = { iteration: 3, errorCount: 1, recordedAt: null, state: "ran", reason: null };
+    page.api.renderBurnDown(series([ran, notRun, after]));
+    const polylines = page.el("burndown").innerHTML.match(/<polyline /g) ?? [];
+    // iteration 1 and iteration 3 are isolated single-point segments (no polyline to join them).
+    expect(polylines.length).toBeLessThanOrEqual(0);
+    expect(page.el("burndown").innerHTML.match(/<circle /g)?.length).toBe(3);
+  });
+
+  test("a fully ran series still draws one connected polyline", () => {
+    const page = loadPage();
+    const two = { iteration: 2, errorCount: 1, recordedAt: null, state: "ran", reason: null };
+    page.api.renderBurnDown(series([ran, two]));
+    expect(page.el("burndown").innerHTML.match(/<polyline /g)?.length).toBe(1);
+  });
+});
+
 describe("degraded rounds panel (C54)", () => {
   test("lists flow, file, round, reviewers and reasons (escaped)", () => {
     const page = loadPage();

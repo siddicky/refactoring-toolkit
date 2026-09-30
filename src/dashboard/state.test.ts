@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import {
   aggregateAgentUsage,
   buildDashboardState,
+  burnDownFromUnknown,
   burnDownSeries,
   deriveGridRows,
   feedFromState,
@@ -425,6 +426,83 @@ describe("burnDownSeries", () => {
     expect(normalizeBurnDown({ queue: "eslint", iteration: 1, error_count: 1 }, "x")).toBeNull();
     expect(normalizeBurnDown({ queue: "tsc", iteration: "1", error_count: 1 }, "x")).toBeNull();
     expect(normalizeBurnDown(null, "x")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C56: vitest ran/not-run accounting survives the burn-down adapters (US-010
+// honesty invariant: a not-run iteration is never plotted as zero failures)
+// ---------------------------------------------------------------------------
+
+describe("vitest accounting through the burn-down adapters (C56)", () => {
+  const notRunRow = {
+    queue: "vitest",
+    iteration: 2,
+    error_count: 0, // the flow writes 0 alongside the not-run marker
+    file: null,
+    recorded_at: "2026-09-26T10:05:00.000Z",
+    vitest: { state: "not-run", reason: "runner unavailable", passed: null, failed: null, total: null },
+  };
+  const ranRow = {
+    queue: "vitest",
+    iteration: 1,
+    error_count: 2,
+    file: null,
+    recorded_at: "2026-09-26T10:00:00.000Z",
+    vitest: { state: "ran", reason: null, passed: 8, failed: 2, total: 10 },
+  };
+
+  test("burnDownFromUnknown and normalizeBurnDown preserve the vitest accounting", () => {
+    for (const parse of [(v: unknown) => burnDownFromUnknown(v), (v: unknown) => normalizeBurnDown(v, "x")]) {
+      expect(parse(notRunRow)?.vitest).toEqual({
+        state: "not-run",
+        reason: "runner unavailable",
+        passed: null,
+        failed: null,
+        total: null,
+      });
+      expect(parse(ranRow)?.vitest).toEqual({ state: "ran", reason: null, passed: 8, failed: 2, total: 10 });
+      // Legacy (pre-US-010) rows carry no accounting and stay accounting-free.
+      expect(parse({ ...ranRow, vitest: undefined })?.vitest).toBeUndefined();
+    }
+  });
+
+  test("a malformed accounting object is not silently read as a clean run", () => {
+    const sample = burnDownFromUnknown({ ...ranRow, vitest: { state: "maybe" } });
+    expect(sample?.vitest?.state).toBe("not-run");
+    expect(sample?.vitest?.reason).toContain("malformed");
+  });
+
+  test("a not-run vitest iteration is a not-run POINT with a reason and no plotted count", () => {
+    const samples = [burnDownFromUnknown(ranRow), burnDownFromUnknown(notRunRow)].filter(
+      (s): s is NonNullable<typeof s> => s !== null,
+    );
+    const vitest = burnDownSeries(samples).find((s) => s.queue === "vitest");
+    expect(vitest?.points).toHaveLength(2);
+    expect(vitest?.points[0]).toMatchObject({ iteration: 1, errorCount: 2, state: "ran", reason: null });
+    expect(vitest?.points[1]).toMatchObject({
+      iteration: 2,
+      errorCount: null, // never the vacuous 0
+      state: "not-run",
+      reason: "runner unavailable",
+    });
+  });
+
+  test("legacy rows without accounting still plot as ran", () => {
+    const series = burnDownSeries([{ queue: "vitest", file: null, iteration: 1, error_count: 0, recorded_at: null }]);
+    expect(series[0]?.points[0]).toMatchObject({ errorCount: 0, state: "ran", reason: null });
+  });
+
+  test("reading a burn-down JSONL file keeps the not-run marker end to end", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dash-c56-"));
+    try {
+      const p = join(dir, "burn-down.jsonl");
+      await writeFile(p, `${JSON.stringify(notRunRow)}\n`, "utf8");
+      const res = await readBurnDownFile(p);
+      expect(res.ok && res.value[0]?.vitest?.state).toBe("not-run");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
