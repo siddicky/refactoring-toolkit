@@ -330,7 +330,26 @@ export class WorktreePool {
     // worktree prune` is NEVER used (blanket prune can sweep registrations of
     // live concurrent worktrees), and lease branches are deliberately kept
     // for keyed-commit reachability (quarantine/dedup scans all branches).
-    await runner.tryRun(["worktree", "remove", "--force", lease.worktreePath]);
+    //
+    // The result is inspected (C32): "is not a working tree" means it is
+    // already gone (idempotent release); a LOCKED worktree is retried with
+    // `--force --force`; any other failure (timeout, busy directory) keeps the
+    // lease record and surfaces git's message instead of leaking the worktree
+    // while the store claims it was released.
+    const removeArgs = ["worktree", "remove", "--force", lease.worktreePath];
+    let removed = await runner.tryRun(removeArgs);
+    if (!removed.ok && /locked/i.test(removed.stderr)) {
+      removed = await runner.tryRun([
+        "worktree",
+        "remove",
+        "--force",
+        "--force",
+        lease.worktreePath,
+      ]);
+    }
+    if (!removed.ok && !/is not a working tree|does not exist/i.test(removed.stderr)) {
+      throw new GitError(removeArgs, removed.failure ?? removed.stderr);
+    }
     // The branch is kept: keyed-commit lookup scans all branches (shared
     // object store), and quarantined-lease commits must remain reachable.
     this.#store.remove(file);
