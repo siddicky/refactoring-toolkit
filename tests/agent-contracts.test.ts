@@ -10,9 +10,16 @@ import { evaluateSuspicion } from "../src/metrics/suspicion.js";
 import type { Finding, VerdictRecord } from "../src/metrics/types.js";
 import {
   composeFixerTurn,
+  composePrepGenerateTurn,
+  composePrepReviseTurn,
   DIFF_HEADER_LINES,
+  extractCodeFence,
+  extractJsonObject,
+  extractSpecMap,
+  fenceFor,
   mapVerdictToMetrics,
   parseUnifiedDiff,
+  specMapProblems,
 } from "../src/harness/runtime.js";
 
 // ---------------------------------------------------------------------------
@@ -224,5 +231,154 @@ describe("C14: verdict schema vs prompt vs gate", () => {
   test("a verdict with no citation_check at all is valid", () => {
     const mapped = mapRaw({ findings: [rawFinding()] });
     expect(mapped.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C13 — reply extractors: nested fences, truncated specs, brace-y prose
+// ---------------------------------------------------------------------------
+
+const SPEC_HEAD = [
+  "# Porting spec",
+  "",
+  "## 1. Source map",
+  "| PHP file | Port target |",
+  "|---|---|",
+  "| `src/Money.php` | `src/money.ts` |",
+  "| `src/Invoice.php` | `src/invoice.ts` |",
+  "",
+  "## 2. Examples",
+].join("\n");
+
+const SPEC_TAIL = ["", "## 3. Known traps", "1. rounding is half away from zero"].join("\n");
+
+/** A planner reply: ```markdown spec containing a nested fenced example. */
+function specReply(nestedLang: string, outerFence = "```"): string {
+  return [
+    "Here is the revised spec map.",
+    "",
+    `${outerFence}markdown`,
+    SPEC_HEAD,
+    "```" + nestedLang,
+    nestedLang === "php" ? "<?php echo round($a + $b);" : "const total: number = a + b;",
+    "```",
+    SPEC_TAIL,
+    outerFence,
+    "",
+    "SUMMARY: kept the table, added an example.",
+  ].join("\n");
+}
+
+const FULL_SPEC = (nestedLang: string): string =>
+  [
+    SPEC_HEAD,
+    "```" + nestedLang,
+    nestedLang === "php" ? "<?php echo round($a + $b);" : "const total: number = a + b;",
+    "```",
+    SPEC_TAIL,
+  ].join("\n") + "\n";
+
+describe("C13: extractSpecMap returns the OUTERMOST markdown block", () => {
+  test("a nested ```typescript example no longer wins over the ```markdown spec", () => {
+    const spec = extractSpecMap(specReply("typescript"), { expectedFiles: ["src/Money.php", "src/Invoice.php"] });
+    expect(spec).toBe(FULL_SPEC("typescript"));
+  });
+
+  test("a nested ```php example no longer truncates the spec at the first inner fence", () => {
+    const spec = extractSpecMap(specReply("php"));
+    expect(spec).toBe(FULL_SPEC("php"));
+    expect(spec).toContain("## 3. Known traps");
+  });
+
+  test("a four-backtick outer fence (the requested reply format) is honored", () => {
+    const spec = extractSpecMap(specReply("typescript", "````"));
+    expect(spec).toBe(FULL_SPEC("typescript"));
+  });
+
+  test("a reply with no closing outer fence is rejected instead of yielding a nested block", () => {
+    const truncated = specReply("typescript").split("\n").slice(0, -4).join("\n"); // drop outer closer + SUMMARY
+    expect(() => extractSpecMap(truncated)).toThrow();
+  });
+
+  test("a spec that lost its source-map table is rejected", () => {
+    const noTable = ["```markdown", "# Porting spec", "just prose, no table", "```"].join("\n");
+    expect(() => extractSpecMap(noTable)).toThrow(/source-map/);
+    expect(specMapProblems("prose only")).toEqual(["no source-map table (no `|` table rows)"]);
+  });
+
+  test("a spec whose table lacks a file the run ports is rejected", () => {
+    const partial = ["```markdown", SPEC_HEAD.replace("| `src/Invoice.php` | `src/invoice.ts` |\n", ""), "```"].join("\n");
+    expect(() => extractSpecMap(partial, { expectedFiles: ["src/Money.php", "src/Invoice.php"] })).toThrow(/src\/Invoice\.php/);
+    expect(extractSpecMap(partial, { expectedFiles: ["src/Money.php"] })).toContain("src/Money.php");
+  });
+});
+
+describe("C13: extractCodeFence is fence-length aware", () => {
+  test("nested ``` lines inside a longer outer fence stay part of the block", () => {
+    const reply = [
+      "````typescript",
+      "const doc = `",
+      "```",
+      "inner",
+      "```",
+      "`;",
+      "````",
+      "SUMMARY: ok",
+    ].join("\n");
+    expect(extractCodeFence(reply, ".ts")).toBe("const doc = `\n```\ninner\n```\n`;\n");
+  });
+
+  test("ordinary replies still work (typescript preferred, bare fence, no fence throws)", () => {
+    expect(extractCodeFence("x\n```typescript\nexport const x = 1;\n```\nSUMMARY: y", ".ts")).toBe("export const x = 1;\n");
+    expect(extractCodeFence("```\nconst y = 2;\n```")).toBe("const y = 2;\n");
+    expect(() => extractCodeFence("no fence")).toThrow();
+  });
+
+  test("fenceFor picks a fence longer than any backtick run in the content", () => {
+    expect(fenceFor("plain text")).toBe("```");
+    expect(fenceFor("a\n```php\nx\n```\n")).toBe("````");
+    expect(fenceFor("````md\n```\n````")).toBe("`````");
+  });
+});
+
+describe("C13: extractJsonObject tries every { start position", () => {
+  test("prose with a brace pair before the JSON no longer hides the object", () => {
+    expect(extractJsonObject('Here is the result {see above}: {"a":1}')).toEqual({ a: 1 });
+  });
+
+  test("an unbalanced { in the prose is skipped", () => {
+    expect(extractJsonObject('note: use { carefully. {"findings": []}')).toEqual({ findings: [] });
+  });
+
+  test("fenced JSON and pure prose behave as before", () => {
+    expect(extractJsonObject('```json\n{"a": {"b": "}"}}\n```')).toEqual({ a: { b: "}" } });
+    expect(() => extractJsonObject("no json here {still none}")).toThrow(/no parseable JSON object/);
+  });
+});
+
+describe("C13: prep turns ask for a long outer fence and fence embedded markdown safely", () => {
+  test("generate + revise turns request a four-backtick outer fence", () => {
+    const gen = composePrepGenerateTurn({
+      phpFiles: [{ name: "src/Money.php", source: "<?php class Money {}" }],
+      symbolTableText: "| Symbol |",
+      stubPrepBaseline: "# stub",
+    });
+    const rev = composePrepReviseTurn({ specMapText: "# spec", findings: [] });
+    for (const turn of [gen, rev]) {
+      expect(turn).toContain("````markdown");
+      expect(turn).toContain("FOUR backticks");
+    }
+  });
+
+  test("an embedded baseline/spec that contains ``` fences is wrapped in a longer fence", () => {
+    const withFences = "# stub\n```php\n<?php echo 1;\n```\n";
+    const gen = composePrepGenerateTurn({
+      phpFiles: [],
+      symbolTableText: "t",
+      stubPrepBaseline: withFences,
+    });
+    expect(gen).toContain("````markdown\n" + withFences + "\n````");
+    const rev = composePrepReviseTurn({ specMapText: withFences, findings: [] });
+    expect(rev).toContain("````markdown\n" + withFences + "\n````");
   });
 });

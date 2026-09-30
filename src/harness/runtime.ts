@@ -364,42 +364,125 @@ export function resolveEvidence(
 // Verdict intake: extract -> validate -> map to metrics shapes
 // ---------------------------------------------------------------------------
 
+// Markdown fence scanner (shared by the code, JSON and spec-map extractors)
+
+interface FenceBlock {
+  /** First word of the info string, lower-cased ("" for a bare fence). */
+  lang: string;
+  /** The fence run that opened the block, e.g. "```" or "````" or "~~~". */
+  fence: string;
+  /** Block content lines (no fence lines), joined with "\n". */
+  body: string;
+}
+
+const FENCE_OPEN_RE = /^[ \t]*(`{3,}|~{3,})[ \t]*([^\r\n]*)$/;
+const FENCE_CLOSE_RE = /^[ \t]*(`{3,}|~{3,})[ \t]*$/;
+
+/** Parses an opening fence line; null when the line does not open a block. */
+function parseFenceOpen(line: string): { fence: string; lang: string } | null {
+  const m = FENCE_OPEN_RE.exec(line);
+  if (m === null) return null;
+  const fence = m[1] ?? "";
+  const info = (m[2] ?? "").trim();
+  // CommonMark: a backtick fence's info string may not contain backticks, so a
+  // line such as "```inline``` text" is prose, not an opener.
+  if (fence.startsWith("`") && info.includes("`")) return null;
+  return { fence, lang: (info.split(/\s+/)[0] ?? "").toLowerCase() };
+}
+
+/** True when `line` closes a block opened with `fence` (same char, >= length). */
+function closesFence(line: string, fence: string): boolean {
+  const m = FENCE_CLOSE_RE.exec(line);
+  const run = m?.[1];
+  return run !== undefined && run.startsWith(fence[0] ?? "`") && run.length >= fence.length;
+}
+
 /**
- * Extracts the first JSON object from a model reply: fenced ```json blocks
- * first, then the first balanced `{ ... }` region. Throws when nothing
- * parses — the caller retries the turn via dex rather than inventing a
- * verdict.
+ * CommonMark-style fenced blocks in document order: a block closes at the
+ * first bare fence of the SAME character and AT LEAST the opener's length, so
+ * a longer outer fence (````markdown) safely contains nested ``` blocks.
+ * An unterminated block is ignored (a truncated reply never yields a block).
+ */
+function scanFences(text: string): FenceBlock[] {
+  const blocks: FenceBlock[] = [];
+  let open: { fence: string; lang: string } | undefined;
+  let body: string[] = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (open === undefined) {
+      open = parseFenceOpen(line) ?? undefined;
+      body = [];
+    } else if (closesFence(line, open.fence)) {
+      blocks.push({ lang: open.lang, fence: open.fence, body: body.join("\n") });
+      open = undefined;
+    } else {
+      body.push(line);
+    }
+  }
+  return blocks;
+}
+
+/**
+ * The fence to wrap `content` in when it is embedded in a prompt: long enough
+ * (>= 3) that no backtick run opening/closing a line of the content can end
+ * it early.
+ */
+export function fenceFor(content: string): string {
+  let longest = 2;
+  for (const line of content.split("\n")) {
+    const m = /^[ \t]*(`{3,})/.exec(line);
+    if (m?.[1] !== undefined) longest = Math.max(longest, m[1].length);
+  }
+  return "`".repeat(longest + 1);
+}
+
+/** Upper bound on `{` start positions tried (keeps the scan linear-ish). */
+const MAX_JSON_START_POSITIONS = 256;
+
+/** The balanced `{ ... }` region starting at `start`, or null when unbalanced. */
+function balancedObjectAt(text: string, start: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') inString = !inString;
+    if (inString) continue;
+    if (ch === "{") depth++;
+    if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * Extracts the first parseable JSON object from a model reply: fenced blocks
+ * whose content is an object first, then EVERY `{` start position in order
+ * (prose such as `see {above}: {"a":1}` no longer hides the real object
+ * behind the first brace pair). Throws when nothing parses — the caller
+ * retries the turn via dex rather than inventing a verdict.
  */
 export function extractJsonObject(text: string): unknown {
-  const fenced = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/.exec(text);
   const candidates: string[] = [];
-  if (fenced?.[1] !== undefined) candidates.push(fenced[1]);
-  const start = text.indexOf("{");
-  if (start >= 0) {
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    for (let i = start; i < text.length; i++) {
-      const ch = text[i];
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (ch === "\\") {
-        escaped = true;
-        continue;
-      }
-      if (ch === '"') inString = !inString;
-      if (inString) continue;
-      if (ch === "{") depth++;
-      if (ch === "}") {
-        depth--;
-        if (depth === 0) {
-          candidates.push(text.slice(start, i + 1));
-          break;
-        }
-      }
-    }
+  for (const block of scanFences(text)) {
+    const body = block.body.trim();
+    if (body.startsWith("{")) candidates.push(body);
+  }
+  let tried = 0;
+  for (let start = text.indexOf("{"); start >= 0 && tried < MAX_JSON_START_POSITIONS; start = text.indexOf("{", start + 1)) {
+    tried++;
+    const region = balancedObjectAt(text, start);
+    if (region !== null) candidates.push(region);
   }
   for (const candidate of candidates) {
     try {
@@ -411,20 +494,96 @@ export function extractJsonObject(text: string): unknown {
   throw new Error("no parseable JSON object in reply");
 }
 
-/** Extracts the complete ported file from a fenced code block. */
+/**
+ * Extracts the complete ported file from a fenced code block: the first
+ * ```typescript / ```ts block, else (no hint) the first block of any language,
+ * else the first bare block. Fence-length aware (a longer outer fence wins
+ * over nested ``` lines). `hint` is the legacy file-extension argument the
+ * port steps pass (".ts"); a labelled non-TypeScript block is not accepted
+ * when a hint is given.
+ */
 export function extractCodeFence(text: string, hint = ""): string {
-  const patterns = [
-    /```(?:typescript|ts)\s*\n([\s\S]*?)```/,
-    hint.length > 0
-      ? new RegExp(`\`\`\`(?:typescript|ts)?\\s*\\n([\\s\\S]*?\\.${hint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?)\`\`\``)
-      : /```[a-z]*\s*\n([\s\S]*?)```/,
-    /```\s*\n([\s\S]*?)```/,
-  ];
-  for (const re of patterns) {
-    const m = re.exec(text);
-    if (m?.[1] !== undefined && m[1].trim().length > 0) return m[1].replace(/\s+$/, "") + "\n";
+  const blocks = scanFences(text).filter((b) => b.body.trim().length > 0);
+  const pick =
+    blocks.find((b) => b.lang === "typescript" || b.lang === "ts") ??
+    (hint.length === 0 ? blocks[0] : undefined) ??
+    blocks.find((b) => b.lang === "");
+  if (pick === undefined) throw new Error("no fenced code block in reply");
+  return pick.body.replace(/\s+$/, "") + "\n";
+}
+
+/**
+ * Extracts a markdown spec map from a planner reply. The spec itself contains
+ * fenced examples (```typescript, ```php), so the FIRST closing fence cannot be
+ * trusted: the block opened by the first markdown (else first) fence runs to
+ * the LAST bare fence of at least the opener's length, which is the outer
+ * closer in the single-block reply format the prep turns demand. A reply
+ * without a complete outer block throws (dex retries) instead of yielding a
+ * nested code block or a truncated spec.
+ */
+export function extractMarkdownFence(text: string): string {
+  const lines = text.split("\n").map((l) => l.replace(/\r$/, ""));
+  const openers: Array<{ index: number; fence: string; lang: string }> = [];
+  lines.forEach((line, index) => {
+    const parsed = parseFenceOpen(line);
+    if (parsed !== null) openers.push({ index, ...parsed });
+  });
+  const open = openers.find((o) => o.lang === "markdown" || o.lang === "md") ?? openers[0];
+  if (open === undefined) throw new Error("no fenced code block in reply");
+  const openIndex = open.index;
+  let closeIndex = -1;
+  for (let i = lines.length - 1; i > openIndex; i--) {
+    if (closesFence(lines[i] ?? "", open.fence)) {
+      closeIndex = i;
+      break;
+    }
   }
-  throw new Error("no fenced code block in reply");
+  if (closeIndex < 0) throw new Error("fenced markdown block is not closed (reply truncated?)");
+  const body = lines.slice(openIndex + 1, closeIndex).join("\n");
+  if (body.trim().length === 0) throw new Error("fenced markdown block is empty");
+  // If the outer closer was lost (truncated reply) the last bare fence is an
+  // INNER closer and the body ends inside a nested block: reject it.
+  if (endsInsideFence(body)) {
+    throw new Error("fenced markdown block ends inside a nested code fence (reply truncated?)");
+  }
+  return body.replace(/\s+$/, "") + "\n";
+}
+
+/** True when `text` leaves a fenced block open at its end. */
+function endsInsideFence(text: string): boolean {
+  let open: string | undefined;
+  for (const line of text.split("\n")) {
+    if (open === undefined) open = parseFenceOpen(line)?.fence;
+    else if (closesFence(line, open)) open = undefined;
+  }
+  return open !== undefined;
+}
+
+/**
+ * Structural check of a generated spec map: it must still carry the
+ * source-map table. `expectedFiles` (the files the run ports) must each
+ * appear in a table row. Returns the problems found (empty = acceptable).
+ */
+export function specMapProblems(specText: string, expectedFiles: readonly string[] = []): string[] {
+  const rows = specText.split("\n").filter((l) => l.trimStart().startsWith("|"));
+  if (rows.length === 0) return ["no source-map table (no `|` table rows)"];
+  const missing = expectedFiles.filter((f) => !rows.some((r) => r.includes(f)));
+  return missing.length > 0 ? [`source-map table lacks rows for: ${missing.join(", ")}`] : [];
+}
+
+/**
+ * Prep spec-map extraction: outermost markdown fence + structural validation.
+ * Throws (so dex retries the step) when the reply yields a truncated or
+ * structure-less spec, which would otherwise become the prep artifact handed
+ * to every implementer.
+ */
+export function extractSpecMap(text: string, options: { expectedFiles?: readonly string[] } = {}): string {
+  const spec = extractMarkdownFence(text);
+  const problems = specMapProblems(spec, options.expectedFiles ?? []);
+  if (problems.length > 0) {
+    throw new Error(`prep spec map rejected: ${problems.join("; ")}`);
+  }
+  return spec;
 }
 
 /**
@@ -742,6 +901,18 @@ export function createOfflineJevClient(): JudgmentClient {
 // Phase 3/4 — prep-generation, prep-revision, queue-fix turn composition
 // ---------------------------------------------------------------------------
 
+/**
+ * Reply-format lines shared by the prep turns: the spec map contains ```
+ * code fences of its own, so the reply must be wrapped in a LONGER outer
+ * fence (extractSpecMap understands fence length and, as a fallback, takes
+ * the outermost block).
+ */
+const SPEC_REPLY_FORMAT: readonly string[] = [
+  "Wrap the spec map in ONE fence opened with FOUR backticks and the word markdown (````markdown)",
+  "and closed with four backticks (````): the spec contains ``` code fences of its own, which a",
+  "longer outer fence keeps intact. Keep the source-map table (one row per PHP file).",
+];
+
 export function composePrepGenerateTurn(input: {
   phpFiles: ReadonlyArray<{ name: string; source: string }>;
   symbolTableText: string;
@@ -760,14 +931,14 @@ export function composePrepGenerateTurn(input: {
     input.symbolTableText,
     "",
     "## Prior stub baseline (supersede it; keep its section structure)",
-    "```markdown",
+    `${fenceFor(input.stubPrepBaseline)}markdown`,
     input.stubPrepBaseline,
-    "```",
+    fenceFor(input.stubPrepBaseline),
     "",
     "## Reply format (the ONLY thing you emit)",
-    "One fenced ```markdown block containing the COMPLETE revised spec map",
-    "(source map: php file → ts target; mapping conventions; per-symbol table;",
-    "known traps), then one line: SUMMARY: <key decisions>.",
+    ...SPEC_REPLY_FORMAT,
+    "The block holds the COMPLETE revised spec map (source map: php file → ts target;",
+    "mapping conventions; per-symbol table; known traps), then one line: SUMMARY: <key decisions>.",
   ].join("\n");
 }
 
@@ -788,16 +959,16 @@ export function composePrepReviseTurn(input: {
     "Revise the porting spec map below according to the validated review findings.",
     "",
     "## Current spec map (by value)",
-    "```markdown",
+    `${fenceFor(input.specMapText)}markdown`,
     input.specMapText,
-    "```",
+    fenceFor(input.specMapText),
     "",
     "## Validated findings (apply all; they were citation-checked)",
     findingsText,
     "",
     "## Reply format (the ONLY thing you emit)",
-    "One fenced ```markdown block containing the COMPLETE revised spec map, then one line:",
-    "SUMMARY: <what changed per finding>.",
+    ...SPEC_REPLY_FORMAT,
+    "The block holds the COMPLETE revised spec map, then one line: SUMMARY: <what changed per finding>.",
   ].join("\n");
 }
 

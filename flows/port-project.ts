@@ -141,6 +141,7 @@ import {
   demoteReviewerLane,
   extractCodeFence,
   extractJsonObject,
+  extractSpecMap,
   mapVerdictToMetrics,
   parseUnifiedDiff,
   renderDiffForReview,
@@ -2124,7 +2125,9 @@ const PrepGenerateStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
       stubPrepBaseline: seed.stubRaw,
     });
     const result = await runAgentTurn({ def: IMPLEMENTER, sessionId: await prepSessionId(input.epoch), turn, file: PREP_SPEC_FILE, round: 0, ...plannerPromptOpts() });
-    const specText = extractCodeFence(result.text);
+    // Outermost ```markdown block + structural check (a truncated or
+    // table-less spec throws, so dex retries instead of adopting it).
+    const specText = extractSpecMap(result.text, { expectedFiles: input.files });
     ppPrepDraft.set(ctx, "draft", { specText, iteration: 0 });
     return { output: input, tokens: result.usage ?? result.tokens };
   },
@@ -2412,7 +2415,7 @@ const PrepReviseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRu
       round: 0,
       ...plannerPromptOpts(),
     });
-    const specText = extractCodeFence(result.text);
+    const specText = extractSpecMap(result.text, { expectedFiles: input.files });
     ppPrepDraft.set(ctx, "draft", { specText, iteration: draft.iteration + 1 });
     return { output: input, tokens: result.usage ?? result.tokens };
   },
