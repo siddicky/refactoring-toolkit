@@ -860,7 +860,8 @@ export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[
  *   → "resumed" (dex was restarted on the same DB and the flow is alive);
  * - running + a kill after start + NO post-kill activity + dex unreachable
  *   → "killed (dex down)";
- * - completed/failed → terminal wording with the file count.
+ * - any non-running status (completed/failed/terminated/canceled/...) →
+ *   terminal wording with the file count.
  *
  * US-006: `degradedRounds` > 0 appends an explicit `DEGRADED` marker so no
  * surface can read a zero-reviewer round as clean.
@@ -886,9 +887,13 @@ export function lifecycleHeadline(input: {
     .filter((e) => tsMs(e.utc) > tsMs(flow.startTime))
     .sort((a, b) => tsMs(b.utc) - tsMs(a.utc))[0];
   const status = flow.status;
-  if (status === "completed" || status === "failed") {
-    const killedNote = killAfterStart !== undefined ? " (survived kill)" : "";
-    return `◆ ${flow.flowId}: ${files} · ${status}${killedNote}${degraded}`;
+  // Every non-running status is terminal (completed/failed/terminated/
+  // canceled/continued-as-new/timed-out...): print the status word instead of
+  // letting a stopped flow read as `running` (C55).
+  if (status !== "running") {
+    const killedNote =
+      killAfterStart !== undefined && (status === "completed" || status === "failed") ? " (survived kill)" : "";
+    return `◆ ${flow.flowId}: ${files} · ${terminalStatusWord(status)}${killedNote}${degraded}`;
   }
   if (killAfterStart !== undefined) {
     const killMs = tsMs(killAfterStart.utc);
@@ -904,6 +909,28 @@ export function lifecycleHeadline(input: {
     return `◆ ${flow.flowId}: ${files} · running (kill at ${killAfterStart.utc.slice(11, 19)}Z, awaiting resume)${degraded}`;
   }
   return `◆ ${flow.flowId}: ${files} · running${degraded}`;
+}
+
+/** Display word for a non-running dex flow status (lower-cased, prefix stripped). */
+export function terminalStatusWord(status: string): string {
+  if (status === "continued_as_new") return "continued-as-new";
+  if (status === "server_side_timeout_internal_only") return "timed-out";
+  return status.replace(/_/g, "-");
+}
+
+/** Parallel-wave SubFlow children (port.File) surface as their own flows. */
+export function isSubFlowChild(flowId: string): boolean {
+  return flowId.startsWith("SubFlow:");
+}
+
+/**
+ * The run headline belongs to the newest top-level `port.Project` flow
+ * (SubFlow children and probe.* flows never hijack it); any other top-level
+ * flow is only a fallback when no port.Project exists. `flows` is newest-first.
+ */
+export function pickHeadlineFlow(flows: readonly FlowView[]): FlowView | undefined {
+  const topLevel = flows.filter((f) => !isSubFlowChild(f.flowId));
+  return topLevel.find((f) => f.flowType === "port.Project") ?? topLevel[0];
 }
 
 /** Sorts flows newest-first (startTime desc, flowId as tiebreak). */
@@ -1030,10 +1057,10 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     contentHash: c.contentHash,
   }));
 
-  // Wave-5 lifecycle headline: newest TOP-LEVEL flow (SubFlow children of the
-  // parallel wave join surface as their own flows; the run headline belongs
-  // to the parent port.Project flow) + its queue progress + kill overlay.
-  const headlineFlow = flowViews.find((f) => !f.flowId.startsWith("SubFlow:"));
+  // Wave-5 lifecycle headline: newest TOP-LEVEL port.Project flow (SubFlow
+  // children of the parallel wave join surface as their own flows; the run
+  // headline belongs to the parent) + its queue progress + kill overlay.
+  const headlineFlow = pickHeadlineFlow(flowViews);
   const headlineQueue = headlineQueueFor(headlineFlow, queueSummaries);
   // US-006 degraded rounds: derived per flow from the verdict attributes;
   // the headline flow's count drives the headline DEGRADED marker.

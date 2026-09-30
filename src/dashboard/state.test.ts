@@ -727,4 +727,72 @@ describe("lifecycleHeadline (wave-5 lifecycle flip)", () => {
   test("no flow found", () => {
     expect(lifecycleHeadline({ flow: undefined, filesDone: 0, filesTotal: 0, killEvents: [], dexAvailable: true, feed: [] })).toBe("no port flow found");
   });
+
+  test("C55: every non-running status is terminal and is printed, never 'running'", () => {
+    const head = (status: string) =>
+      lifecycleHeadline({ flow: flow({ status }), filesDone: 1, filesTotal: 5, killEvents: [], dexAvailable: true, feed: [] });
+    expect(head("terminated")).toBe("◆ cx-5: 1/5 files · terminated");
+    expect(head("canceled")).toBe("◆ cx-5: 1/5 files · canceled");
+    expect(head("continued_as_new")).toBe("◆ cx-5: 1/5 files · continued-as-new");
+    expect(head("server_side_timeout_internal_only")).toBe("◆ cx-5: 1/5 files · timed-out");
+    expect(head("failed")).toBe("◆ cx-5: 1/5 files · failed");
+    expect(head("running")).toBe("◆ cx-5: 1/5 files · running");
+    for (const status of ["terminated", "canceled", "continued_as_new", "server_side_timeout_internal_only"]) {
+      expect(head(status)).not.toContain("running");
+    }
+  });
+});
+
+describe("headline flow selection (C55)", () => {
+  const base = {
+    now: "2026-09-25T22:00:00.000Z",
+    burnDownFiles: [],
+    feedLimit: 80,
+    commitLimit: 40,
+    git: { available: false, error: null, repoRoot: "/tmp/pk-trial", commits: [], worktrees: [] },
+    killEvents: { available: false, error: null, filesScanned: [], events: [] },
+  };
+  const probeNewer = { ...FLOW_PROBE, flowId: "round-x", startTime: "2026-09-25T23:30:00.000Z" };
+
+  test("a newer probe.* flow does not hijack the headline from the port.Project flow", () => {
+    const state = buildDashboardState({
+      ...base,
+      dex: {
+        available: true, error: null, detail: null,
+        flows: [FLOW_TRIAL, probeNewer],
+        states: { [FLOW_TRIAL.flowId]: STATE_TRIAL },
+        histories: {},
+      },
+    });
+    expect(state.headline.startsWith(`◆ ${FLOW_TRIAL.flowId}:`)).toBe(true);
+    expect(state.headline).toContain("2/3 files"); // the port flow's queue, not 0/0
+  });
+
+  test("falls back to the newest top-level flow when no port.Project exists (children never headline)", () => {
+    const child = { ...FLOW_TRIAL, flowId: "SubFlow:trial-9-x-1", flowType: "port.File", startTime: "2026-09-25T23:45:00.000Z" };
+    const state = buildDashboardState({
+      ...base,
+      dex: {
+        available: true, error: null, detail: null,
+        flows: [FLOW_PROBE, probeNewer, child],
+        states: {},
+        histories: {},
+      },
+    });
+    expect(state.headline.startsWith("◆ round-x:")).toBe(true);
+  });
+
+  test("a terminated port.Project headlines as terminated", () => {
+    const state = buildDashboardState({
+      ...base,
+      dex: {
+        available: true, error: null, detail: null,
+        flows: [{ ...FLOW_TRIAL, flowStatus: "FLOW_STATUS_TERMINATED", flowStatusCode: 5 }],
+        states: { [FLOW_TRIAL.flowId]: STATE_TRIAL },
+        histories: {},
+      },
+    });
+    expect(state.headline).toContain("terminated");
+    expect(state.headline).not.toContain("running");
+  });
 });
