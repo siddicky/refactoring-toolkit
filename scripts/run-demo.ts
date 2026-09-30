@@ -23,7 +23,11 @@
  *   demo --dir <repo> [--files a.php,b.php|creatorex] [--prep P] [--source-root R]
  *        [--epoch N] [--max-rounds N (default 1)] [--wait-minutes N] [--flow-id ID]
  *        [--gate-flow-id <id>] [--dispatch parallel|sequential] [--start-only]
- *        [--init-fixture]                               port flow dispatch (gate optional pre-dispatch), integration;
+ *        [--init-fixture] [--dashboard]                 port flow dispatch (gate optional pre-dispatch), integration;
+ *                                                       --dashboard starts the read-only status server
+ *                                                       (scripts/serve-status.ts) on STATUS_PORT (default 4646)
+ *                                                       unless that port is taken; log in $TMPDIR; stop it
+ *                                                       with the printed `kill <pid>`;
  *                                                       --dir must be an existing git repo (--init-fixture creates a
  *                                                       throwaway one), defaults are the php-sample fixtures,
  *                                                       `--files creatorex` implies the creatorex prep + source root,
@@ -39,6 +43,9 @@
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { execFile, spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
+import { connect } from "node:net";
+import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
@@ -698,6 +705,109 @@ export async function ensureProjectRepo(
   return "existing";
 }
 
+// ---------------------------------------------------------------------------
+// Optional status dashboard (`demo --dashboard`, C72). serve-status.ts is a
+// read-only monitor; it is never started implicitly, it reports whether it
+// really came up, and its output goes to a log file instead of /dev/null.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_STATUS_PORT = 4646;
+
+/** Dashboard port: STATUS_PORT (a dedicated name: PORT is generic and Bun auto-loads it from .env), default 4646. */
+export function dashboardPort(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.STATUS_PORT?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_STATUS_PORT;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new Error(`STATUS_PORT must be a port number 1-65535 (got ${JSON.stringify(raw)})`);
+  }
+  return n;
+}
+
+/** True when something already accepts connections on host:port. */
+export function probePortInUse(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
+  return new Promise((done) => {
+    const socket = connect({ port, host });
+    const finish = (inUse: boolean) => {
+      socket.destroy();
+      done(inUse);
+    };
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+export type DashboardLaunch =
+  | { status: "started"; pid: number; port: number; logPath: string; message: string }
+  | { status: "in-use"; port: number; message: string }
+  | { status: "failed"; port: number; logPath: string; message: string }
+  | { status: "missing"; message: string };
+
+/**
+ * Starts serve-status.ts for `dir` on STATUS_PORT and confirms it is really
+ * listening. If the port is already taken it does NOT start a second copy (whatever
+ * listens there keeps serving ITS OWN STATUS_REPO_ROOT, not `dir`) and says so.
+ * The child is detached (it outlives the demo); its stdout/stderr go to a log file.
+ */
+export async function launchDashboard(
+  dir: string,
+  opts: { serveStatusPath?: string; env?: NodeJS.ProcessEnv; readyTimeoutMs?: number } = {},
+): Promise<DashboardLaunch> {
+  const env = opts.env ?? process.env;
+  const serveStatus = opts.serveStatusPath ?? join(import.meta.dir, "serve-status.ts");
+  if (!(await exists(serveStatus))) {
+    return { status: "missing", message: `${serveStatus} not found; not started` };
+  }
+  const port = dashboardPort(env);
+  const host = env.STATUS_HOST?.trim() || "127.0.0.1";
+  if (await probePortInUse(port, host)) {
+    return {
+      status: "in-use",
+      port,
+      message: `${host}:${port} is already in use; NOT starting another. Whatever listens there keeps serving its own STATUS_REPO_ROOT, not ${dir}. Set STATUS_PORT to use a free port.`,
+    };
+  }
+  const logPath = join(tmpdir(), `run-demo-dashboard-${port}.log`);
+  const logFd = openSync(logPath, "a");
+  const child = spawn(process.execPath, [serveStatus], {
+    env: { ...env, STATUS_REPO_ROOT: dir, PORT: String(port) },
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+  });
+  closeSync(logFd);
+  let exitCode: number | null | undefined;
+  child.once("exit", (code) => {
+    exitCode = code;
+  });
+  child.unref();
+  // Wait for the bind: a child that dies (EADDRINUSE race, bad config) must not be
+  // reported as a live dashboard.
+  const deadline = Date.now() + (opts.readyTimeoutMs ?? 8_000);
+  while (Date.now() < deadline) {
+    if (exitCode !== undefined) break;
+    if (await probePortInUse(port, host)) {
+      return {
+        status: "started",
+        pid: child.pid ?? -1,
+        port,
+        logPath,
+        message: `http://${host}:${port} (pid ${child.pid}, log ${logPath}; stop it with: kill ${child.pid})`,
+      };
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return {
+    status: "failed",
+    port,
+    logPath,
+    message:
+      exitCode !== undefined
+        ? `serve-status exited (code ${exitCode}) before listening on ${host}:${port}; see ${logPath}`
+        : `serve-status is not listening on ${host}:${port} yet (pid ${child.pid}); see ${logPath}`,
+  };
+}
+
 async function startDemo(): Promise<number> {
   const config = dexConfigFromEnv();
   const inputs = resolveDemoInputs();
@@ -736,17 +846,10 @@ async function startDemo(): Promise<number> {
     };
     const runId = await runtime.client.startFlow(flow, flowId, input);
     console.log(`[demo] started flowId=${flowId} runId=${runId} files=${files.join(",")} epoch=${epoch}`);
-    // Optional live-dashboard hook (worker-5, plan v6.1): launch the read-only
-    // status server next to the run when present; never fatal if absent.
-    const serveStatus = join(import.meta.dir, "serve-status.ts");
-    if (await exists(serveStatus)) {
-      const child = spawn(process.execPath, [serveStatus], {
-        env: { ...process.env, STATUS_REPO_ROOT: dir },
-        detached: true,
-        stdio: "ignore",
-      });
-      child.unref();
-      console.log(`[demo] dashboard: http://127.0.0.1:${process.env.PORT ?? "4646"} (pid ${child.pid})`);
+    // Optional live-dashboard hook (worker-5, plan v6.1), OPT-IN via --dashboard:
+    // launches the read-only status server next to the run; never fatal.
+    if (process.argv.includes("--dashboard")) {
+      console.log(`[demo] dashboard: ${(await launchDashboard(dir)).message}`);
     }
     if (process.argv.includes("--start-only")) return 0;
     return await waitAndReport(runtime, flowId, waitMinutes, "demo");
