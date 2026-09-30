@@ -16,7 +16,7 @@
  *   past a keyed commit.
  */
 
-import { git, type GitRunner } from "./exec.js";
+import { git, gitPredicate, type GitRunner } from "./exec.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -286,17 +286,11 @@ export class WorktreePool {
     // integration; only a baseless first round falls back to HEAD.
     const resolvedBase =
       baseRef ??
-      ((
-        await runner.tryRun(["rev-parse", "--verify", "refs/heads/integration"])
-      ).ok
-        ? "integration"
-        : "HEAD");
+      ((await refExists(runner, "refs/heads/integration")) ? "integration" : "HEAD");
 
     const headSha = (await runner.run(["rev-parse", resolvedBase])).trim();
     // Create the lease branch at the resolved base if absent, then add the worktree.
-    const branchExists = (
-      await runner.tryRun(["rev-parse", "--verify", `refs/heads/${branch}`])
-    ).ok;
+    const branchExists = await refExists(runner, `refs/heads/${branch}`);
     if (!branchExists) {
       await runner.run(["branch", branch, headSha]);
     }
@@ -362,9 +356,11 @@ export async function commitLeaseChanges(
 ): Promise<{ disposition: CommitDisposition; sha: string | null; contentHash: string }> {
   const runner = git(worktreePath);
   await runner.run(["add", "-A"]);
-  const empty = (await runner.tryRun(["diff", "--cached", "--quiet"])).ok;
+  // diff --quiet: exit 0 = nothing staged, exit 1 = staged changes; any other
+  // outcome (timeout, fatal) throws rather than reading as "has changes".
+  const empty = await gitPredicate(runner, ["diff", "--cached", "--quiet"]);
   if (empty) {
-    const headTree = (await runner.tryRun(["rev-parse", "HEAD^{tree}"])).stdout.trim();
+    const headTree = (await runner.run(["rev-parse", "HEAD^{tree}"])).trim();
     return {
       disposition: "no-op-empty-diff",
       sha: null,
@@ -448,7 +444,7 @@ export async function makeCommitReachable(
   keyed: KeyedCommit,
 ): Promise<"already" | "fast-forward" | "merge"> {
   const runner = git(worktreePath);
-  if ((await runner.tryRun(["merge-base", "--is-ancestor", keyed.sha, "HEAD"])).ok) {
+  if (await isAncestor(runner, keyed.sha, "HEAD")) {
     return "already";
   }
   // Completed round: keyed commit authoritative; drop divergent replay state.
@@ -469,7 +465,26 @@ export async function keyedCommitIntegrated(
   integrationWorktreePath: string,
   keyed: KeyedCommit,
 ): Promise<boolean> {
-  return (await git(integrationWorktreePath).tryRun(["merge-base", "--is-ancestor", keyed.sha, "HEAD"])).ok;
+  // Exit 1 = not an ancestor, 128 = the commit object is missing (also "not
+  // integrated"); a timeout or spawn failure is an error, not a "no".
+  return gitPredicate(
+    git(integrationWorktreePath),
+    ["merge-base", "--is-ancestor", keyed.sha, "HEAD"],
+    [1, 128],
+  );
+}
+
+/**
+ * `rev-parse --verify --quiet <ref>`: exit 0 = present, exit 1 = absent.
+ * Any other outcome (timeout, exit 128) throws instead of reading as "absent".
+ */
+async function refExists(runner: GitRunner, ref: string): Promise<boolean> {
+  return gitPredicate(runner, ["rev-parse", "--verify", "--quiet", ref]);
+}
+
+/** `merge-base --is-ancestor`: exit 0 = yes, exit 1 = no; anything else throws. */
+async function isAncestor(runner: GitRunner, ancestor: string, descendant: string): Promise<boolean> {
+  return gitPredicate(runner, ["merge-base", "--is-ancestor", ancestor, descendant]);
 }
 
 /** Reads the worktree status (clean/dirty) without touching the index lock. */
@@ -484,7 +499,8 @@ export async function commitObjectReadable(
   sha: string,
 ): Promise<boolean> {
   const runner = git(repoRoot);
-  return (await runner.tryRun(["cat-file", "-e", `${sha}^{commit}`])).ok;
+  // 1/128 = absent or not a repo; a timeout must not read as "unreadable".
+  return gitPredicate(runner, ["cat-file", "-e", `${sha}^{commit}`], [1, 128]);
 }
 
 /**
@@ -535,9 +551,7 @@ export async function mergeLeaseIntoIntegration(
   const tip = (await git(repoRoot).run(["rev-parse", leaseBranch])).trim();
 
   // Ensure the integration branch exists (created from current default HEAD).
-  const hasIntegration = (
-    await root.tryRun(["rev-parse", "--verify", `refs/heads/${integrationBranch}`])
-  ).ok;
+  const hasIntegration = await refExists(root, `refs/heads/${integrationBranch}`);
   if (!hasIntegration) {
     const head = (await root.run(["rev-parse", "HEAD"])).trim();
     await root.run(["branch", integrationBranch, head]);
@@ -553,8 +567,7 @@ export async function mergeLeaseIntoIntegration(
 
   const integ = git(integrationWorktreePath);
   // Idempotency: if the lease tip is already an ancestor, nothing to do.
-  const ancestor = await integ.tryRun(["merge-base", "--is-ancestor", tip, "HEAD"]);
-  if (ancestor.ok) {
+  if (await isAncestor(integ, tip, "HEAD")) {
     const sha = (await integ.run(["rev-parse", "HEAD"])).trim();
     return { alreadyIntegrated: true, fastForward: false, sha };
   }
@@ -584,8 +597,7 @@ export async function integratedContentExists(
   path: string,
 ): Promise<boolean> {
   const runner = git(integrationWorktreePath);
-  const result = await runner.tryRun(["cat-file", "-e", `HEAD:${path}`]);
-  return result.ok;
+  return gitPredicate(runner, ["cat-file", "-e", `HEAD:${path}`], [1, 128]);
 }
 
 function sanitizePathSegment(input: string): string {
