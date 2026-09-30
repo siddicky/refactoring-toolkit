@@ -225,10 +225,11 @@ describe("suspicion predicate (span-outside-diff)", () => {
   });
 
   test("a span inside the hunk's range is NOT suspect on arm (a)", () => {
-    // raw hunk body occupies raw lines 5..10 (the resolver's coordinates);
-    // block lines 11..15 -> raw 6..10 after subtracting DIFF_HEADER_LINES.
+    // SAMPLE_DIFF: the `@@` header is raw line 6 and the hunk body occupies raw
+    // lines 7..12 (1-based, the resolver's coordinates; a reviewer cites block
+    // lines = raw + DIFF_HEADER_LINES).
     const rec = record("src/Money.php", "reviewer-A", 1, [
-      { finding_id: "F1", severity: "major", summary: "s", evidence: span("h1", 6, 8) },
+      { finding_id: "F1", severity: "major", summary: "s", evidence: span("h1", 7, 9) },
     ]);
     const out = evaluateSuspicion({
       record: rec,
@@ -239,6 +240,22 @@ describe("suspicion predicate (span-outside-diff)", () => {
     expect(out.suspect).toBe(false);
     expect(out.reasons).toEqual([]);
   });
+
+  test("C11 boundaries: the LAST body line (raw 12) is inside; the @@ line (raw 6) is outside", () => {
+    const at = (start: number, end: number) =>
+      evaluateSuspicion({
+        record: record("src/Money.php", "reviewer-A", 1, [
+          { finding_id: "F1", severity: "major", summary: "s", evidence: span("h1", start, end) },
+        ]),
+        parsedDiff: parsed,
+        verdictText: "{}",
+        priorNormalizedText: null,
+      }).reasons;
+    expect(at(12, 12)).toEqual([]);
+    expect(at(7, 12)).toEqual([]);
+    expect(at(6, 6)).toEqual(["span-outside-diff:F1"]);
+    expect(at(12, 13)).toEqual(["span-outside-diff:F1"]);
+  });
 });
 
 describe("suspicion predicate (all-blockers-over-cap)", () => {
@@ -247,7 +264,7 @@ describe("suspicion predicate (all-blockers-over-cap)", () => {
     finding_id: id,
     severity: "blocker",
     summary: id,
-    evidence: span("h1", 6, 7),
+    evidence: span("h1", 7, 8),
   });
 
   test("more than 5 findings, ALL blockers -> suspect", () => {
@@ -337,8 +354,9 @@ function wallReply(tag: string): string {
     finding_id: `${tag}${i}`,
     severity: "blocker",
     evidence_span: {
-      start_line: DIFF_HEADER_LINES + 6 + (i % 5),
-      end_line: DIFF_HEADER_LINES + 6 + (i % 5),
+      // raw lines 7..11 = the first five body lines (raw 6 is the @@ header)
+      start_line: DIFF_HEADER_LINES + 7 + (i % 5),
+      end_line: DIFF_HEADER_LINES + 7 + (i % 5),
       snippet: ["export class Money {", "constructor(readonly cents: number) {}", "add(other: Money): Money {", "return new Money(this.cents + other.cents);", "}"][i % 5],
     },
     disposition: "fix",

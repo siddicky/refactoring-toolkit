@@ -61,48 +61,18 @@ function stableStringify(value: unknown): string {
 }
 
 /**
- * One hunk's body range in raw-diff line positions (1-based, exclusive `to`),
- * reconstructed EXACTLY like parseUnifiedDiff's internal ranges: a hunk's
- * body starts on the line after its `@@` header and runs to the next header.
+ * True when the mapped evidence span lies INSIDE its cited hunk's body: both
+ * ends resolve, through the runtime's single 1-based range helper (exposed as
+ * `parsed.hunkIdForBodyLine`), to the hunk the evidence cites. The `@@` header
+ * line and lines of other hunks are outside; a hunk's last body line is
+ * inside. Uncited findings (evidence null = the span resolver rejected the
+ * span) are OUTSIDE by definition.
  */
-function hunkBodyRanges(parsed: ParsedDiff): Map<string, { from: number; to: number }> {
-  const ranges = new Map<string, { from: number; to: number }>();
-  const headerRe = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,\d+)? @@/;
-  let currentId: string | undefined;
-  let currentFrom = 0;
-  let hunkIndex = 0;
-  for (let i = 0; i < parsed.lines.length; i++) {
-    const line = parsed.lines[i] ?? "";
-    if (headerRe.test(line)) {
-      if (currentId !== undefined) {
-        ranges.set(currentId, { from: currentFrom, to: i });
-      }
-      currentId = parsed.hunks[hunkIndex]?.hunk_id;
-      hunkIndex++;
-      currentFrom = i + 1; // body starts AFTER the @@ header
-    }
-  }
-  if (currentId !== undefined) {
-    ranges.set(currentId, { from: currentFrom, to: parsed.lines.length });
-  }
-  return ranges;
-}
-
-/**
- * True when the mapped evidence span lies INSIDE its cited hunk's body
- * range (the same coordinates resolveEvidence produced: raw-diff positions).
- * Uncited findings (evidence null = the span resolver rejected the span)
- * are OUTSIDE by definition.
- */
-function spanInsideHunkRange(evidence: Finding["evidence"], ranges: Map<string, { from: number; to: number }>): boolean {
+function spanInsideHunkRange(evidence: Finding["evidence"], parsed: ParsedDiff): boolean {
   if (evidence === null) return false;
-  const range = ranges.get(evidence.hunk_id);
-  if (range === undefined) return false;
   return (
-    evidence.start_line >= range.from &&
-    evidence.start_line < range.to &&
-    evidence.end_line >= range.from &&
-    evidence.end_line < range.to
+    parsed.hunkIdForBodyLine(evidence.start_line) === evidence.hunk_id &&
+    parsed.hunkIdForBodyLine(evidence.end_line) === evidence.hunk_id
   );
 }
 
@@ -123,9 +93,8 @@ export function evaluateSuspicion(input: {
   const reasons: SuspicionReason[] = [];
 
   // (a) evidence spans outside the diff's hunk line-ranges
-  const ranges = hunkBodyRanges(input.parsedDiff);
   for (const finding of input.record.findings) {
-    if (!spanInsideHunkRange(finding.evidence, ranges)) {
+    if (!spanInsideHunkRange(finding.evidence, input.parsedDiff)) {
       reasons.push(`span-outside-diff:${finding.finding_id}`);
     }
   }

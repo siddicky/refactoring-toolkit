@@ -248,22 +248,46 @@ export interface ParsedDiff extends DiffDocument {
   hunkIdForBodyLine(line: number): string | undefined;
 }
 
+/** Unified-diff hunk header: `@@ -a[,b] +c[,d] @@`. */
+const HUNK_HEADER_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/** One hunk's body range in 1-based raw-diff line numbers; `to` is exclusive. */
+export interface HunkBodyRange {
+  id: string;
+  from: number;
+  to: number;
+}
+
+/**
+ * THE single source of hunk body ranges (parseUnifiedDiff's resolver and the
+ * suspicion predicate both read it). Line numbers are 1-based positions in
+ * the raw diff: the `@@` header at 0-based index i sits on line i + 1, so its
+ * body starts on line i + 2 and runs up to (exclusive) the next header's line
+ * (next index j -> line j + 1), or `lines.length + 1` for the last hunk. The
+ * header line itself is therefore OUTSIDE every range and a hunk's last body
+ * line is INSIDE it. Hunk ids are `h1..hN` in header order.
+ */
+export function hunkBodyRanges(lines: readonly string[]): HunkBodyRange[] {
+  const ranges: HunkBodyRange[] = [];
+  let open: { id: string; from: number } | undefined;
+  for (let i = 0; i < lines.length; i++) {
+    if (!HUNK_HEADER_RE.test(lines[i] ?? "")) continue;
+    if (open !== undefined) ranges.push({ ...open, to: i + 1 });
+    open = { id: `h${ranges.length + 1}`, from: i + 2 };
+  }
+  if (open !== undefined) ranges.push({ ...open, to: lines.length + 1 });
+  return ranges;
+}
+
 export function parseUnifiedDiff(diffText: string): ParsedDiff {
   const lines = diffText.split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 
   const hunks: DiffDocument["hunks"] = [];
-  const ranges: Array<{ from: number; to: number; id: string }> = [];
-  let current: { from: number; id: string } | undefined;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-    const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+  for (const line of lines) {
+    const m = HUNK_HEADER_RE.exec(line);
     if (m !== null) {
-      if (current !== undefined) {
-        ranges.push({ from: current.from, to: i, id: current.id });
-      }
-      const hunk: DiffDocument["hunks"][number] = {
+      hunks.push({
         hunk_id: `h${hunks.length + 1}`,
         header: line,
         old_start: Number(m[1] ?? 0),
@@ -271,19 +295,13 @@ export function parseUnifiedDiff(diffText: string): ParsedDiff {
         new_start: Number(m[3] ?? 0),
         new_lines: m[4] === undefined ? 1 : Number(m[4]),
         lines: [],
-      };
-      hunks.push(hunk);
-      current = { from: i + 1, id: hunk.hunk_id }; // body starts AFTER the @@ header
-      continue;
-    }
-    if (current !== undefined) {
+      });
+    } else {
       hunks[hunks.length - 1]?.lines.push(line);
     }
   }
-  if (current !== undefined) {
-    ranges.push({ from: current.from, to: lines.length, id: current.id });
-  }
 
+  const ranges = hunkBodyRanges(lines);
   const hunkIdForBodyLine = (line: number): string | undefined => {
     for (const r of ranges) {
       if (line >= r.from && line < r.to) return r.id;
