@@ -13,6 +13,10 @@
  *             (default when the flag is absent)
  *
  * Anything else is rejected instead of silently behaving like `auto`.
+ *
+ * `requireReal` is for callers that must act on the REAL server (ordered
+ * recovery enumerates and aborts its sessions): there `auto` means
+ * `opencode`, because a stub would skip the abort fence without failing.
  */
 
 import {
@@ -49,6 +53,8 @@ export interface SelectHarnessOptions {
   model?: { providerID: string; modelID: string } | undefined;
   /** Builds the labelled test double. */
   makeStub: () => AgentSessionClient;
+  /** `auto` must not degrade to the stub (recovery): treat it as `opencode`. An explicit `stub` still wins. */
+  requireReal?: boolean | undefined;
   /** Probe deadline in ms (default: the harness default). */
   probeTimeoutMs?: number | undefined;
   /** Loud-warning sink (default console.error). */
@@ -63,22 +69,29 @@ export interface SelectHarnessOptions {
 }
 
 export async function selectHarness(opts: SelectHarnessOptions): Promise<AgentSessionClient> {
-  const choice = parseHarnessChoice(opts.choice);
-  if (choice === "stub") return opts.makeStub();
+  const requested = parseHarnessChoice(opts.choice);
+  if (requested === "stub") return opts.makeStub();
+  const choice = requested === "auto" && opts.requireReal === true ? "opencode" : requested;
 
   const connect = opts.connect ?? ((url, model) => OpencodeHarness.connect(url, model));
-  const harness = await connect(opts.baseUrl, opts.model);
-  const probe = await harness.probe(opts.probeTimeoutMs);
-  if (probe.ok) return harness;
-
-  const where = harness.baseUrl ?? opts.baseUrl ?? "(default base URL)";
+  let harness: ProbeableHarness | undefined;
+  let failure: string;
+  try {
+    harness = await connect(opts.baseUrl, opts.model);
+    const probe = await harness.probe(opts.probeTimeoutMs);
+    if (probe.ok) return harness;
+    failure = probe.reason;
+  } catch (err) {
+    failure = err instanceof Error ? err.message : String(err);
+  }
+  const where = harness?.baseUrl ?? opts.baseUrl ?? "(default base URL)";
   if (choice === "opencode") {
     throw new Error(
-      `--harness opencode: opencode server at ${where} is not reachable (${probe.reason}). Start it, fix OPENCODE_BASE_URL, or pass --harness stub for the test double.`,
+      `--harness ${requested}: opencode server at ${where} is not reachable (${failure}). Start it, fix OPENCODE_BASE_URL, or pass --harness stub for the test double.`,
     );
   }
   (opts.warn ?? ((m: string) => console.error(m)))(
-    `[run-demo] WARNING: opencode server at ${where} is not reachable (${probe.reason}); --harness auto is FALLING BACK to StubHarness — a labelled test double: fixture token counts, NO real model calls. Pass --harness opencode to fail instead.`,
+    `[run-demo] WARNING: opencode server at ${where} is not reachable (${failure}); --harness auto is FALLING BACK to StubHarness — a labelled test double: fixture token counts, NO real model calls. Pass --harness opencode to fail instead.`,
   );
   return opts.makeStub();
 }

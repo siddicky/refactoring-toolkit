@@ -65,7 +65,7 @@ export function parseFenceLabel(
  * parsed label segment compared exactly — never a substring test, which also
  * matched the round segment and longer epochs.
  */
-export function isStaleToolkitSession(title: string, epoch: number): boolean {
+function isStaleToolkitSession(title: string, epoch: number): boolean {
   if (!title.startsWith(PORTING_KIT_LABEL_PREFIX)) return false;
   const parsed = parseFenceLabel(title);
   return parsed === null || parsed.epoch !== epoch;

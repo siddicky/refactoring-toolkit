@@ -136,6 +136,40 @@ describe("selectHarness", () => {
     expect(await selectHarness({ ...base, choice: "opencode", connect: async () => real })).toBe(real);
   });
 
+  test("a connect() that throws is handled like an unreachable server", async () => {
+    const warnings: string[] = [];
+    const boom = async (): Promise<ProbeableHarness> => {
+      throw new Error("invalid base URL");
+    };
+    expect(
+      await selectHarness({ ...base, choice: "auto", connect: boom, warn: (m) => warnings.push(m) }),
+    ).toBe(stub);
+    expect(warnings[0]).toContain("invalid base URL");
+    await expect(selectHarness({ ...base, choice: "opencode", connect: boom })).rejects.toThrow(
+      /--harness opencode: .*invalid base URL/,
+    );
+  });
+
+  test("requireReal (recovery): auto on an unreachable server FAILS instead of skipping the abort fence on a stub", async () => {
+    const warnings: string[] = [];
+    await expect(
+      selectHarness({
+        ...base,
+        choice: undefined,
+        requireReal: true,
+        connect: async () => fakeReal(async () => ({ ok: false, reason: "Unable to connect" })),
+        warn: (m) => warnings.push(m),
+      }),
+    ).rejects.toThrow(/--harness auto: opencode server at http:\/\/fake:4096 is not reachable \(Unable to connect\)/);
+    expect(warnings).toEqual([]);
+  });
+
+  test("requireReal keeps a reachable real harness and still honours an explicit stub", async () => {
+    const real = fakeReal(async () => ({ ok: true }));
+    expect(await selectHarness({ ...base, choice: "auto", requireReal: true, connect: async () => real })).toBe(real);
+    expect(await selectHarness({ ...base, choice: "stub", requireReal: true })).toBe(stub);
+  });
+
   test("an unknown --harness value fails before any connection is attempted", async () => {
     let connected = 0;
     await expect(
