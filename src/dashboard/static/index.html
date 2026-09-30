@@ -195,7 +195,7 @@ function renderFeed(entries) {
       ? ` — in ${e.usage.input.toLocaleString("en-US")} (cache ${e.usage.cacheRead.toLocaleString("en-US")}) out ${e.usage.output.toLocaleString("en-US")}${e.usage.costUsd > 0 ? " $" + e.usage.costUsd.toFixed(4) : ""}`
       : "";
     const tok = e.tokens == null
-      ? (e.tokensRequired ? '<span class="red" title="model-calling step missing token usage: provenance failure">MISSING</span>' : '<span class="faint" title="non-model step: tokens not applicable">n/a</span>')
+      ? (e.attempt === 0 ? '<span class="faint" title="start marker (attempt 0): tokens arrive with the real attempt">start</span>' : e.tokensRequired ? '<span class="red" title="model-calling step missing token usage: provenance failure">MISSING</span>' : '<span class="faint" title="non-model step: tokens not applicable">n/a</span>')
       : `<span class="violet" title="${esc(splitTip)}">${esc(e.tokens.toLocaleString("en-US"))}</span>`;
     const fileCell = e.file ? esc(short(e.file, 34)) : '<span class="faint">flow-level</span>';
     return `<tr>

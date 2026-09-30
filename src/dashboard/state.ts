@@ -85,7 +85,9 @@ export function parseEnvelope(value: unknown): ParsedEnvelope | null {
     tokens: normalizeTokens(rec.tokens),
     usage: parseUsageSplit(rec.tokens),
     wall_clock_ms: typeof rec.wall_clock_ms === "number" ? rec.wall_clock_ms : null,
-    tokensRequired: MODEL_ROLES.has(role),
+    // Attempt 0 is the durable start marker (envelopeStartMarker): tokens are
+    // null by construction, so it must never read as a provenance failure.
+    tokensRequired: MODEL_ROLES.has(role) && attempt > 0,
   };
 }
 

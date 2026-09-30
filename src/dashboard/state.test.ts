@@ -83,6 +83,33 @@ describe("parseEnvelope / normalizeTokens", () => {
     expect(parseEnvelope(null)).toBeNull();
     expect(parseEnvelope({ nope: true })).toBeNull();
   });
+
+  test("C53: an attempt-0 start marker is never token-required (no false provenance failure)", () => {
+    const marker = parseEnvelope({
+      stepId: "pp-implement",
+      role: "agent",
+      file: null,
+      round: null,
+      attempt: 0,
+      started_at: "2026-09-25T21:23:36.693Z",
+      ended_at: null,
+      outcome: "interrupted",
+      tokens: null,
+      wall_clock_ms: null,
+    });
+    expect(marker?.attempt).toBe(0);
+    expect(marker?.tokens).toBeNull();
+    expect(marker?.tokensRequired).toBe(false);
+    // The real attempt of the same step still requires tokens.
+    const real = parseEnvelope({
+      stepId: "pp-implement",
+      role: "agent",
+      attempt: 1,
+      started_at: "2026-09-25T21:23:36.693Z",
+      tokens: null,
+    });
+    expect(real?.tokensRequired).toBe(true);
+  });
 });
 
 describe("stageLabel", () => {
