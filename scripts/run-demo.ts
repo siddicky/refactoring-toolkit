@@ -24,7 +24,7 @@
  */
 
 import { mkdir, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -51,6 +51,7 @@ import {
   mergeLeaseIntoIntegration,
   operationId,
   reconcile,
+  sanitizePathSegment,
   type CompletionMarker,
   type LeaseRecord,
 } from "../src/git/worktree.js";
@@ -510,47 +511,97 @@ async function startDemo(): Promise<number> {
 // durable-lease reclaim + reconcile at git level → re-dispatch at new epoch)
 // ---------------------------------------------------------------------------
 
-/** Lease worktrees reachable from durable git state (`git worktree list`). */
-async function listLeaseWorktrees(repoDir: string): Promise<string[]> {
-  const { stdout } = await execFileP("git", ["worktree", "list", "--porcelain"], { cwd: repoDir });
-  return stdout
-    .split("\n")
-    .filter((l) => l.startsWith("worktree "))
-    .map((l) => l.slice("worktree ".length).trim())
-    .filter((p) => p.includes(".worktrees") && !p.endsWith("integration"));
+/** A worktree as reported by `git worktree list --porcelain`. */
+export interface WorktreeRef {
+  path: string;
+  /** Short branch name (`refs/heads/` stripped); null for a detached HEAD. */
+  branch: string | null;
 }
 
-async function recoverPort(): Promise<number> {
-  const dir = argValue("--dir");
-  if (dir === undefined) throw new Error("recover-port requires --dir <projectRepoDir>");
-  const epoch = Number.parseInt(argValue("--epoch", "2") as string, 10);
-  const files = (argValue("--files") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+/** Parses `git worktree list --porcelain` (blank-line separated blocks). */
+export function parseWorktreeList(porcelain: string): WorktreeRef[] {
+  const refs: WorktreeRef[] = [];
+  for (const block of porcelain.split(/\n\s*\n/)) {
+    let path: string | undefined;
+    let branch: string | null = null;
+    for (const line of block.split("\n")) {
+      if (line.startsWith("worktree ")) path = line.slice("worktree ".length).trim();
+      else if (line.startsWith("branch ")) {
+        branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+      }
+    }
+    if (path !== undefined) refs.push({ path, branch });
+  }
+  return refs;
+}
 
-  console.log(`[recover-port] epoch bump → ${epoch}; repo=${dir}`);
+/** Worktrees registered with the repository: durable git state, never an in-memory store. */
+export async function listWorktrees(repoDir: string): Promise<WorktreeRef[]> {
+  const { stdout } = await execFileP("git", ["worktree", "list", "--porcelain"], { cwd: repoDir });
+  return parseWorktreeList(stdout);
+}
 
-  // 1-2. Ordered abort: persisted fences carry epoch-tagged labels; when the
-  // fence attribute is not reachable outside a flow context, use the plan's
-  // ENUMERATION FALLBACK against the surviving opencode server.
-  const harness = await pickHarness(argValue("--harness"));
-  const aborted = await harness.abortSessionsNotTagged(epoch);
-  console.log(`[recover-port] aborted ${aborted.length} foreign session(s): ${aborted.join(",") || "none"}`);
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
-  // 3. Durable lease reclaim + reconcile at git level: lease worktrees come
-  // from `git worktree list` (durable state), never an in-memory store. The
-  // flow's own pp-lease store reclaims stale-epoch records on next claim.
-  const leaseWorktrees = await listLeaseWorktrees(dir);
+/**
+ * Picks THIS file's lease worktree: the highest lease epoch strictly below
+ * `beforeEpoch` (recovery bumps the epoch, it does not have to be +1). The match
+ * is exact and derived from the same sanitizePathSegment the pool uses - the
+ * lease branch `lease/<safe>/<n>` (or, for a detached worktree, the directory
+ * `<safe>-<n>`) - so another file's worktree, or a `-1` inside a hash or a parent
+ * directory, can never be selected (the old substring predicate never used the
+ * file at all).
+ */
+export function selectLeaseWorktree(
+  worktrees: readonly WorktreeRef[],
+  file: string,
+  beforeEpoch: number,
+): { worktree: WorktreeRef; epoch: number } | undefined {
+  const safe = escapeRegExp(sanitizePathSegment(file));
+  const branchRe = new RegExp(`^lease/${safe}/(\\d+)$`);
+  const dirRe = new RegExp(`^${safe}-(\\d+)$`);
+  let best: { worktree: WorktreeRef; epoch: number } | undefined;
+  for (const worktree of worktrees) {
+    const m = (worktree.branch !== null ? branchRe.exec(worktree.branch) : null) ?? dirRe.exec(basename(worktree.path));
+    if (m === null) continue;
+    const epoch = Number.parseInt(m[1] ?? "", 10);
+    if (!Number.isInteger(epoch) || epoch >= beforeEpoch) continue;
+    if (best === undefined || epoch > best.epoch) best = { worktree, epoch };
+  }
+  return best;
+}
+
+export interface RecoverLog {
+  log(message: string): void;
+  error(message: string): void;
+}
+
+/**
+ * Git-level half of `recover-port`: for each file, finds ITS OWN lease worktree
+ * (selectLeaseWorktree), reconciles it against the file's latest keyed commit,
+ * and applies the decision. Returns the number of poisoned files.
+ */
+export async function reconcileLeaseWorktrees(
+  opts: { dir: string; epoch: number; files: readonly string[] },
+  out: RecoverLog = console,
+): Promise<{ failures: number }> {
+  const { dir, epoch } = opts;
+  const worktrees = await listWorktrees(dir);
   let failures = 0;
-  for (const file of files) {
+  for (const file of opts.files) {
     // Phase 4: recover the LATEST round per file (round increments wired) —
     // the old round-1 pin lost fix rounds beyond the first.
     const round = await latestRoundFor(dir, file);
     const opId = operationId(file, round);
-    const wt = leaseWorktrees.find((p) => p.includes(`-${epoch - 1}`));
+    const selected = selectLeaseWorktree(worktrees, file, epoch);
     const keyed = await findCommitByOpId(dir, opId);
-    if (wt === undefined) {
-      console.log(`[recover-port] ${file}: no live lease worktree (keyed=${keyed?.sha ?? "none"}) — re-dispatch claims fresh`);
+    if (selected === undefined) {
+      out.log(`[recover-port] ${file}: no live lease worktree below epoch ${epoch} (keyed=${keyed?.sha ?? "none"}) — re-dispatch claims fresh`);
       continue;
     }
+    const wt = selected.worktree.path;
     const clean = await isWorktreeClean(wt);
     const action = reconcile({
       marker: undefined,
@@ -562,28 +613,97 @@ async function recoverPort(): Promise<number> {
     });
     if (action.kind === "poisoned") {
       failures += 1;
-      console.error(`[recover-port] ${file}: POISONED — ${action.reason}`);
+      out.error(`[recover-port] ${file}: POISONED — ${action.reason}`);
       continue;
     }
-    const { stdout: branchName } = await execFileP("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: wt });
-    const { stdout: baseSha } = await execFileP("git", ["rev-parse", "HEAD"], { cwd: wt });
+    const branch =
+      selected.worktree.branch ?? (await git(wt).run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
+    const baseSha = (await git(wt).run(["rev-parse", "HEAD"])).trim();
     const lease: LeaseRecord = {
       file,
       worktreePath: wt,
-      branch: branchName.trim(),
-      epoch: epoch - 1,
-      baseSha: baseSha.trim(),
+      branch,
+      epoch: selected.epoch,
+      baseSha,
       holderExecutionId: "recover-port",
       acquiredAtUtc: new Date().toISOString(),
     };
     await applyReconcile(lease, action, keyed);
-    console.log(`[recover-port] ${file}: reconcile=${action.kind} (${action.reason}) keyed=${keyed?.sha ?? "none"}`);
+    out.log(`[recover-port] ${file}: reconcile=${action.kind} (${action.reason}) keyed=${keyed?.sha ?? "none"} worktree=${wt}`);
   }
+  return { failures };
+}
+
+function shellWord(value: string): string {
+  return /^[\w./@:=+,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The `demo` command an operator re-dispatches after recovery. It carries the
+ * flags a literal copy needs: without --source-root/--prep the defaults are the
+ * php-sample fixtures, and --flow-id must be NEW (the recovered flow id exists).
+ * `--files creatorex` already implies the creatorex prep/source root.
+ */
+export function redispatchCommand(o: {
+  dir: string;
+  epoch: number;
+  filesArg: string | undefined;
+  sourceRoot?: string | undefined;
+  prepPath?: string | undefined;
+  flowId?: string | undefined;
+  maxRounds?: string | undefined;
+}): string {
+  const impliedFixtures = o.filesArg?.trim() === "creatorex";
+  const parts = [
+    "run-demo.ts demo",
+    `--dir ${shellWord(o.dir)}`,
+    `--epoch ${o.epoch}`,
+    `--files ${o.filesArg !== undefined && o.filesArg !== "" ? shellWord(o.filesArg) : "<files>"}`,
+  ];
+  if (o.sourceRoot !== undefined) parts.push(`--source-root ${shellWord(o.sourceRoot)}`);
+  else if (!impliedFixtures) parts.push("--source-root <sourceRoot>");
+  if (o.prepPath !== undefined) parts.push(`--prep ${shellWord(o.prepPath)}`);
+  else if (!impliedFixtures) parts.push("--prep <prepPath>");
+  parts.push(`--flow-id ${o.flowId !== undefined ? shellWord(o.flowId) : "<new-flow-id>"}`);
+  if (o.maxRounds !== undefined) parts.push(`--max-rounds ${shellWord(o.maxRounds)}`);
+  return parts.join(" ");
+}
+
+async function recoverPort(): Promise<number> {
+  const dir = argValue("--dir");
+  if (dir === undefined) throw new Error("recover-port requires --dir <projectRepoDir>");
+  const epoch = Number.parseInt(argValue("--epoch", "2") as string, 10);
+  const filesArg = argValue("--files");
+  // Same expansion as `demo` (`--files creatorex` is the 10-file fixture set).
+  const files = expandFilesArg(filesArg ?? "");
+
+  console.log(`[recover-port] epoch bump → ${epoch}; repo=${dir}`);
+
+  // 1-2. Ordered abort: persisted fences carry epoch-tagged labels; when the
+  // fence attribute is not reachable outside a flow context, use the plan's
+  // ENUMERATION FALLBACK against the surviving opencode server.
+  const harness = await pickHarness(argValue("--harness"));
+  const aborted = await harness.abortSessionsNotTagged(epoch);
+  console.log(`[recover-port] aborted ${aborted.length} foreign session(s): ${aborted.join(",") || "none"}`);
+
+  // 3. Durable lease reclaim + reconcile at git level: lease worktrees come
+  // from `git worktree list` (durable state), never an in-memory store, and each
+  // file is matched to its OWN lease worktree. The flow's own pp-lease store
+  // reclaims stale-epoch records on next claim.
+  const { failures } = await reconcileLeaseWorktrees({ dir, epoch, files });
 
   // 4. Re-dispatch: the operator relaunches at the bumped epoch; the flow's
   // LeaseStep reclaims stale-epoch entries in the DURABLE pp-lease store.
   console.log(
-    `[recover-port] done (failures=${failures}). Re-dispatch: run-demo.ts demo --dir ${dir} --epoch ${epoch} --files ${files.join(",") || "<files>"}`,
+    `[recover-port] done (failures=${failures}). Re-dispatch: ${redispatchCommand({
+      dir,
+      epoch,
+      filesArg,
+      sourceRoot: argValue("--source-root"),
+      prepPath: argValue("--prep"),
+      flowId: argValue("--flow-id"),
+      maxRounds: argValue("--max-rounds"),
+    })}`,
   );
   return failures === 0 ? 0 : 1;
 }
