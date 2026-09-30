@@ -3261,8 +3261,10 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
 // implement/fix → reviews → commit) against their OWN attribute stores; the
 // parent integrates serially after the join (the shared integration worktree
 // never races) and appends git-derived done entries. Caps: one lease per
-// child, wave width ≤ PARALLEL_SLOTS (= the WorktreePool cap) — concurrency
-// is bounded at the wave planner, never widened.
+// child, wave width ≤ CHILD_SLOT_CAP. The WorktreePool cap is enforced per
+// lease STORE and every child owns its own pp-lease store, so it can never
+// trip across siblings: concurrency is bounded ONLY by the wave planner's
+// slice width, never widened.
 // ---------------------------------------------------------------------------
 
 /** Input of one per-file child flow (PortFileFlow). */
@@ -3574,7 +3576,9 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
     }
     const acquired = await pool.acquire(input.file, input.epoch, `pp-child-${input.epoch}`);
     if (!acquired.acquired) {
-      // Slot contention (wave width ≤ cap makes this rare): retryable.
+      // The child's store holds no sibling leases, so the pool cap cannot
+      // trip here; a refusal means this file's own lease is already held in
+      // this store (concurrent re-acquire): retryable.
       throw new Error(`child lease failed for ${input.file}: ${acquired.reason}`);
     }
     return {
