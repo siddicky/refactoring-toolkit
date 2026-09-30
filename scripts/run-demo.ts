@@ -182,16 +182,18 @@ async function gitSelftest(): Promise<number> {
 
   // 0(d2): stale writer dirties the worktree AFTER the keyed commit.
   await writeFile(join(lease.worktreePath, "src", "a.php"), "STALE WRITER JUNK\n");
-  const dirty = await isWorktreeClean(lease.worktreePath);
+  const clean = await isWorktreeClean(lease.worktreePath);
   const marker: CompletionMarker = {
     round: 1,
     disposition: `committed:${opId}`,
     content_hash: first.contentHash,
   };
+  // The marker is passed so this check exercises the marker-present reconcile
+  // branch (committed round + dirty worktree => restore from the keyed commit).
   const r1 = reconcile({
-    marker: undefined,
+    marker,
     keyed: keyedAgain,
-    worktree: { clean: dirty, commitObjectReadable: await commitObjectReadable(root, first.sha ?? "") },
+    worktree: { clean, commitObjectReadable: await commitObjectReadable(root, first.sha ?? "") },
   });
   await applyReconcile(lease, r1, keyedAgain);
   const cleanAfter = await isWorktreeClean(lease.worktreePath);
@@ -590,9 +592,13 @@ async function recoverPort(): Promise<number> {
 // CLI
 // ---------------------------------------------------------------------------
 
-function argValue(flag: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(flag);
-  return i >= 0 ? process.argv[i + 1] : fallback;
+export function argValue(
+  flag: string,
+  fallback?: string,
+  argv: readonly string[] = process.argv,
+): string | undefined {
+  const i = argv.indexOf(flag);
+  return i >= 0 ? argv[i + 1] : fallback;
 }
 
 /**
@@ -601,7 +607,7 @@ function argValue(flag: string, fallback?: string): string | undefined {
  * prep stub) — so the port loop ports the tests too and vitest verifies real
  * content. Any other value keeps the comma-split list behavior.
  */
-function expandFilesArg(value: string): string[] {
+export function expandFilesArg(value: string): string[] {
   const trimmed = value.trim();
   if (trimmed !== "creatorex") {
     return trimmed.split(",").map((s) => s.trim()).filter(Boolean);
@@ -780,9 +786,13 @@ async function main(): Promise<number> {
   }
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
-    console.error("[run-demo] fatal:", err);
-    process.exit(1);
-  });
+// Only run the CLI when executed directly; importing this module (tests, other
+// scripts) must neither run a subcommand nor exit the process.
+if (import.meta.main) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      console.error("[run-demo] fatal:", err);
+      process.exit(1);
+    });
+}
