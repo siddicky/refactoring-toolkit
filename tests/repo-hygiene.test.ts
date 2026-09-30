@@ -215,3 +215,42 @@ describe("C36: every bare import is a declared dependency", () => {
     expect(pkg.dependencies?.["@grpc/grpc-js"]).toBe(resolved);
   });
 });
+
+describe("C80: CI workflow", () => {
+  interface Step {
+    uses?: string;
+    run?: string;
+    with?: Record<string, string>;
+  }
+  interface Workflow {
+    on?: Record<string, unknown>;
+    permissions?: Record<string, string>;
+    jobs?: Record<string, { "runs-on"?: string; steps?: Step[] }>;
+  }
+
+  const path = join(ROOT, ".github/workflows/ci.yml");
+
+  test("exists and parses", () => {
+    expect(existsSync(path)).toBe(true);
+    expect(Bun.YAML.parse(readFileSync(path, "utf8"))).toBeObject();
+  });
+
+  test("runs install, typecheck and tests with the pinned Bun, read-only", () => {
+    const wf = Bun.YAML.parse(readFileSync(path, "utf8")) as Workflow;
+    expect(wf.permissions).toEqual({ contents: "read" });
+    expect(Object.keys(wf.on ?? {})).toEqual(expect.arrayContaining(["push", "pull_request"]));
+
+    const steps = Object.values(wf.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    expect(steps.some((s) => s.uses?.startsWith("actions/checkout@"))).toBe(true);
+
+    const setup = steps.find((s) => s.uses?.startsWith("oven-sh/setup-bun@"));
+    const pinned = readPackageJson().packageManager?.replace("bun@", "");
+    expect(setup?.with?.["bun-version"]).toBe(pinned ?? "missing");
+
+    const runs = steps.map((s) => s.run?.trim()).filter((r): r is string => r !== undefined);
+    const idx = (cmd: string) => runs.indexOf(cmd);
+    expect(idx("bun install --frozen-lockfile")).toBeGreaterThanOrEqual(0);
+    expect(idx("bun run typecheck")).toBeGreaterThan(idx("bun install --frozen-lockfile"));
+    expect(idx("bun test")).toBeGreaterThan(idx("bun install --frozen-lockfile"));
+  });
+});
