@@ -114,8 +114,13 @@ export interface QueueVerifyWatcherOptions {
   drainBacklog?: () => Promise<WatcherStreamEvent[]>;
   /** 60 s poll fallback probe (dexcli): true when queue-verify is active. */
   poll: () => Promise<boolean>;
-  /** The kill action. Called AT MOST once. */
-  fire: (trigger: { via: "stream" | "poll"; atUtc: string }) => Promise<void>;
+  /**
+   * The kill action. Called AT MOST once. Resolve `{ killed: false }` when the
+   * action ran but killed nothing (no live target): the watcher then reports
+   * outcome "no-op" instead of a successful kill (audit C71). Resolving void
+   * means the kill happened.
+   */
+  fire: (trigger: { via: "stream" | "poll"; atUtc: string }) => Promise<FireResult | void>;
   /** Flow terminal probe; "unknown" (query failure) never terminates. */
   flowStatus: () => Promise<"running" | "completed" | "failed" | "unknown">;
   /** Hard bound on the whole watch (production: 30 min). */
@@ -142,11 +147,24 @@ export interface QueueVerifyWatcherOptions {
   log?: (line: string) => void;
 }
 
+/** What the injected kill action reports back. */
+export interface FireResult {
+  /** False when the action ran but nothing was killed (no live target). */
+  killed: boolean;
+  /** Operator-facing detail, logged when nothing was killed. */
+  detail?: string;
+}
+
 export interface WatcherResult {
-  outcome: "fired" | "timeout" | "terminal";
-  /** Which source triggered the kill (absent unless outcome === "fired"). */
+  /**
+   * fired: the kill happened. no-op: a trigger was seen and the kill action
+   * ran, but it killed nothing (no live target PIDs). timeout / terminal: no
+   * trigger fired the kill.
+   */
+  outcome: "fired" | "no-op" | "timeout" | "terminal";
+  /** Which source triggered the kill action (absent for timeout/terminal). */
   via?: "stream" | "poll";
-  /** Number of kill firings — MUST be 1 when fired, 0 otherwise. */
+  /** Number of real kills — 1 only when outcome === "fired", 0 otherwise. */
   firings: number;
 }
 
@@ -177,7 +195,11 @@ export async function runQueueVerifyWatcher(
     }
     fired = true;
     log(`TRIGGER via ${via} — firing chaos kill`);
-    await options.fire({ via, atUtc: new Date().toISOString() });
+    const result = await options.fire({ via, atUtc: new Date().toISOString() });
+    if (result !== undefined && !result.killed) {
+      log(`trigger via ${via} seen but the kill was a NO-OP: ${result.detail ?? "nothing was killed"}`);
+      return { outcome: "no-op", via, firings: 0 };
+    }
     return { outcome: "fired", via, firings: 1 };
   };
 

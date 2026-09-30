@@ -11,6 +11,8 @@
  *   exit 1  flow reached COMPLETED/FAILED before the trigger (clean, no kill;
  *           this is the r1-review non-exiting-terminal-branch fix)
  *   exit 2  30-minute bound elapsed without trigger
+ *   exit 3  trigger seen but the kill was a NO-OP (no live target PIDs; the
+ *           sidecar's completed record says fired:false)
  *
  * Event visibility note: the envelope factory publishes the stream message
  * the moment PpQueueVerify STARTS — before any durable attribute could exist
@@ -215,7 +217,7 @@ async function main(): Promise<number> {
       fire: async ({ via }) => {
         const pids = await targetPids();
         log(`kill via ${via}: pids=${pids.join(",") || "none"} events=${eventsPath} run=${runId} flow=${flowId}`);
-        await chaosKill({
+        const kill = await chaosKill({
           pids,
           reason: `US-007 stream watcher: pp-queue-verify start (via ${via})`,
           runId,
@@ -223,6 +225,10 @@ async function main(): Promise<number> {
           flowRunId: flowId,
           waitMs: 5_000,
         });
+        return {
+          killed: kill.fired,
+          detail: `no live target PID (pgrep found ${pids.length}); sidecar records fired=false`,
+        };
       },
       log,
     });
@@ -230,6 +236,10 @@ async function main(): Promise<number> {
     if (result.outcome === "fired") {
       log(`done: kill fired once via ${result.via}`);
       return 0;
+    }
+    if (result.outcome === "no-op") {
+      log(`done: trigger seen via ${result.via} but NO kill happened (no live target PIDs)`);
+      return 3;
     }
     if (result.outcome === "terminal") {
       log("done: flow terminal before trigger");
