@@ -36,9 +36,39 @@ export const sessionFenceMap = new AttributeMap<SessionFence>(
   jsonCodec<SessionFence>(),
 );
 
+/** Every session the toolkit creates carries this title prefix (fence label). */
+export const PORTING_KIT_LABEL_PREFIX = "porting-kit:";
+
 /** AttributeMap instance keys prohibit `/`, so file paths are sanitized. */
 export function fenceLabel(file: string, round: number, epoch: number): string {
-  return `porting-kit:${file.replace(/\//g, "__")}#${round}#${epoch}`;
+  return `${PORTING_KIT_LABEL_PREFIX}${file.replace(/\//g, "__")}#${round}#${epoch}`;
+}
+
+/**
+ * Inverse of {@link fenceLabel}: `porting-kit:<file>#<round>#<epoch>` ->
+ * its parts, or null when the title is not a well-formed fence label. The
+ * `<file>` part is greedy so a `#` inside a file name cannot steal the
+ * trailing round/epoch segments.
+ */
+export function parseFenceLabel(
+  title: string,
+): { file: string; round: number; epoch: number } | null {
+  if (!title.startsWith(PORTING_KIT_LABEL_PREFIX)) return null;
+  const m = /^(.*)#(\d+)#(\d+)$/.exec(title.slice(PORTING_KIT_LABEL_PREFIX.length));
+  if (m === null) return null;
+  return { file: m[1] as string, round: Number(m[2]), epoch: Number(m[3]) };
+}
+
+/**
+ * Recovery fence predicate: true for a session the toolkit created
+ * (`porting-kit:` prefix) that does not belong to `epoch`. The epoch is the
+ * parsed label segment compared exactly — never a substring test, which also
+ * matched the round segment and longer epochs.
+ */
+export function isStaleToolkitSession(title: string, epoch: number): boolean {
+  if (!title.startsWith(PORTING_KIT_LABEL_PREFIX)) return false;
+  const parsed = parseFenceLabel(title);
+  return parsed === null || parsed.epoch !== epoch;
 }
 
 // ---------------------------------------------------------------------------
@@ -417,12 +447,17 @@ export class OpencodeHarness {
   }
 
   /**
-   * Enumeration fallback (plan §Session fencing): abort every session whose
-   * title is not tagged with the current epoch. Returns the aborted IDs.
+   * Enumeration fallback (plan §Session fencing): abort every TOOLKIT session
+   * (title prefix `porting-kit:`) that is not tagged with the current epoch.
+   * The epoch is the parsed trailing segment of the fence label, compared
+   * exactly; a toolkit-prefixed title with no parseable epoch (for example the
+   * `porting-kit:agent-roundtrip` evidence session) cannot be current, so it
+   * is foreign too. Sessions without the prefix are not the toolkit's and are
+   * left alone. Returns the aborted IDs.
    */
   async abortSessionsNotTagged(epoch: number): Promise<string[]> {
     const sessions = await this.listSessions();
-    const foreign = sessions.filter((s) => !s.title.includes(`#${epoch}`));
+    const foreign = sessions.filter((s) => isStaleToolkitSession(s.title, epoch));
     const aborted: string[] = [];
     for (const s of foreign) {
       if (await this.abortAndConfirm(s.id)) aborted.push(s.id);
