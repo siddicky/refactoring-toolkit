@@ -13,10 +13,10 @@
  *   `pp-jev-usage/*` (live TypeSafe Jev spend — reported as its own
  *   "judgment (Jev)" line, never folded into the model-calling totals);
  * - `dexcli flow history <flowId>` (typed dispatch anchoring);
+ * - `dexcli flow summary <flowId>` (run ids + flowStatus; fetched once);
  * - optional chaos sidecar (JSON lines, intent/completed records) merged into
  *   the renderer's KillEventsFile shape (`resumed` is supplied by this driver
- *   from the flow's terminal status: a kill + a completed terminal state means
- *   the run resumed).
+ *   per kill: the flow completed, or an envelope started after the kill).
  *
  * Pure render via src/metrics/render.ts (renderReport); this script only
  * adapts wire shapes and writes metrics/report.md + metrics/report.json.
@@ -32,9 +32,12 @@ import {
   collectJevUsage,
   collectTombstones,
   collectVerdicts,
+  type FlowFacts,
+  flowFactsFromSummary,
+  type FlowSummaryWire,
   type StateAttribute,
 } from "../src/metrics/collect.js";
-import { loadKillEvents, withResumed } from "../src/metrics/kill-events.js";
+import { loadKillEvents, resumedAfterKill, withResumed } from "../src/metrics/kill-events.js";
 import { renderReport } from "../src/metrics/render.js";
 import type {
   EnvelopeEvent,
@@ -45,10 +48,8 @@ import type {
 } from "../src/metrics/types.js";
 import type { DispatchHistory } from "../src/metrics/dispatch-anchor.js";
 
+/** `dexcli flow state` wire: attributes only (run ids / status live on `flow summary`). */
 interface FlowState {
-  flowId?: string;
-  runId?: string;
-  flowStatus?: string;
   attributes?: StateAttribute[];
 }
 
@@ -65,34 +66,20 @@ function runDexcli(args: string[]): unknown {
   return JSON.parse(stdout);
 }
 
-interface FlowSummary {
-  flowId?: string;
-  runId?: string;
-  firstRunId?: string;
-  flowStatus?: string;
-}
-
 /**
- * Merged dispatch history across ALL runs of the flow: a continue-as-new flow
- * (dex housekeeping at its event threshold) accumulates envelopes across runs
- * while `flow history` returns one run at a time — the anchor needs every
- * run's dispatch entries or first-run envelopes fail as anchorless.
+ * Dispatch history of the flow's FIRST and CURRENT run (from `flow summary`):
+ * a continue-as-new flow (dex housekeeping at its event threshold) accumulates
+ * envelopes across runs while `flow history` returns one run at a time — the
+ * anchor needs both runs' dispatch entries or first-run envelopes fail as
+ * anchorless. `dexcli flow summary` exposes no run chain, so a flow with three
+ * or more runs is not fully covered (the middle runs are not enumerable).
  */
-function mergedHistory(flowId: string): DispatchHistory {
-  // firstRunId lives on the summary surface, not on flow state.
-  const summary = runDexcli(["flow", "summary", flowId]) as FlowSummary;
-  const runIds = [...new Set([summary.firstRunId, summary.runId].filter(
-    (r): r is string => typeof r === "string" && r.length > 0,
-  ))];
-  const events = runIds.flatMap((rid) => {
-    const h = runDexcli(["flow", "history", flowId, "-run-id", rid, "-all"]) as DispatchHistory;
+function mergedHistory(facts: FlowFacts): DispatchHistory {
+  const events = facts.runIds.flatMap((rid) => {
+    const h = runDexcli(["flow", "history", facts.flowId, "-run-id", rid, "-all"]) as DispatchHistory;
     return h.events ?? [];
   });
-  return {
-    flowId: summary.flowId ?? flowId,
-    ...(summary.runId !== undefined ? { runId: summary.runId } : {}),
-    events,
-  };
+  return { flowId: facts.flowId, runId: facts.runId, events };
 }
 
 async function main(): Promise<number> {
@@ -110,10 +97,13 @@ async function main(): Promise<number> {
   const outDir = argValue("--out-dir") ?? "metrics";
   const generatedAt = argValue("--generated-at") ?? new Date().toISOString();
 
-  const state = runDexcli(["flow", "state", flowId]) as FlowState & FlowSummary;
-  const runId = state.runId ?? flowId;
+  // flowStatus / runId / firstRunId come from ONE `flow summary` call; the
+  // `flow state` payload only carries the attribute store.
+  const facts = flowFactsFromSummary(flowId, runDexcli(["flow", "summary", flowId]) as FlowSummaryWire);
+  const state = runDexcli(["flow", "state", flowId]) as FlowState;
+  const runId = facts.runId;
   const attrs = state.attributes ?? [];
-  const flowCompleted = state.flowStatus === "FLOW_STATUS_COMPLETED";
+  const flowCompleted = facts.flowCompleted;
 
   // Parallel topology (v1.1): child flows are published by the parent under
   // `pp-wave-children/children` — but that attribute is OVERWRITTEN on every wave, so
@@ -164,23 +154,23 @@ async function main(): Promise<number> {
     jevUsage.push(...collectJevUsage(s.attributes ?? []));
   }
 
-  const history = mergedHistory(flowId);
+  const history = mergedHistory(facts);
   for (const id of childIds) {
     const h = runDexcli(["flow", "history", id, "-all"]) as DispatchHistory;
     history.events.push(...(h.events ?? []));
   }
   // Contract B: one sidecar parser; only this flow's kills (run id, flow id)
   // are attributed to it; malformed lines are reported, not dropped.
-  const runIds = [...new Set([runId, flowId])];
+  const runIds = [...new Set([...facts.runIds, flowId])];
   const loaded = loadKillEvents({
     explicitPath: killEventsPath,
     matchIds: runIds,
     allRuns: process.argv.includes("--all-runs"),
     runId,
   });
-  // "resumed" is a post-kill fact this driver supplies from the flow's
-  // terminal status (kill + completed terminal path = resumed).
-  const killEvents = withResumed(loaded.file, () => flowCompleted);
+  // "resumed" is a post-kill fact this driver supplies per kill: the flow
+  // completed, or an envelope started after the kill.
+  const killEvents = withResumed(loaded.file, (c) => resumedAfterKill(c.utc, envelopes, flowCompleted));
 
   const report = renderReport({
     envelopes,

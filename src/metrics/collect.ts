@@ -198,3 +198,44 @@ export function collectJevUsage(attrs: readonly StateAttribute[]): JevUsageEntry
   }
   return out.sort((p, q) => p.atUtc.localeCompare(q.atUtc));
 }
+
+/**
+ * `dexcli flow summary` wire subset. flowStatus / runId / firstRunId live on
+ * the SUMMARY surface only: the `flow state` payload carries just
+ * `activeStepExecutions` and `attributes` (src/dashboard/types.ts).
+ */
+export interface FlowSummaryWire {
+  flowId?: string;
+  runId?: string;
+  firstRunId?: string;
+  flowStatus?: string;
+}
+
+export const FLOW_STATUS_COMPLETED = "FLOW_STATUS_COMPLETED";
+
+/** Flow-level facts derived from one `flow summary` payload. */
+export interface FlowFacts {
+  flowId: string;
+  /** Current run id (falls back to the flow id when the summary has none). */
+  runId: string;
+  /** firstRunId and runId, de-duplicated (the runs whose history is fetched). */
+  runIds: string[];
+  flowCompleted: boolean;
+}
+
+export function flowFactsFromSummary(flowId: string, summary: FlowSummaryWire): FlowFacts {
+  const runIds = [
+    ...new Set(
+      [summary.firstRunId, summary.runId].filter(
+        (r): r is string => typeof r === "string" && r.length > 0,
+      ),
+    ),
+  ];
+  return {
+    flowId: summary.flowId ?? flowId,
+    runId:
+      typeof summary.runId === "string" && summary.runId.length > 0 ? summary.runId : flowId,
+    runIds,
+    flowCompleted: summary.flowStatus === FLOW_STATUS_COMPLETED,
+  };
+}

@@ -5,6 +5,7 @@ import {
   collectJevUsage,
   collectTombstones,
   collectVerdicts,
+  flowFactsFromSummary,
   type StateAttribute,
 } from "./collect.js";
 
@@ -160,5 +161,44 @@ describe("collectJevUsage (pp-jev-usage attribute)", () => {
 
   test("no usage attribute yields an empty list", () => {
     expect(collectJevUsage([])).toEqual([]);
+  });
+});
+
+describe("flowFactsFromSummary (run ids and terminal status come from `flow summary`)", () => {
+  test("a completed, resumed flow reads as completed from its summary", () => {
+    // `dexcli flow summary` shape; the `flow state` payload has none of these fields.
+    const summary = {
+      flowId: "port-cx5e",
+      runId: "9f4c5bd4",
+      firstRunId: "01a0e1ea",
+      flowStatus: "FLOW_STATUS_COMPLETED",
+    };
+    expect(flowFactsFromSummary("port-cx5e", summary)).toEqual({
+      flowId: "port-cx5e",
+      runId: "9f4c5bd4",
+      runIds: ["01a0e1ea", "9f4c5bd4"],
+      flowCompleted: true,
+    });
+  });
+
+  test("a failed or running flow is not completed; identical first/current run ids de-duplicate", () => {
+    const failed = flowFactsFromSummary("f", { runId: "r1", firstRunId: "r1", flowStatus: "FLOW_STATUS_FAILED" });
+    expect(failed.flowCompleted).toBe(false);
+    expect(failed.runIds).toEqual(["r1"]);
+    expect(flowFactsFromSummary("f", { runId: "r1" }).flowCompleted).toBe(false);
+  });
+
+  test("an empty summary falls back to the flow id and fetches no run history", () => {
+    expect(flowFactsFromSummary("only-flow", {})).toEqual({
+      flowId: "only-flow",
+      runId: "only-flow",
+      runIds: [],
+      flowCompleted: false,
+    });
+  });
+
+  test("a flow-state-shaped payload (attributes only) can never read as completed", () => {
+    const statePayload = { attributes: [], activeStepExecutions: [] } as unknown as Parameters<typeof flowFactsFromSummary>[1];
+    expect(flowFactsFromSummary("f", statePayload).flowCompleted).toBe(false);
   });
 });

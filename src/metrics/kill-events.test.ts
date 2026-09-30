@@ -9,10 +9,11 @@ import {
   killEventDiagnosticsOf,
   loadKillEvents,
   parseKillEvents,
+  resumedAfterKill,
   withResumed,
 } from "./kill-events.js";
 import { renderReport } from "./render.js";
-import type { KillEventsFile } from "./types.js";
+import type { EnvelopeEvent, KillEventsFile } from "./types.js";
 import killARaw from "./fixtures/kill-events-run-a.json" with { type: "json" };
 
 const tmp = mkdtempSync(join(tmpdir(), "kill-events-test-"));
@@ -269,5 +270,34 @@ describe("report rendering of kill evidence", () => {
       killEventDiagnostics: { malformed_lines: 0, malformed_examples: [], excluded_events: 4 },
     });
     expect(rendered.markdown).toContain("4 event(s) excluded — anchored to a different run than this flow");
+  });
+});
+
+describe("resumedAfterKill (per-kill resume evidence, C39)", () => {
+  const env = (started_at: string): EnvelopeEvent => ({
+    stepId: "pp-review-a",
+    role: "review",
+    file: null,
+    round: 1,
+    attempt: 1,
+    started_at,
+    ended_at: null,
+    outcome: "completed",
+    tokens: 1,
+    wall_clock_ms: 1,
+    identity: "src__a.php#1",
+  });
+
+  test("a flow that completed resumed (survived the kill)", () => {
+    expect(resumedAfterKill("2026-09-26T10:00:00Z", [], true)).toBe(true);
+  });
+
+  test("a flow that did not complete but ran an envelope after the kill still resumed", () => {
+    expect(resumedAfterKill("2026-09-26T10:00:00Z", [env("2026-09-26T10:00:05Z")], false)).toBe(true);
+  });
+
+  test("a failed flow whose last envelope predates the kill did not resume", () => {
+    expect(resumedAfterKill("2026-09-26T10:00:00Z", [env("2026-09-26T09:59:00Z")], false)).toBe(false);
+    expect(resumedAfterKill("not-a-date", [env("2026-09-26T10:00:05Z")], false)).toBe(false);
   });
 });

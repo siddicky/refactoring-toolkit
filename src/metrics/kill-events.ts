@@ -24,7 +24,13 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 
-import { isFiredKill, type KillEventDiagnostics, type KillEventsFile, type ReportKillEvent } from "./types.js";
+import {
+  type EnvelopeEvent,
+  isFiredKill,
+  type KillEventDiagnostics,
+  type KillEventsFile,
+  type ReportKillEvent,
+} from "./types.js";
 
 export { isFiredKill };
 
@@ -276,4 +282,24 @@ export function withResumed(
       e.kind === "kill-completed" && isFiredKill(e) ? { ...e, resumed: resumedFor(e) } : e,
     ),
   };
+}
+
+/**
+ * Did the run resume after a kill completed at `killUtc`? True when the flow
+ * reached FLOW_STATUS_COMPLETED (it survived the kill) or when any envelope
+ * started AFTER the kill (post-kill work is direct evidence, and also covers a
+ * flow that resumed and later failed).
+ */
+export function resumedAfterKill(
+  killUtc: string,
+  envelopes: readonly EnvelopeEvent[],
+  flowCompleted: boolean,
+): boolean {
+  if (flowCompleted) return true;
+  const killed = Date.parse(killUtc);
+  if (Number.isNaN(killed)) return false;
+  return envelopes.some((e) => {
+    const started = Date.parse(e.started_at);
+    return !Number.isNaN(started) && started > killed;
+  });
 }
