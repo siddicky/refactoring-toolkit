@@ -40,6 +40,7 @@ import {
   OpencodeHarness,
   type AgentSessionClient,
 } from "../src/harness/opencode.js";
+import { describeHarness, selectHarness } from "../src/harness/select.js";
 import {
   InMemoryLeaseStore,
   WorktreePool,
@@ -107,23 +108,26 @@ class StubHarness implements AgentSessionClient {
   }
 }
 
+/**
+ * `--harness stub|opencode|auto` (absent = auto; anything else is rejected):
+ * stub = the labelled test double; opencode = the real harness, FAILS when
+ * the server does not answer; auto = the real harness when the server answers,
+ * otherwise a loud warning and the stub. Reachability is probed
+ * (src/harness/select.ts) because connect() performs no I/O.
+ */
 async function pickHarness(name: string | undefined): Promise<AgentSessionClient> {
-  if (name === "stub") return new StubHarness();
-  const baseUrl = process.env.OPENCODE_BASE_URL?.trim() || undefined;
-  try {
-    return await OpencodeHarness.connect(
-      baseUrl,
+  return selectHarness({
+    choice: name,
+    baseUrl: process.env.OPENCODE_BASE_URL?.trim() || undefined,
+    model:
       process.env.OPENCODE_MODEL_PROVIDER && process.env.OPENCODE_MODEL_ID
         ? {
             providerID: process.env.OPENCODE_MODEL_PROVIDER,
             modelID: process.env.OPENCODE_MODEL_ID,
           }
         : undefined,
-    );
-  } catch (err) {
-    console.error(`[run-demo] opencode harness unavailable (${(err as Error).message}); falling back to StubHarness (labeled test double)`);
-    return new StubHarness();
-  }
+    makeStub: () => new StubHarness(),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +691,7 @@ async function main(): Promise<number> {
             );
           });
       });
-      console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${argValue("--harness") ?? "auto"} flows=${argValue("--flows") ?? "probe"}`);
+      console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${describeHarness(harness)} (requested=${argValue("--harness") ?? "auto"}) flows=${argValue("--flows") ?? "probe"}`);
       await new Promise(() => {}); // run until killed
       return 0;
     }

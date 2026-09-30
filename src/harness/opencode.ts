@@ -262,6 +262,12 @@ export interface SessionRef {
 
 export const DEFAULT_OPENCODE_BASE_URL = "http://127.0.0.1:4096";
 
+/** How long probe() waits for the server to answer `session.list`. */
+export const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
+
+/** Outcome of {@link OpencodeHarness.probe}: reachable, or why not. */
+export type ProbeResult = { ok: true } | { ok: false; reason: string };
+
 /**
  * Structural interface used by durable agent steps, so flows can run against
  * the real harness or an explicit test double (never silently).
@@ -307,6 +313,46 @@ export class OpencodeHarness {
     const client = createOpencodeClient({ baseUrl } as never);
     const defaultAgent = readEnvVar("OPENCODE_AGENT");
     return new OpencodeHarness(client, model, defaultAgent, { baseUrl });
+  }
+
+  /**
+   * Reachability check: one `session.list` against the server, bounded by
+   * `timeoutMs`. connect() builds a client without touching the network, so
+   * this is the only way to learn that the server answers. Never throws: a
+   * connection error, a non-2xx answer, an unexpected payload and a hang are
+   * all reported as `{ ok: false, reason }`.
+   */
+  async probe(timeoutMs: number = DEFAULT_PROBE_TIMEOUT_MS): Promise<ProbeResult> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<ProbeResult>((resolve) => {
+      timer = setTimeout(
+        () => resolve({ ok: false, reason: `no response to session.list within ${timeoutMs}ms` }),
+        timeoutMs,
+      );
+      void (timer as unknown as { unref?: () => void }).unref?.();
+    });
+    const answered = (async (): Promise<ProbeResult> => {
+      try {
+        const res = (await this.#client.session.list()) as
+          | { data?: unknown; error?: unknown; response?: { status?: number } }
+          | undefined;
+        if (res?.error !== undefined) {
+          const status = res.response?.status;
+          return { ok: false, reason: `server answered ${status === undefined ? "with an error" : `HTTP ${status}`}` };
+        }
+        if (!Array.isArray(unwrap(res))) {
+          return { ok: false, reason: "session.list did not return a session array (not an opencode server?)" };
+        }
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+      }
+    })();
+    try {
+      return await Promise.race([answered, timedOut]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Creates a session with an epoch-tagged label as its title (fencing tag). */
