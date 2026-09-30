@@ -313,6 +313,117 @@ describe("stream feed conversion + AC-D end-to-end (/api/state payload)", () => 
 });
 
 // ---------------------------------------------------------------------------
+// C52: stream messages are UPSERTS (start row -> completion row)
+// ---------------------------------------------------------------------------
+
+describe("C52: stream start + completion upsert (the feed never sticks on the in-flight row)", () => {
+  const reviewStart = {
+    stepId: "pp-review-a",
+    role: "review",
+    file: null,
+    round: null,
+    attempt: 1,
+    started_at: "2026-09-27T01:10:00.000Z",
+    ended_at: null,
+    outcome: "interrupted",
+    tokens: null,
+    wall_clock_ms: null,
+    identity: null,
+  };
+  const reviewDone = {
+    ...reviewStart,
+    ended_at: "2026-09-27T01:12:00.000Z",
+    outcome: "completed",
+    tokens: 4_321,
+    wall_clock_ms: 120_000,
+  };
+  const message = (event: Record<string, unknown>): StreamEventMessage =>
+    streamMessage({ eventKey: "pp-review-a#1", event });
+
+  function feedFor(input: {
+    states?: Record<string, { activeStepExecutions: []; attributes: Array<{ key: string; value: unknown }> }>;
+    histories?: Record<string, import("../src/dashboard/types.js").DexHistoryWire>;
+    streamFeed: StreamEventMessage[];
+  }) {
+    return buildDashboardState({
+      now: "2026-09-27T01:13:00.000Z",
+      dex: {
+        available: true,
+        error: null,
+        detail: "dexcli@test",
+        flows: [flowSummary("cx-7")],
+        states: input.states ?? {},
+        histories: input.histories ?? {},
+      },
+      git: { available: false, error: null, repoRoot: "/tmp/pk-cx7", commits: [], worktrees: [] },
+      killEvents: { available: false, error: null, filesScanned: [], events: [] },
+      burnDownFiles: [],
+      streamFeed: input.streamFeed,
+      feedLimit: 80,
+      commitLimit: 40,
+    }).feed;
+  }
+
+  test("a stream start followed by its completion yields ONE completed row", () => {
+    const feed = feedFor({ streamFeed: [message(reviewStart), message(reviewDone)] });
+    expect(feed).toHaveLength(1);
+    expect(feed[0]).toMatchObject({ outcome: "completed", tokens: 4_321, wallClockMs: 120_000 });
+    expect(feed[0]?.endedAt).toBe("2026-09-27T01:12:00.000Z");
+  });
+
+  test("a polled in-flight row is replaced by the stream completion (file/round from the poll survive)", () => {
+    const feed = feedFor({
+      states: { "cx-7": { activeStepExecutions: [], attributes: [{ key: "envelope-event/pp-review-a#1", value: reviewStart }] } },
+      histories: {
+        "cx-7": {
+          flowId: "cx-7",
+          runId: "run-cx-7",
+          events: [
+            {
+              eventId: "1",
+              eventTime: "2026-09-27T01:09:00.000Z",
+              type: "StepExecuteCompleted",
+              payload: {
+                output: {
+                  stepDecision: {
+                    nextSteps: [{ stepType: "PpReviewA", stepInput: { file: "src/A.php", round: 2, epoch: 1 } }],
+                  },
+                  upsertAttributes: [],
+                },
+              },
+            },
+            {
+              eventId: "2",
+              eventTime: "2026-09-27T01:10:01.000Z",
+              type: "StepExecuteCompleted",
+              payload: { output: { upsertAttributes: [{ key: "envelope-event/pp-review-a#1", value: reviewStart }] } },
+            },
+          ],
+        },
+      },
+      streamFeed: [message(reviewDone)],
+    });
+    expect(feed).toHaveLength(1);
+    expect(feed[0]).toMatchObject({ outcome: "completed", tokens: 4_321, file: "src/A.php", round: 2 });
+  });
+
+  test("a polled completed row is never overwritten by a late stream start", () => {
+    const feed = feedFor({
+      states: { "cx-7": { activeStepExecutions: [], attributes: [{ key: "envelope-event/pp-review-a#1", value: reviewDone }] } },
+      streamFeed: [message(reviewStart)],
+    });
+    expect(feed).toHaveLength(1);
+    expect(feed[0]).toMatchObject({ outcome: "completed", tokens: 4_321 });
+  });
+
+  test("a completion is not downgraded by a later-delivered start in the same stream buffer", () => {
+    const feed = feedFor({ streamFeed: [message(reviewDone), message(reviewStart)] });
+    expect(feed).toHaveLength(1);
+    expect(feed[0]?.outcome).toBe("completed");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Projection-only boundary (streams are never read by control flow)
 // ---------------------------------------------------------------------------
 

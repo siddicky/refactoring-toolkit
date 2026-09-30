@@ -958,19 +958,44 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     feed.push(...flowFeed);
   }
   // US-007: merge stream-delivered events (subscriber receipt) into the feed.
-  // Same dedup key as the state-fallback merge so an event that BOTH the
-  // stream and a poll delivered appears once; events for flows outside the
-  // selection still render (their flowId rides the entry).
+  // Stream messages are UPSERTS: an envelope's start and completion events
+  // share one key (flowId#stepId#attempt#startedAt), so the merge keeps the
+  // most complete row instead of the first one seen (C52). An event that BOTH
+  // the stream and a poll delivered still appears once; events for flows
+  // outside the selection still render (their flowId rides the entry).
   if (input.streamFeed !== undefined && input.streamFeed.length > 0) {
-    const streamEntries = feedFromStreamMessages(input.streamFeed);
-    const seenStream = new Set(feed.map((e) => `${e.flowId}#${e.stepId}#${e.attempt}#${e.startedAt}`));
-    for (const entry of streamEntries) {
-      const key = `${entry.flowId}#${entry.stepId}#${entry.attempt}#${entry.startedAt}`;
-      if (!seenStream.has(key)) {
+    const keyOf = (e: FeedEntry) => `${e.flowId}#${e.stepId}#${e.attempt}#${e.startedAt}`;
+    const existingByKey = new Map<string, FeedEntry>();
+    for (const e of feed) if (!existingByKey.has(keyOf(e))) existingByKey.set(keyOf(e), e);
+    const streamOwned = new Set<FeedEntry>();
+    for (const entry of feedFromStreamMessages(input.streamFeed)) {
+      const key = keyOf(entry);
+      const existing = existingByKey.get(key);
+      if (existing === undefined) {
         feed.push(entry);
-        seenStream.add(key);
+        existingByKey.set(key, entry);
+        streamOwned.add(entry);
         feedByFlow.get(entry.flowId)?.push(entry);
+        continue;
       }
+      // Completion beats in-flight. Between two stream messages the later one
+      // wins (upsert); a stream message never displaces a durable polled row
+      // of equal completeness (the poll is the source of truth).
+      const nextDone = entry.endedAt !== null;
+      const existingDone = existing.endedAt !== null;
+      const replace = streamOwned.has(existing) ? nextDone || !existingDone : nextDone && !existingDone;
+      if (!replace) continue;
+      const merged: FeedEntry = {
+        ...entry,
+        file: entry.file ?? existing.file,
+        round: entry.round ?? existing.round,
+      };
+      feed[feed.indexOf(existing)] = merged;
+      const flowList = feedByFlow.get(entry.flowId);
+      const at = flowList?.indexOf(existing) ?? -1;
+      if (flowList !== undefined && at >= 0) flowList[at] = merged;
+      existingByKey.set(key, merged);
+      streamOwned.add(merged);
     }
   }
   feed.sort((a, b) => tsMs(b.ts) - tsMs(a.ts));
