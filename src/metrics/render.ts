@@ -93,6 +93,11 @@ export interface MetricsRenderInput {
    * failures join the provenance failures.
    */
   history?: DispatchHistory | null;
+  /**
+   * Render PRE-identityOf evidence (cx-5e style flow-keyed envelopes for
+   * per-file steps) with the lossy legacy anchoring. Default false.
+   */
+  legacyFlowKeyedEnvelopes?: boolean;
   /** Optional UTC ISO-8601 stamp for the report header (supplied by the caller). */
   generatedAt?: string;
 }
@@ -311,12 +316,17 @@ export function runProvenanceCrossCheck(input: {
   envelopes: readonly EnvelopeEvent[];
   history: DispatchHistory;
   requireStartMarkers?: boolean;
+  /** Accept the lossy cx-5e flow-keyed anchoring (old evidence only; default off). */
+  legacyFlowKeyedEnvelopes?: boolean;
 }): ProvenanceCrossCheck {
   const envelopeFailures = validateProvenance(input.envelopes);
   const cross = anchorForRun(input.history, input.envelopes, {
     ...(input.requireStartMarkers === undefined
       ? {}
       : { requireStartMarkers: input.requireStartMarkers }),
+    ...(input.legacyFlowKeyedEnvelopes === undefined
+      ? {}
+      : { legacyFlowKeyedEnvelopes: input.legacyFlowKeyedEnvelopes }),
   });
   const failures = [...envelopeFailures, ...cross.failures].sort((a, b) =>
     a < b ? -1 : a > b ? 1 : 0,
@@ -1089,7 +1099,13 @@ export function renderReport(input: MetricsRenderInput): RenderedReport {
   const cross =
     input.history === undefined || input.history === null
       ? null
-      : runProvenanceCrossCheck({ envelopes: input.envelopes, history: input.history });
+      : runProvenanceCrossCheck({
+          envelopes: input.envelopes,
+          history: input.history,
+          ...(input.legacyFlowKeyedEnvelopes === undefined
+            ? {}
+            : { legacyFlowKeyedEnvelopes: input.legacyFlowKeyedEnvelopes }),
+        });
   const json = buildReportJson(input, cross);
   return { markdown: renderMarkdown(json), json };
 }

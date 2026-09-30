@@ -3,6 +3,7 @@
  * evidence from the read-only dex surfaces and renders the metrics report.
  *
  *   bun scripts/render-metrics.ts --flow-id <id> [--kill-events|--events <jsonl>] [--all-runs] \
+ *     [--legacy-flow-keyed-envelopes] \
  *     [--out-dir metrics] [--generated-at <utc-iso>]
  *
  * dexcli is resolved like every other dex caller: DEXCLI_BIN (default
@@ -131,7 +132,7 @@ async function main(argv: readonly string[]): Promise<number> {
   const argValue = (flag: string): string | undefined => argValueFrom(argv, flag);
   const flowId = argValue("--flow-id");
   if (flowId === undefined) {
-    console.error("usage: render-metrics.ts --flow-id <id> [--kill-events|--events <jsonl>] [--all-runs] [--out-dir metrics] [--generated-at <iso>]");
+    console.error("usage: render-metrics.ts --flow-id <id> [--kill-events|--events <jsonl>] [--all-runs] [--legacy-flow-keyed-envelopes] [--out-dir metrics] [--generated-at <iso>]");
     return 2;
   }
   // `--events` is the flag name chaos-kill / watch-queue-verify use.
@@ -195,6 +196,8 @@ async function main(argv: readonly string[]): Promise<number> {
     ...(killEvents !== null ? { killEvents } : {}),
     killEventDiagnostics: loaded.diagnostics,
     history,
+    // Old (pre-identityOf, cx-5e style) evidence only; strict anchoring otherwise.
+    ...(argv.includes("--legacy-flow-keyed-envelopes") ? { legacyFlowKeyedEnvelopes: true } : {}),
     generatedAt,
   });
 

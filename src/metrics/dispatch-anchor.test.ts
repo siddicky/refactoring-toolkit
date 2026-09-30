@@ -13,6 +13,7 @@ import {
   type DispatchEntry,
   type DispatchHistory,
 } from "./dispatch-anchor.js";
+import { renderReport } from "./render.js";
 import { type EnvelopeEvent } from "./types.js";
 import historyARaw from "./fixtures/dex-history-run-a.json" with { type: "json" };
 import runAEnvelopesRaw from "./fixtures/event-stream-run-a.json" with { type: "json" };
@@ -460,5 +461,91 @@ describe("extractDispatchEntries dedupes multi-event executions (C47)", () => {
     ]);
     expect(cross.anchor.dispatch_entries_total).toBe(2);
     expect(cross.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C44: the cx-5e flow-keyed accommodation is legacy scaffolding, off by default.
+// ---------------------------------------------------------------------------
+
+describe("anchorDispatch flow-keyed accommodation (legacyFlowKeyedEnvelopes, C44)", () => {
+  const leaseEnv = (attempt: number, identity: string | null) =>
+    envelope({ stepId: "pp-child-lease", role: "record", attempt, identity });
+  const A = "src__A.php#1";
+  const B = "src__B.php#1";
+  const C = "src__C.php#1";
+
+  test("identity-keyed envelopes anchor per child: A attempt 2 and B attempt 1 pass in strict mode", () => {
+    const result = anchorDispatch(
+      [leaseEnv(2, A), leaseEnv(1, B)],
+      [entry("PpChildLease", 2, A), entry("PpChildLease", 1, B)],
+    );
+    expect(result.ok).toBe(true);
+    expect(result.failures).toEqual([]);
+  });
+
+  test("two flow-keyed envelopes no longer collapse into one MAX-attempt group that is compared to every child", () => {
+    const envelopes = [leaseEnv(2, null), leaseEnv(1, null)];
+    const entries = [entry("PpChildLease", 2, A), entry("PpChildLease", 1, B)];
+    // Legacy: the collapsed MAX attempt 2 is compared to B's finalAttempt 1 -> a FALSE failure
+    // for an otherwise consistent pair of children.
+    const legacy = anchorDispatch(envelopes, entries, { legacyFlowKeyedEnvelopes: true });
+    expect(legacy.failures.join("\n")).toContain(
+      "envelope pp-child-lease (src__B.php#1) attempt 2 exceeds max dispatched finalAttempt 1",
+    );
+    // Strict: flow-keyed evidence for identity-bearing dispatches is reported as unanchored, not misjudged.
+    const strict = anchorDispatch(envelopes, entries);
+    expect(strict.ok).toBe(false);
+    expect(strict.failures.join("\n")).toContain("envelope pp-child-lease (<flow-level>) has no dispatch entry of type PpChildLease");
+    expect(strict.failures.join("\n")).not.toContain("exceeds max dispatched finalAttempt");
+  });
+
+  test("one flow-keyed envelope cannot vouch for three children (legacy false pass becomes a strict failure)", () => {
+    const envelopes = [leaseEnv(1, null)];
+    const entries = [entry("PpChildLease", 1, A), entry("PpChildLease", 1, B), entry("PpChildLease", 1, C)];
+    expect(anchorDispatch(envelopes, entries, { legacyFlowKeyedEnvelopes: true }).ok).toBe(true);
+    const strict = anchorDispatch(envelopes, entries);
+    expect(strict.ok).toBe(false);
+    const text = strict.failures.join("\n");
+    for (const id of [A, B, C]) {
+      expect(text).toContain(`dispatch entry(ies) of type PpChildLease (${id}) reached finalAttempt 1 with no matching envelope`);
+    }
+  });
+
+  test("a flow-keyed completion envelope no longer borrows an identity-bearing start marker (M4) in strict mode", () => {
+    const marker = envelope({ stepId: "pp-implement", role: "agent", attempt: 0, outcome: "interrupted", ended_at: null, wall_clock_ms: null, identity: A });
+    const completion = envelope({ stepId: "pp-implement", role: "agent", attempt: 1, tokens: 10, identity: null });
+    const entries = [entry("PpImplementStart", 1, A), entry("PpImplement", 1, A)];
+    const legacy = anchorDispatch([marker, completion], entries, { legacyFlowKeyedEnvelopes: true });
+    expect(legacy.model_steps_missing_start_marker).toBe(0);
+    const strict = anchorDispatch([marker, completion], entries);
+    expect(strict.model_steps_missing_start_marker).toBe(1);
+    expect(strict.failures.join("\n")).toContain("model step pp-implement (<flow-level>) has no attempt-0 start marker");
+  });
+
+  test("genuinely flow-level steps (identity null on both sides) are unaffected by the gate", () => {
+    const result = anchorDispatch(
+      [envelope({ stepId: "pp-prep", role: "record", attempt: 1, identity: null })],
+      [entry("PpPrep", 1, null)],
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  test("renderReport threads the option through: the same legacy evidence fails strict and passes with the flag", () => {
+    const history: DispatchHistory = {
+      events: [A, B, C].map((id, i) => ({
+        eventId: `e${i}`,
+        type: "StepStarted",
+        payload: {
+          context: { stepExecutionId: `lease-${i}`, stepType: "PpChildLease", finalAttempt: 1 },
+          input: { stepInput: { file: `src/${id.split("__")[1]?.split("#")[0]}`, round: 1 } },
+        },
+      })),
+    };
+    const envelopes = [leaseEnv(1, null)];
+    const strict = renderReport({ envelopes, verdicts: [], burnDown: [], history });
+    expect(strict.json.dispatch_anchor?.ok).toBe(false);
+    const legacy = renderReport({ envelopes, verdicts: [], burnDown: [], history, legacyFlowKeyedEnvelopes: true });
+    expect(legacy.json.dispatch_anchor?.ok).toBe(true);
   });
 });
