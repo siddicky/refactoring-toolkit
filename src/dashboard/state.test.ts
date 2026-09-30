@@ -17,6 +17,7 @@ import {
   feedFromState,
   killTimeline,
   lifecycleHeadline,
+  lifecycleHeadlineView,
   normalizeTokens,
   parseEnvelope,
   parseQueueState,
@@ -29,7 +30,15 @@ import {
   readBurnDownFile,
   readKillEventsFile,
 } from "./queries.js";
-import type { DexHistoryEventWire, DexHistoryWire, FeedEntry } from "./types.js";
+import type {
+  DexFlowSummaryWire,
+  DexHistoryEventWire,
+  DexHistoryWire,
+  DexStateWire,
+  FeedEntry,
+  FlowView,
+  NormalizedKillEvent,
+} from "./types.js";
 import {
   BURN_DOWN_FILE_SAMPLES,
   FLOW_PROBE,
@@ -794,5 +803,125 @@ describe("headline flow selection (C55)", () => {
     });
     expect(state.headline).toContain("terminated");
     expect(state.headline).not.toContain("running");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C54: structured headline state (the client never regexes display text)
+// ---------------------------------------------------------------------------
+
+describe("lifecycleHeadlineView (C54 structured headline)", () => {
+  const flow = (over: Partial<FlowView>): FlowView => ({
+    flowId: "cx-5",
+    flowType: "port.Project",
+    status: "running",
+    startTime: "2026-09-26T10:00:00Z",
+    closeTime: null,
+    runId: "r1",
+    ...over,
+  });
+  const kill = (utc: string): NormalizedKillEvent => ({
+    source: "s", kind: "intent", runId: "r", utc, monotonicMs: 1, pids: [1],
+    signal: "SIGKILL", reason: null, note: null, resumed: null,
+  });
+  const args = { filesDone: 3, filesTotal: 5, dexAvailable: true, feed: [] as FeedEntry[] };
+
+  test("a resumed headline is state 'resumed' even though its text contains the word 'killed'", () => {
+    const feed = [{ flowId: "cx-5", startedAt: "2026-09-26T10:35:00Z" } as FeedEntry];
+    const view = lifecycleHeadlineView({ ...args, flow: flow({}), killEvents: [kill("2026-09-26T10:30:00Z")], feed });
+    expect(view.text).toContain("killed"); // the display text still says so...
+    expect(view.state).toBe("resumed"); // ...the structured state is what the client styles from
+    expect(view.degraded).toBe(false);
+  });
+
+  test("killed (dex down) and awaiting-resume are distinct states", () => {
+    const kills = [kill("2026-09-26T10:30:00Z")];
+    expect(lifecycleHeadlineView({ ...args, flow: flow({}), killEvents: kills, dexAvailable: false }).state).toBe("killed");
+    expect(lifecycleHeadlineView({ ...args, flow: flow({}), killEvents: kills }).state).toBe("awaiting-resume");
+    expect(lifecycleHeadlineView({ ...args, flow: flow({}), killEvents: [] }).state).toBe("running");
+  });
+
+  test("a completed headline with degraded rounds is completed + degraded (never a clean green)", () => {
+    const view = lifecycleHeadlineView({
+      ...args,
+      flow: flow({ status: "completed" }),
+      killEvents: [],
+      degradedRounds: 2,
+    });
+    expect(view.text).toContain("completed");
+    expect(view.text).toContain("DEGRADED (2 unreviewed rounds)");
+    expect(view.state).toBe("completed");
+    expect(view.degraded).toBe(true);
+    expect(lifecycleHeadlineView({ ...args, flow: flow({ status: "completed" }), killEvents: [] }).degraded).toBe(false);
+  });
+
+  test("a flow id containing a lifecycle word does not change the state", () => {
+    const view = lifecycleHeadlineView({ ...args, flow: flow({ flowId: "run-completed-killed" }), killEvents: [] });
+    expect(view.state).toBe("running");
+  });
+
+  test("terminal statuses map to their own state; unknown terminal statuses are other-terminal", () => {
+    const stateOf = (status: string) =>
+      lifecycleHeadlineView({ ...args, flow: flow({ status }), killEvents: [] }).state;
+    expect(stateOf("completed")).toBe("completed");
+    expect(stateOf("failed")).toBe("failed");
+    expect(stateOf("terminated")).toBe("terminated");
+    expect(stateOf("canceled")).toBe("canceled");
+    expect(stateOf("continued_as_new")).toBe("other-terminal");
+    expect(
+      lifecycleHeadlineView({ flow: undefined, filesDone: 0, filesTotal: 0, killEvents: [], dexAvailable: true, feed: [] }).state,
+    ).toBe("none");
+  });
+});
+
+describe("buildDashboardState headline state + degraded across SubFlow children (C54)", () => {
+  const tombstone = (reviewer: string) => ({ reviewer, discarded: true, reason: "exhausted retries" });
+  const parent = { ...FLOW_TRIAL, flowId: "cx-9", flowStatus: "FLOW_STATUS_COMPLETED", flowStatusCode: 2 };
+  const child = {
+    ...FLOW_TRIAL,
+    flowId: "SubFlow:cx-9-PpWaveJoin-7-0",
+    flowType: "port.File",
+    flowStatus: "FLOW_STATUS_COMPLETED",
+    flowStatusCode: 2,
+    startTime: "2026-09-25T21:40:00.000000Z",
+  };
+  const stranger = { ...child, flowId: "SubFlow:cx-10-PpWaveJoin-1-0" };
+  const build = (flows: DexFlowSummaryWire[], states: Record<string, DexStateWire>) =>
+    buildDashboardState({
+      now: "2026-09-25T22:00:00.000Z",
+      dex: { available: true, error: null, detail: null, flows, states, histories: {} },
+      git: { available: false, error: null, repoRoot: "/tmp/x", commits: [], worktrees: [] },
+      killEvents: { available: false, error: null, filesScanned: [], events: [] },
+      burnDownFiles: [],
+      feedLimit: 80,
+      commitLimit: 40,
+    });
+  const childVerdicts: DexStateWire = {
+    activeStepExecutions: [],
+    attributes: [
+      { key: "pp-verdict/src__Money.php#1#reviewer-A", value: tombstone("reviewer-A") },
+      { key: "pp-verdict/src__Money.php#1#reviewer-B", value: tombstone("reviewer-B") },
+    ],
+  };
+
+  test("degraded rounds living in the headline run's SubFlow children mark the headline degraded", () => {
+    const state = build([parent, child], { [child.flowId]: childVerdicts });
+    expect(state.degradedRounds).toHaveLength(1);
+    expect(state.degradedRounds[0]?.flowId).toBe(child.flowId);
+    expect(state.headlineState).toBe("completed");
+    expect(state.headlineDegraded).toBe(true);
+    expect(state.headline).toContain("DEGRADED (1 unreviewed round)");
+  });
+
+  test("another run's children never degrade this run's headline", () => {
+    const state = build([parent, stranger], { [stranger.flowId]: childVerdicts });
+    expect(state.degradedRounds).toHaveLength(1); // still listed in the panel payload
+    expect(state.headlineDegraded).toBe(false);
+  });
+
+  test("no flows: headline state none", () => {
+    const state = build([], {});
+    expect(state.headlineState).toBe("none");
+    expect(state.headlineDegraded).toBe(false);
   });
 });

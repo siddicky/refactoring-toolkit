@@ -308,16 +308,39 @@ export interface DegradedRoundView {
   reasons: string[];
 }
 
+/**
+ * Structured lifecycle state behind the headline text. The client styles the
+ * headline from this (and `headlineDegraded`), never by parsing display text.
+ * `other-terminal` covers every remaining non-running dex status
+ * (continued-as-new, timed-out, ...); `awaiting-resume` is a kill observed
+ * with the flow still RUNNING and no post-kill activity yet.
+ */
+export type HeadlineState =
+  | "none"
+  | "running"
+  | "awaiting-resume"
+  | "resumed"
+  | "killed"
+  | "completed"
+  | "failed"
+  | "terminated"
+  | "canceled"
+  | "other-terminal";
+
 export interface DashboardStateView {
   generatedAt: string;
   /**
    * Wave-5 lifecycle headline (takeaways-synthesis #3): one-line run status
-   * for the newest port flow with the live running → killed → resumed →
-   * completed flip (derived from flow status + kill sidecar ordering).
-   * US-006: carries a `DEGRADED (N unreviewed)` marker when the headline
-   * flow has degraded rounds.
+   * for the newest port.Project flow with the live running → killed → resumed
+   * → completed flip (derived from flow status + kill sidecar ordering).
+   * US-006: carries a `DEGRADED (N unreviewed)` marker when the headline run
+   * (the flow or its SubFlow children) has degraded rounds.
    */
   headline: string;
+  /** Structured state of `headline` (style from this, never from the text). */
+  headlineState: HeadlineState;
+  /** True when the headline run has degraded rounds: must never read as clean. */
+  headlineDegraded: boolean;
   sources: {
     dex: SourceStatus;
     git: SourceStatus & { repoRoot: string };

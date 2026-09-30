@@ -62,9 +62,13 @@
   .runhead { padding: 6px 12px 2px; color: var(--violet); }
   svg text { font-family: var(--mono); }
   #headline { margin-top: 10px; padding: 7px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 3px; font-size: 13px; color: var(--amber); }
-  #headline.completed { color: var(--green); }
-  #headline.killed { color: var(--red); }
-  #headline.resumed { color: var(--cyan); }
+  /* Styled from the structured headlineState / headlineDegraded (never from the text). */
+  #headline.state-completed { color: var(--green); }
+  #headline.state-killed, #headline.state-failed, #headline.state-terminated { color: var(--red); }
+  #headline.state-resumed { color: var(--cyan); }
+  #headline.state-canceled, #headline.state-other-terminal, #headline.state-none { color: var(--dim); }
+  /* A degraded round must never read as clean: overrides the green/cyan states. */
+  #headline.degraded { color: var(--amber); border-color: #574527; box-shadow: inset 3px 0 0 var(--red); }
 </style>
 </head>
 <body>
@@ -127,6 +131,13 @@
     <div class="panel"><table id="usage"><thead>
       <tr><th>role</th><th>calls</th><th>input (fresh)</th><th>cache-read</th><th>output</th><th>reasoning</th><th>cost usd</th></tr>
     </thead><tbody></tbody></table><div class="empty" id="usage-empty" hidden></div></div>
+  </section>
+
+  <section>
+    <h2><span class="n">08</span>degraded rounds (unreviewed)</h2>
+    <div class="panel"><table id="degraded"><thead>
+      <tr><th>flow</th><th>file</th><th>round</th><th>reviewers</th><th>reasons</th></tr>
+    </thead><tbody></tbody></table><div class="empty" id="degraded-empty" hidden></div></div>
   </section>
 
   <footer id="footer"></footer>
@@ -297,14 +308,27 @@ function renderKills(groups) {
   }).join("");
 }
 
-function renderHeadline(text) {
+const HEADLINE_STATES = ["none", "running", "awaiting-resume", "resumed", "killed", "completed", "failed", "terminated", "canceled", "other-terminal"];
+
+function renderHeadline(st) {
   const el = $("headline");
-  const t = String(text || "");
-  el.textContent = t || "—";
-  el.classList.remove("completed", "killed", "resumed");
-  if (/\bcompleted\b|\bsurvived kill\b/.test(t)) el.classList.add("completed");
-  else if (/\bkilled\b/.test(t)) el.classList.add("killed");
-  else if (/\bresumed\b/.test(t)) el.classList.add("resumed");
+  el.textContent = String(st.headline || "") || "—";
+  el.classList.remove("degraded", ...HEADLINE_STATES.map((s) => "state-" + s));
+  if (HEADLINE_STATES.includes(st.headlineState)) el.classList.add("state-" + st.headlineState);
+  if (st.headlineDegraded === true) el.classList.add("degraded");
+}
+
+function renderDegraded(rounds) {
+  const tb = $("degraded").tBodies[0];
+  $("degraded-empty").hidden = rounds.length > 0;
+  $("degraded-empty").textContent = rounds.length ? "" : "no degraded rounds — every observed round kept at least one completed reviewer verdict";
+  tb.innerHTML = rounds.map((r) => `<tr class="row-blocked">
+    <td class="cyan" title="${esc(r.flowId)}">${esc(short(r.flowId, 34))}</td>
+    <td>${esc(short(r.file, 44))}</td>
+    <td>${esc(r.round)}</td>
+    <td>${esc((r.reviewers || []).join(", "))}</td>
+    <td class="wrap-cell red">${esc((r.reasons || []).filter((x) => x).join(" | ") || "-")}</td>
+  </tr>`).join("");
 }
 
 function renderUsage(rows) {
@@ -349,7 +373,7 @@ function renderSources(st) {
 function render(st) {
   lastData = st;
   $("generated").textContent = "snapshot " + utcFull(st.generatedAt) + " (" + rel(st.generatedAt) + " ago)";
-  renderHeadline(st.headline);
+  renderHeadline(st);
   renderGrid(st.grid);
   renderFeed(st.feed);
   renderBurnDown(st.burnDown);
@@ -357,6 +381,7 @@ function render(st) {
   renderCommits(st.commits);
   renderKills(st.killTimeline);
   renderUsage(st.agentUsage ?? []);
+  renderDegraded(st.degradedRounds ?? []);
   renderSources(st);
 }
 

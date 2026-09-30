@@ -27,6 +27,7 @@ import type {
   GitCommitRow,
   GitWorktreeRow,
   GridRow,
+  HeadlineState,
   KillTimelineEntryView,
   KillTimelineGroupView,
   NormalizedKillEvent,
@@ -866,23 +867,51 @@ export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[
  * US-006: `degradedRounds` > 0 appends an explicit `DEGRADED` marker so no
  * surface can read a zero-reviewer round as clean.
  */
-export function lifecycleHeadline(input: {
+export function lifecycleHeadline(input: LifecycleHeadlineInput): string {
+  return lifecycleHeadlineView(input).text;
+}
+
+export interface LifecycleHeadlineInput {
   flow: FlowView | undefined;
   filesDone: number;
   filesTotal: number;
   killEvents: readonly NormalizedKillEvent[];
   dexAvailable: boolean;
   feed: readonly FeedEntry[];
-  /** US-006: count of the headline flow's degraded (all-reviewers-discarded) rounds. */
+  /** US-006: count of the headline run's degraded (all-reviewers-discarded) rounds. */
   degradedRounds?: number;
-}): string {
+}
+
+export interface HeadlineView {
+  text: string;
+  /** Structured lifecycle state: the client styles from this, not from `text`. */
+  state: HeadlineState;
+  /** US-006: the run has degraded rounds (never renders as a clean state). */
+  degraded: boolean;
+}
+
+function terminalHeadlineState(status: string): HeadlineState {
+  switch (status) {
+    case "completed":
+    case "failed":
+    case "terminated":
+    case "canceled":
+      return status;
+    default:
+      return "other-terminal";
+  }
+}
+
+/** Headline text plus the structured state/degraded flag behind it (C54). */
+export function lifecycleHeadlineView(input: LifecycleHeadlineInput): HeadlineView {
   const { flow, filesDone, filesTotal } = input;
-  if (flow === undefined) return "no port flow found";
+  if (flow === undefined) return { text: "no port flow found", state: "none", degraded: false };
   const files = `${filesDone}/${filesTotal} files`;
-  const degraded =
-    input.degradedRounds !== undefined && input.degradedRounds > 0
-      ? ` · DEGRADED (${input.degradedRounds} unreviewed round${input.degradedRounds === 1 ? "" : "s"})`
-      : "";
+  const isDegraded = input.degradedRounds !== undefined && input.degradedRounds > 0;
+  const degraded = isDegraded
+    ? ` · DEGRADED (${input.degradedRounds} unreviewed round${input.degradedRounds === 1 ? "" : "s"})`
+    : "";
+  const view = (text: string, state: HeadlineState): HeadlineView => ({ text, state, degraded: isDegraded });
   const killAfterStart = input.killEvents
     .filter((e) => tsMs(e.utc) > tsMs(flow.startTime))
     .sort((a, b) => tsMs(b.utc) - tsMs(a.utc))[0];
@@ -893,22 +922,29 @@ export function lifecycleHeadline(input: {
   if (status !== "running") {
     const killedNote =
       killAfterStart !== undefined && (status === "completed" || status === "failed") ? " (survived kill)" : "";
-    return `◆ ${flow.flowId}: ${files} · ${terminalStatusWord(status)}${killedNote}${degraded}`;
+    return view(
+      `◆ ${flow.flowId}: ${files} · ${terminalStatusWord(status)}${killedNote}${degraded}`,
+      terminalHeadlineState(status),
+    );
   }
   if (killAfterStart !== undefined) {
     const killMs = tsMs(killAfterStart.utc);
     const activityAfterKill = input.feed.some(
       (e) => e.flowId === flow.flowId && tsMs(e.startedAt) > killMs,
     );
+    const at = killAfterStart.utc.slice(11, 19);
     if (activityAfterKill) {
-      return `◆ ${flow.flowId}: ${files} · resumed (killed ${killAfterStart.utc.slice(11, 19)}Z)${degraded}`;
+      return view(`◆ ${flow.flowId}: ${files} · resumed (killed ${at}Z)${degraded}`, "resumed");
     }
     if (!input.dexAvailable) {
-      return `◆ ${flow.flowId}: ${files} · killed (dex down since ${killAfterStart.utc.slice(11, 19)}Z)${degraded}`;
+      return view(`◆ ${flow.flowId}: ${files} · killed (dex down since ${at}Z)${degraded}`, "killed");
     }
-    return `◆ ${flow.flowId}: ${files} · running (kill at ${killAfterStart.utc.slice(11, 19)}Z, awaiting resume)${degraded}`;
+    return view(
+      `◆ ${flow.flowId}: ${files} · running (kill at ${at}Z, awaiting resume)${degraded}`,
+      "awaiting-resume",
+    );
   }
-  return `◆ ${flow.flowId}: ${files} · running${degraded}`;
+  return view(`◆ ${flow.flowId}: ${files} · running${degraded}`, "running");
 }
 
 /** Display word for a non-running dex flow status (lower-cased, prefix stripped). */
@@ -921,6 +957,14 @@ export function terminalStatusWord(status: string): string {
 /** Parallel-wave SubFlow children (port.File) surface as their own flows. */
 export function isSubFlowChild(flowId: string): boolean {
   return flowId.startsWith("SubFlow:");
+}
+
+/**
+ * True when `flowId` is the run flow itself or one of its SubFlow children
+ * (dex names them `SubFlow:<parentFlowId>-<stepExecutionId>-<index>`).
+ */
+export function belongsToRun(flowId: string, runFlowId: string): boolean {
+  return flowId === runFlowId || flowId.startsWith(`SubFlow:${runFlowId}-`);
 }
 
 /**
@@ -1062,24 +1106,31 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
   // headline belongs to the parent) + its queue progress + kill overlay.
   const headlineFlow = pickHeadlineFlow(flowViews);
   const headlineQueue = headlineQueueFor(headlineFlow, queueSummaries);
-  // US-006 degraded rounds: derived per flow from the verdict attributes;
-  // the headline flow's count drives the headline DEGRADED marker.
+  // US-006 degraded rounds: derived per flow from the verdict attributes. The
+  // verdict attributes live in whichever flow ran the review steps, which in
+  // the default parallel mode is a SubFlow child, so the headline run's count
+  // covers the run flow AND its children.
   const degradedRounds = flowsSorted.flatMap((f) =>
     degradedRoundsOf(f.flowId, input.dex.states[f.flowId] ?? null),
   );
-  const headline = lifecycleHeadline({
+  const headlineView = lifecycleHeadlineView({
     flow: headlineFlow,
     filesDone: headlineQueue.done + headlineQueue.blocked,
     filesTotal: headlineQueue.total,
     killEvents: input.killEvents.events,
     dexAvailable: input.dex.available,
     feed,
-    degradedRounds: degradedRounds.filter((r) => r.flowId === headlineFlow?.flowId).length,
+    degradedRounds:
+      headlineFlow === undefined
+        ? 0
+        : degradedRounds.filter((r) => belongsToRun(r.flowId, headlineFlow.flowId)).length,
   });
 
   return {
     generatedAt: input.now,
-    headline,
+    headline: headlineView.text,
+    headlineState: headlineView.state,
+    headlineDegraded: headlineView.degraded,
     sources: {
       dex: statusOf(input.dex.available, input.dex.error, input.dex.detail),
       git: { ...statusOf(input.git.available, input.git.error, null), repoRoot: input.git.repoRoot },

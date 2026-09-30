@@ -1,0 +1,236 @@
+/**
+ * Client-side regression tests for src/dashboard/static/index.html.
+ *
+ * The page keeps its CSS/JS inline (no build step), so the tests evaluate the
+ * inline <script> in a node:vm sandbox with a tiny fake DOM and call the
+ * render functions directly. This pins the rendering decisions (what class a
+ * headline gets, what a not-run burn-down point looks like, how the usage
+ * table computes cells) without a browser.
+ */
+
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+
+const PAGE = join(dirname(fileURLToPath(import.meta.url)), "static", "index.html");
+
+interface FakeElement {
+  id: string;
+  textContent: string;
+  innerHTML: string;
+  hidden: boolean;
+  title: string;
+  tBodies: Array<{ innerHTML: string }>;
+  classList: {
+    add: (...names: string[]) => void;
+    remove: (...names: string[]) => void;
+    toggle: (name: string, force?: boolean) => void;
+    contains: (name: string) => boolean;
+  };
+  classes: () => string[];
+}
+
+interface PageApi {
+  renderHeadline(st: Record<string, unknown>): void;
+  renderUsage(rows: unknown[]): void;
+  renderFeed(rows: unknown[]): void;
+  renderBurnDown(series: unknown[]): void;
+  renderDegraded(rows: unknown[]): void;
+  renderFlows(rows: unknown[]): void;
+  renderKills(groups: unknown[]): void;
+  poll(): Promise<void>;
+}
+
+interface LoadedPage {
+  api: PageApi;
+  el: (id: string) => FakeElement;
+  /** Timers the page scheduled (setTimeout/setInterval), in order. */
+  timers: Array<{ fn: () => void; ms: number }>;
+  html: string;
+  script: string;
+}
+
+function loadPage(options: { fetch?: (url: string, init?: unknown) => Promise<unknown> } = {}): LoadedPage {
+  const html = readFileSync(PAGE, "utf8");
+  const match = /<script>([\s\S]*)<\/script>/.exec(html);
+  if (match === null || match[1] === undefined) throw new Error("index.html has no inline script");
+  const script = match[1];
+
+  const elements = new Map<string, FakeElement>();
+  const el = (id: string): FakeElement => {
+    let found = elements.get(id);
+    if (found === undefined) {
+      const classes = new Set<string>();
+      found = {
+        id,
+        textContent: "",
+        innerHTML: "",
+        hidden: false,
+        title: "",
+        tBodies: [{ innerHTML: "" }],
+        classList: {
+          add: (...names) => names.forEach((n) => classes.add(n)),
+          remove: (...names) => names.forEach((n) => classes.delete(n)),
+          toggle: (name, force) => {
+            const on = force ?? !classes.has(name);
+            if (on) classes.add(name);
+            else classes.delete(name);
+          },
+          contains: (name) => classes.has(name),
+        },
+        classes: () => [...classes],
+      };
+      elements.set(id, found);
+    }
+    return found;
+  };
+
+  const timers: Array<{ fn: () => void; ms: number }> = [];
+  const sandbox: Record<string, unknown> = {
+    document: { getElementById: (id: string) => el(id) },
+    fetch: options.fetch ?? (() => new Promise(() => {})), // never settles by default
+    setTimeout: (fn: () => void, ms: number) => {
+      timers.push({ fn, ms });
+      return timers.length;
+    },
+    setInterval: (fn: () => void, ms: number) => {
+      timers.push({ fn, ms });
+      return timers.length;
+    },
+    clearTimeout: () => {},
+    console,
+  };
+  // Functions the page does not define (yet) are exported as undefined so a
+  // missing feature fails its own test instead of the whole harness.
+  const names = ["renderHeadline", "renderUsage", "renderFeed", "renderBurnDown", "renderDegraded", "renderFlows", "renderKills", "poll"];
+  const exports = names.map((n) => `${n}: typeof ${n} === "function" ? ${n} : undefined`).join(", ");
+  vm.runInNewContext(`${script}\n;globalThis.__api = { ${exports} };`, sandbox);
+  return { api: sandbox.__api as PageApi, el, timers, html, script };
+}
+
+describe("feed tokens cell (C53)", () => {
+  const entry = (over: Record<string, unknown>) => ({
+    flowId: "cx-5",
+    ts: "2026-09-26T10:00:00Z",
+    startedAt: "2026-09-26T10:00:00Z",
+    endedAt: null,
+    stepId: "pp-implement",
+    role: "agent",
+    file: null,
+    round: null,
+    attempt: 1,
+    outcome: "interrupted",
+    tokens: null,
+    usage: null,
+    wallClockMs: null,
+    tokensRequired: true,
+    ...over,
+  });
+
+  test("an attempt-0 start marker renders a neutral 'start' cell, never the red MISSING provenance failure", () => {
+    const page = loadPage();
+    page.api.renderFeed([entry({ attempt: 0, tokensRequired: false })]);
+    const html = page.el("feed").tBodies[0]?.innerHTML ?? "";
+    expect(html).toContain(">start<");
+    expect(html).not.toContain("MISSING");
+  });
+
+  test("a real model attempt without tokens still renders MISSING", () => {
+    const page = loadPage();
+    page.api.renderFeed([entry({ attempt: 1, tokensRequired: true })]);
+    expect(page.el("feed").tBodies[0]?.innerHTML ?? "").toContain("MISSING");
+  });
+});
+
+describe("headline styling (C54)", () => {
+  test("the headline is styled from headlineState, not from regexes over the display text", () => {
+    const page = loadPage();
+    // The resumed text contains the word "killed": the old regex made it red.
+    page.api.renderHeadline({
+      headline: "◆ cx-5: 3/5 files · resumed (killed 10:30:00Z)",
+      headlineState: "resumed",
+      headlineDegraded: false,
+    });
+    const classes = page.el("headline").classes();
+    expect(classes).toContain("state-resumed");
+    expect(classes).not.toContain("state-killed");
+    expect(page.el("headline").textContent).toContain("resumed (killed");
+  });
+
+  test("a flow id containing 'completed' does not turn a running headline green", () => {
+    const page = loadPage();
+    page.api.renderHeadline({
+      headline: "◆ run-completed-1: 1/5 files · running",
+      headlineState: "running",
+      headlineDegraded: false,
+    });
+    expect(page.el("headline").classes()).not.toContain("state-completed");
+    expect(page.el("headline").classes()).toContain("state-running");
+  });
+
+  test("completed + degraded carries the degraded class so it cannot read as a clean green", () => {
+    const page = loadPage();
+    page.api.renderHeadline({
+      headline: "◆ cx-5: 5/5 files · completed · DEGRADED (2 unreviewed rounds)",
+      headlineState: "completed",
+      headlineDegraded: true,
+    });
+    const classes = page.el("headline").classes();
+    expect(classes).toContain("degraded");
+    // The stylesheet must let .degraded override the completed colour.
+    const css = page.html;
+    expect(css.indexOf("#headline.degraded")).toBeGreaterThan(css.indexOf("#headline.state-completed"));
+  });
+
+  test("switching from a degraded state back to a clean one removes the stale classes", () => {
+    const page = loadPage();
+    page.api.renderHeadline({ headline: "x", headlineState: "completed", headlineDegraded: true });
+    page.api.renderHeadline({ headline: "y", headlineState: "running", headlineDegraded: false });
+    const classes = page.el("headline").classes();
+    expect(classes).not.toContain("degraded");
+    expect(classes).not.toContain("state-completed");
+  });
+
+  test("an older server without headlineState renders unstyled (default amber), not from text", () => {
+    const page = loadPage();
+    page.api.renderHeadline({ headline: "◆ cx-5: 5/5 files · completed" });
+    const classes = page.el("headline").classes();
+    expect(classes.some((c) => c.startsWith("state-"))).toBe(false);
+  });
+
+  test("the page script no longer regexes the headline text", () => {
+    const page = loadPage();
+    const fn = /function renderHeadline[\s\S]*?\n}\n/.exec(page.script)?.[0] ?? "";
+    expect(fn.length).toBeGreaterThan(0);
+    expect(fn).not.toMatch(/\.test\(/);
+  });
+});
+
+describe("degraded rounds panel (C54)", () => {
+  test("lists flow, file, round, reviewers and reasons (escaped)", () => {
+    const page = loadPage();
+    page.api.renderDegraded([
+      {
+        flowId: "SubFlow:cx-9-x-0",
+        file: "src/Money.php",
+        round: 2,
+        reviewers: ["reviewer-A", "reviewer-B"],
+        reasons: ["exhausted <retries>", "timeout"],
+      },
+    ]);
+    const html = page.el("degraded").tBodies[0]?.innerHTML ?? "";
+    expect(html).toContain("src/Money.php");
+    expect(html).toContain("reviewer-A");
+    expect(html).toContain("exhausted &lt;retries&gt;");
+    expect(page.el("degraded-empty").hidden).toBe(true);
+  });
+
+  test("no degraded rounds shows an explicit empty note", () => {
+    const page = loadPage();
+    page.api.renderDegraded([]);
+    expect(page.el("degraded-empty").hidden).toBe(false);
+    expect(page.el("degraded-empty").textContent).toContain("no degraded rounds");
+  });
+});
