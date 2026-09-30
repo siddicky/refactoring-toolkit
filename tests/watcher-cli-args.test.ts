@@ -9,12 +9,15 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { join } from "node:path";
+
 import {
   WATCHER_EXIT,
   WATCHER_USAGE,
   parseWatcherArgs,
 } from "../src/watcher/cli-args.js";
 
+const WATCH_SCRIPT = join(import.meta.dir, "..", "scripts", "watch-queue-verify.ts");
 const DEFAULTS = { eventsPath: "metrics/kill-events.jsonl" };
 const parse = (...argv: string[]) => parseWatcherArgs(argv, DEFAULTS);
 
@@ -110,7 +113,7 @@ describe("C34(4): every outcome has its own exit code", () => {
 
 describe("C34(4,5): the script itself exits 64 on a usage error, before arming anything", () => {
   async function runScript(...args: string[]) {
-    const proc = Bun.spawn(["bun", "run", "scripts/watch-queue-verify.ts", ...args], {
+    const proc = Bun.spawn(["bun", "run", WATCH_SCRIPT, ...args], {
       stdout: "pipe",
       stderr: "pipe",
     });

@@ -16,9 +16,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import {
-  runQueueVerifyWatcher,
-} from "../src/watcher/queue-verify-watcher.js";
+import { runQueueVerifyWatcher } from "../src/watcher/queue-verify-watcher.js";
 import { DONE, START, noise, virtualWorld } from "./helpers/virtual-stream.js";
 
 describe("C27: catch-up reads must not absorb the DONE that closes the kill window", () => {

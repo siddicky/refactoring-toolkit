@@ -143,7 +143,7 @@ describe("C71: the CLI rejects unparsable input instead of filtering it", () => 
     dir = await mkdtemp(join(tmpdir(), "chaos-kill-"));
     const eventsPath = join(dir, "events.jsonl");
     const proc = Bun.spawn(
-      ["bun", "run", "scripts/chaos-kill.ts", "--pids", "123,abc", "--events", eventsPath],
+      ["bun", "run", CHAOS_KILL_SCRIPT, "--pids", "123,abc", "--events", eventsPath],
       { stdout: "pipe", stderr: "pipe" },
     );
     const code = await proc.exited;
@@ -159,7 +159,7 @@ describe("C71: the CLI rejects unparsable input instead of filtering it", () => 
     const eventsPath = join(dir, "events.jsonl");
     const proc = Bun.spawn(
       [
-        "bun", "run", "scripts/chaos-kill.ts",
+        "bun", "run", CHAOS_KILL_SCRIPT,
         "--pids", String(DEAD_PID),
         "--events", eventsPath,
         "--wait-ms", "100",
