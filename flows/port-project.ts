@@ -105,9 +105,6 @@ import {
   TSC_ERRORS_PER_FILE_CAP,
   type TscRunAccounting,
 } from "../src/queues/tsc-queue.js";
-
-/** Contract A: honest tsc accounting (also re-exported for metrics consumers). */
-export type { TscRunAccounting };
 import {
   buildClassifiedVitestQueueState,
   createNaiveClassifier,
@@ -159,6 +156,9 @@ import {
 } from "../src/harness/runtime.js";
 
 const execFileP = promisify(execFile);
+
+/** Contract A: honest tsc accounting (defined with the tsc queue, re-exported for metrics consumers). */
+export type { TscRunAccounting };
 
 // ---------------------------------------------------------------------------
 // Durable input/output shapes
@@ -2508,7 +2508,7 @@ export interface BootstrapPlan {
 }
 
 /** tsconfig `include` globs every scaffold covers, whatever the source map says. */
-export const DEFAULT_TSCONFIG_INCLUDE: readonly string[] = ["src/**/*.ts", "test/**/*.ts", "tests/**/*.ts"];
+const DEFAULT_TSCONFIG_INCLUDE: readonly string[] = ["src/**/*.ts", "test/**/*.ts", "tests/**/*.ts"];
 
 /**
  * C06: tsconfig `include` for the integrated checkout — the defaults PLUS the
@@ -2825,7 +2825,7 @@ export const queueVerifyTools = {
 };
 
 /** One finished child process, with everything execFile reports on failure. */
-export interface CapturedRun {
+interface CapturedRun {
   stdout: string;
   stderr: string;
   /** Exit code; null when killed, signalled or never spawned. */
@@ -2838,7 +2838,7 @@ export interface CapturedRun {
 }
 
 /** Runs a tool to completion and NEVER throws: failure modes are data. */
-export async function runCaptured(
+async function runCaptured(
   bin: string,
   args: readonly string[],
   opts: { cwd: string; timeoutMs: number },
@@ -3166,10 +3166,9 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
     const feed = queueFixFeedForFile(verify, rel);
     const errs = feed.errors;
     if (errs.length === 0 && feed.testFailures.length === 0) {
-      // Nothing to fix: no agent turn. `agent` is a model-calling role, so the
-      // envelope rejects tokens:null even for a skip ("provenance failure:
-      // returned no token usage" — the skip used to throw and fail the child
-      // flow instead); a skipped step's true usage is an explicit 0.
+      // Nothing to fix: no agent turn. The envelope rejects tokens:null for a
+      // model-calling role even on a skip (it threw "provenance failure"), so
+      // a skip reports its true usage: an explicit 0.
       return { output: fri, tokens: 0, outcome: "skipped" as EnvelopeOutcome };
     }
     const current = await readFile(join(fri.worktreePath, outPath), "utf8");

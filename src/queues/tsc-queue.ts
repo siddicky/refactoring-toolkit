@@ -278,11 +278,31 @@ export interface TscProcessRun {
 export interface TscRunOutcome {
   /** Located error records (the durable queue's source of truth). */
   errors: TscErrorRecord[];
-  unlocated: TscUnlocatedDiagnostic[];
   accounting: TscRunAccounting;
 }
 
 const REASON_DETAIL_CAP = 240;
+
+/** The not-run reason for one captured process; null when tsc produced a trustworthy count. */
+function notRunReason(
+  run: TscProcessRun,
+  located: number,
+  unlocated: readonly TscUnlocatedDiagnostic[],
+): string | null {
+  if (run.errorCode === "ENOENT") return "tsc binary not found (ENOENT)";
+  if (run.errorCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+    return "tsc output exceeded the capture buffer (ERR_CHILD_PROCESS_STDIO_MAXBUFFER)";
+  }
+  if (run.errorCode !== null) return `tsc failed to run (${run.errorCode})`;
+  if (run.killed) return `tsc timed out after ${Math.round(run.timeoutMs / 1000)}s`;
+  if (run.signal !== null) return `tsc terminated by ${run.signal}`;
+  if (run.exitCode !== 0 && located === 0) {
+    const firstLine = run.output.split(/\r?\n/).find((l) => l.trim() !== "");
+    const detail = (unlocated[0]?.raw ?? firstLine ?? "no output").trim().slice(0, REASON_DETAIL_CAP);
+    return `tsc exited ${run.exitCode ?? "without a code"} with no located diagnostics: ${detail}`;
+  }
+  return null;
+}
 
 /**
  * Pure core: the honest tsc outcome from one captured process.
@@ -295,43 +315,12 @@ const REASON_DETAIL_CAP = 240;
  */
 export function tscOutcomeFromRun(run: TscProcessRun): TscRunOutcome {
   const { errors, unlocated } = parseTscDiagnostics(run.output);
-  const notRun = (reason: string): TscRunOutcome => ({
-    errors,
-    unlocated,
-    accounting: {
-      state: "not-run",
-      reason,
-      exit_code: run.exitCode,
-      unlocated: unlocated.length,
-    },
-  });
-
-  if (run.errorCode === "ENOENT") {
-    return notRun("tsc binary not found (ENOENT)");
-  }
-  if (run.errorCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-    return notRun("tsc output exceeded the capture buffer (ERR_CHILD_PROCESS_STDIO_MAXBUFFER)");
-  }
-  if (run.errorCode !== null) {
-    return notRun(`tsc failed to run (${run.errorCode})`);
-  }
-  if (run.killed) {
-    return notRun(`tsc timed out after ${Math.round(run.timeoutMs / 1000)}s`);
-  }
-  if (run.signal !== null) {
-    return notRun(`tsc terminated by ${run.signal}`);
-  }
-  if (run.exitCode !== 0 && errors.length === 0) {
-    const firstLine = run.output.split(/\r?\n/).find((l) => l.trim() !== "");
-    const detail = (unlocated[0]?.raw ?? firstLine ?? "no output").trim().slice(0, REASON_DETAIL_CAP);
-    return notRun(`tsc exited ${run.exitCode ?? "without a code"} with no located diagnostics: ${detail}`);
-  }
+  const reason = notRunReason(run, errors.length, unlocated);
   return {
     errors,
-    unlocated,
     accounting: {
-      state: "ran",
-      reason: null,
+      state: reason === null ? "ran" : "not-run",
+      reason,
       exit_code: run.exitCode,
       unlocated: unlocated.length,
     },
