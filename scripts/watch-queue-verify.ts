@@ -54,10 +54,14 @@ import { envelopeStream } from "../flows/steps/envelope.js";
 import { PortProjectFlow } from "../flows/port-project.js";
 import { chaosKill } from "./chaos-kill.js";
 import {
-  isQueueVerifyStart,
   runQueueVerifyWatcher,
   type WatcherStreamEvent,
 } from "../src/watcher/queue-verify-watcher.js";
+import {
+  DRAIN_PAGE_SIZE,
+  drainRetainedBacklog,
+  toWatcherEvent,
+} from "../src/watcher/drain-backlog.js";
 
 const execFileP = promisify(execFile);
 
@@ -75,22 +79,6 @@ function isLongPollWakeUp(err: unknown): boolean {
     err instanceof DexServiceError &&
     (err as { subStatus?: unknown }).subStatus === "longPollTimeout"
   );
-}
-
-/** Coerce one retained stream message into the watcher's structural event. */
-function toWatcherEvent(message: {
-  value: unknown;
-  resumeToken: string;
-}): WatcherStreamEvent {
-  const envelope = message.value as {
-    eventKey?: string;
-    event?: { stepId?: unknown; ended_at?: unknown };
-  };
-  return {
-    eventKey: String(envelope.eventKey ?? ""),
-    stepId: typeof envelope.event?.stepId === "string" ? envelope.event.stepId : "",
-    endedAt: typeof envelope.event?.ended_at === "string" ? envelope.event.ended_at : null,
-  };
 }
 
 function argValue(flag: string, fallback?: string): string | undefined {
@@ -157,42 +145,25 @@ async function main(): Promise<number> {
   try {
     // Resume token for the subscription (empty = retained head on first read).
     let resumeToken = "";
-    // US-010a drain-to-head page bound (insurance only): 500 pages of
-    // server-max size is far beyond any run's retained envelope count; a
-    // server that never exhausts nextPageToken must not hang the arm.
-    const MAX_DRAIN_PAGES = 500;
     // Arm-time backlog drain (cx8 fix): read ALL retained pages newest-first
     // until exhausted, scan them for the trigger, and leave `resumeToken` at
     // the drained HEAD so the follow phase long-polls only post-arm messages
     // (the old cursor-at-retained-head follow consumed the backlog at
     // ~1 message/pollInterval and fell ~28 min behind the ~1.5 s windows).
     // The cursor is pinned to page 1's newest message BEFORE deep paging, so
-    // even a mid-drain failure leaves the follow lane at head.
+    // even a mid-drain failure leaves the follow lane at head. The pages are
+    // stitched into STREAM ORDER by drainRetainedBacklog (audit C28).
     const drainBacklog = async (): Promise<WatcherStreamEvent[]> => {
       if (runtime === undefined) return []; // poll-only degradation
-      const events: WatcherStreamEvent[] = [];
-      let pageToken = "";
-      for (let page = 0; page < MAX_DRAIN_PAGES; page++) {
-        const res = await runtime.client.listStreamMessages(
-          flowId,
-          envelopeStream,
-          100,
-          pageToken,
-        );
-        if (page === 0) {
-          const newest = res.messages[0];
-          if (newest !== undefined) resumeToken = newest.resumeToken;
-        }
-        // Oldest-last within the page: emit in stream order.
-        for (let i = res.messages.length - 1; i >= 0; i--) {
-          const message = res.messages[i];
-          if (message !== undefined) events.push(toWatcherEvent(message));
-        }
-        if (res.nextPageToken === "") return events; // exhausted: at head
-        pageToken = res.nextPageToken;
-      }
-      log(`backlog drain hit the ${MAX_DRAIN_PAGES}-page bound — continuing from head`);
-      return events;
+      const client = runtime.client;
+      return await drainRetainedBacklog({
+        listPage: (pageToken) =>
+          client.listStreamMessages(flowId, envelopeStream, DRAIN_PAGE_SIZE, pageToken),
+        onHead: (token) => {
+          resumeToken = token;
+        },
+        log,
+      });
     };
     const result = await runQueueVerifyWatcher({
       deadlineMs: deadlineMinutes * 60_000,
