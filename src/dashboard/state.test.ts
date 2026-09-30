@@ -430,6 +430,80 @@ describe("burnDownSeries", () => {
 });
 
 // ---------------------------------------------------------------------------
+// C41: one point per (queue, iteration): the flow writes a total row
+// (file null) plus up to 8 per-file rows per tsc iteration
+// ---------------------------------------------------------------------------
+
+describe("burnDownSeries plots the aggregate row per iteration (C41)", () => {
+  const row = (iteration: number, file: string | null, count: number, at = `2026-09-26T10:0${iteration}:00.000Z`) => ({
+    queue: "tsc",
+    file,
+    iteration,
+    error_count: count,
+    recorded_at: at,
+  });
+  const tsc = (samples: Parameters<typeof burnDownSeries>[0]) =>
+    burnDownSeries(samples).find((s) => s.queue === "tsc")?.points ?? [];
+
+  test("total + per-file rows for each iteration yield exactly one point: the total", () => {
+    // The two-row shape port-project.ts writes (total file:null + per-file rows).
+    const points = tsc([
+      row(1, null, 12),
+      row(1, "src/a.php", 7),
+      row(1, "src/b.php", 5),
+      row(2, null, 4),
+      row(2, "src/a.php", 3),
+      row(2, "src/b.php", 1),
+    ]);
+    expect(points.map((p) => [p.iteration, p.errorCount])).toEqual([
+      [1, 12],
+      [2, 4],
+    ]);
+    // The "latest N errors" label reads the last point: the total, not one file's count.
+    expect(points[points.length - 1]?.errorCount).toBe(4);
+  });
+
+  test("the total wins even when per-file rows are only a truncated subset (8-file cap)", () => {
+    const points = tsc([row(1, null, 40), row(1, "src/a.php", 5), row(1, "src/b.php", 5)]);
+    expect(points).toHaveLength(1);
+    expect(points[0]?.errorCount).toBe(40);
+  });
+
+  test("with no total row, per-file rows are summed (latest row per file)", () => {
+    const points = tsc([
+      row(3, "src/a.php", 9, "2026-09-26T10:00:00.000Z"),
+      row(3, "src/a.php", 3, "2026-09-26T10:00:05.000Z"), // same file re-recorded: latest wins
+      row(3, "src/b.php", 2, "2026-09-26T10:00:01.000Z"),
+    ]);
+    expect(points).toHaveLength(1);
+    expect(points[0]).toMatchObject({ iteration: 3, errorCount: 5, state: "ran" });
+  });
+
+  test("duplicate totals for one iteration (file source + history walk) collapse to the latest", () => {
+    const points = tsc([
+      row(1, null, 6, "2026-09-26T10:00:00.000Z"),
+      row(1, null, 6, "2026-09-26T10:00:00.000Z"),
+      row(2, null, 9, "2026-09-26T10:05:00.000Z"),
+      row(2, null, 2, "2026-09-26T10:05:30.000Z"),
+    ]);
+    expect(points.map((p) => [p.iteration, p.errorCount])).toEqual([
+      [1, 6],
+      [2, 2],
+    ]);
+  });
+
+  test("queues stay separate and iterations sort ascending", () => {
+    const series = burnDownSeries([
+      row(2, null, 1),
+      row(1, null, 3),
+      { queue: "vitest", file: null, iteration: 1, error_count: 2, recorded_at: null },
+    ]);
+    expect(series.map((s) => s.queue)).toEqual(["tsc", "vitest"]);
+    expect(series[0]?.points.map((p) => p.iteration)).toEqual([1, 2]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // C56: vitest ran/not-run accounting survives the burn-down adapters (US-010
 // honesty invariant: a not-run iteration is never plotted as zero failures)
 // ---------------------------------------------------------------------------

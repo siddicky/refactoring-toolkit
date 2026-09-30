@@ -674,33 +674,66 @@ function findWorktree(
  * (the flow writes 0 alongside the marker) and must never be plotted.
  */
 function burnDownPoint(s: BurnDownSample): BurnDownPointView {
-  const notRunReason = s.vitest?.state === "not-run" ? (s.vitest.reason ?? "no reason recorded") : null;
   const notRun = s.vitest?.state === "not-run";
   return {
     iteration: s.iteration,
     errorCount: notRun ? null : s.error_count,
     recordedAt: s.recorded_at,
     state: notRun ? "not-run" : "ran",
-    reason: notRunReason,
+    reason: notRun ? (s.vitest?.reason ?? "no reason recorded") : null,
+  };
+}
+
+/** The most recently recorded sample (later input wins a timestamp tie). */
+function latestSample(rows: readonly BurnDownSample[]): BurnDownSample {
+  let best = rows[0] as BurnDownSample;
+  for (const row of rows) {
+    if (tsMs(row.recorded_at ?? "") >= tsMs(best.recorded_at ?? "")) best = row;
+  }
+  return best;
+}
+
+/**
+ * The single point for one (queue, iteration). The flow writes a per-
+ * iteration TOTAL row (file: null) plus up to 8 per-file rows; plotting them
+ * all gives several y values per x (a zig-zag) and a "latest N errors" label
+ * that can be one file's count. The total is authoritative (the per-file rows
+ * are a truncated breakdown); only when no total exists are the per-file
+ * rows summed (latest row per file).
+ */
+function iterationPoint(rows: readonly BurnDownSample[]): BurnDownPointView {
+  const totals = rows.filter((r) => r.file === null);
+  if (totals.length > 0) return burnDownPoint(latestSample(totals));
+  const byFile = new Map<string, BurnDownSample[]>();
+  for (const r of rows) {
+    const list = byFile.get(r.file ?? "") ?? [];
+    list.push(r);
+    byFile.set(r.file ?? "", list);
+  }
+  const perFile = [...byFile.values()].map(latestSample);
+  const newest = latestSample(perFile);
+  return {
+    iteration: newest.iteration,
+    errorCount: perFile.reduce((sum, r) => sum + r.error_count, 0),
+    recordedAt: newest.recorded_at,
+    state: "ran",
+    reason: null,
   };
 }
 
 export function burnDownSeries(samples: readonly BurnDownSample[]): BurnDownSeriesView[] {
-  const byQueue = new Map<string, BurnDownSample[]>();
+  const byQueue = new Map<string, Map<number, BurnDownSample[]>>();
   for (const sample of samples) {
-    const list = byQueue.get(sample.queue) ?? [];
-    list.push(sample);
-    byQueue.set(sample.queue, list);
+    const iterations = byQueue.get(sample.queue) ?? new Map<number, BurnDownSample[]>();
+    const rows = iterations.get(sample.iteration) ?? [];
+    rows.push(sample);
+    iterations.set(sample.iteration, rows);
+    byQueue.set(sample.queue, iterations);
   }
   const series: BurnDownSeriesView[] = [];
-  for (const [queue, list] of byQueue) {
-    list.sort(
-      (a, b) => a.iteration - b.iteration || tsMs(a.recorded_at ?? "") - tsMs(b.recorded_at ?? ""),
-    );
-    series.push({
-      queue,
-      points: list.slice(-50).map(burnDownPoint),
-    });
+  for (const [queue, iterations] of byQueue) {
+    const points = [...iterations.values()].map(iterationPoint).sort((a, b) => a.iteration - b.iteration);
+    series.push({ queue, points: points.slice(-50) });
   }
   series.sort((a, b) => a.queue.localeCompare(b.queue));
   return series;
