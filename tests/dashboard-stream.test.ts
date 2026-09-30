@@ -112,6 +112,27 @@ function deferredReader(): {
   };
 }
 
+/** Manually released backoff sleeps, so retry timing is deterministic. */
+function controllableSleep(): {
+  sleep: (ms: number) => Promise<void>;
+  waits: Array<{ ms: number; resolve: () => void }>;
+  /** Every requested duration, in order (released or not). */
+  waitLog: number[];
+  releaseNext: () => void;
+} {
+  const waits: Array<{ ms: number; resolve: () => void }> = [];
+  const waitLog: number[] = [];
+  return {
+    sleep: (ms) => {
+      waitLog.push(ms);
+      return new Promise<void>((resolve) => waits.push({ ms, resolve }));
+    },
+    waits,
+    waitLog,
+    releaseNext: () => waits.shift()?.resolve(),
+  };
+}
+
 /** Yields once on the MACROtask queue so pending loop continuations settle. */
 const tick = (): Promise<void> => Bun.sleep(1);
 
@@ -154,12 +175,14 @@ describe("envelope stream subscriber (US-007): receipt, fallback, resilience", (
     subscriber.stop();
   });
 
-  test("forced stream failure ENGAGES the poll fallback once and ends the stream loop", async () => {
+  test("forced stream failure ENGAGES the poll fallback once and backs off instead of hot-looping", async () => {
     const reader = deferredReader();
+    const sleeper = controllableSleep();
     const fallbacks: Array<{ flowId: string; error: string }> = [];
     const subscriber = startEnvelopeStreamSubscriber({
       read: reader.read,
       longPollMs: 50,
+      sleep: sleeper.sleep,
       onFallback: (flowId, error) => fallbacks.push({ flowId, error }),
     });
     subscriber.follow(["cx-7"]);
@@ -168,8 +191,107 @@ describe("envelope stream subscriber (US-007): receipt, fallback, resilience", (
     await tick();
     expect(subscriber.mode("cx-7")).toBe("poll-fallback");
     expect(fallbacks).toEqual([{ flowId: "cx-7", error: "server unreachable (forced failure)" }]);
-    expect(reader.pendingCount()).toBe(0); // the loop ENDED (poll serves the feed now)
+    // No re-read while backing off (poll serves the feed meanwhile).
+    expect(reader.pendingCount()).toBe(0);
+    expect(sleeper.waits).toHaveLength(1);
     subscriber.stop();
+  });
+
+  test("C57: after a failure the subscriber retries and flips back to stream on a successful read", async () => {
+    const reader = deferredReader();
+    const sleeper = controllableSleep();
+    const fallbacks: string[] = [];
+    const recovered: string[] = [];
+    const subscriber = startEnvelopeStreamSubscriber({
+      read: reader.read,
+      longPollMs: 50,
+      retryBaseMs: 100,
+      retryMaxMs: 800,
+      sleep: sleeper.sleep,
+      onFallback: (flowId) => fallbacks.push(flowId),
+      onRecover: (flowId) => recovered.push(flowId),
+    });
+    subscriber.follow(["cx-7"]);
+    await tick();
+    reader.failNext("cx-7", new Error("UNAVAILABLE: dex restarting"));
+    await tick();
+    expect(subscriber.mode("cx-7")).toBe("poll-fallback");
+    expect(sleeper.waits.map((w) => w.ms)).toEqual([100]);
+
+    sleeper.releaseNext(); // dex is back: the backoff elapses
+    await tick();
+    expect(reader.pendingCount()).toBe(1); // the loop re-armed its long-poll
+    reader.resolveNext("cx-7", streamMessage());
+    await tick();
+    expect(subscriber.mode("cx-7")).toBe("stream");
+    expect(recovered).toEqual(["cx-7"]);
+    expect(subscriber.size("cx-7")).toBe(1);
+    expect(subscriber.modes()).toEqual({ "cx-7": "stream" });
+
+    // A NEW failure streak announces the fallback again.
+    reader.failNext("cx-7", new Error("UNAVAILABLE again"));
+    await tick();
+    expect(fallbacks).toEqual(["cx-7", "cx-7"]);
+    subscriber.stop();
+  });
+
+  test("C57: backoff is bounded and onFallback fires once per failure streak, not per retry", async () => {
+    const reader = deferredReader();
+    const sleeper = controllableSleep();
+    const fallbacks: string[] = [];
+    const subscriber = startEnvelopeStreamSubscriber({
+      read: reader.read,
+      retryBaseMs: 100,
+      retryMaxMs: 800,
+      sleep: sleeper.sleep,
+      onFallback: (flowId) => fallbacks.push(flowId),
+    });
+    subscriber.follow(["cx-7"]);
+    await tick();
+    for (let i = 0; i < 5; i += 1) {
+      reader.failNext("cx-7", new Error(`still down ${i}`));
+      await tick();
+      sleeper.releaseNext();
+      await tick();
+    }
+    expect(sleeper.waitLog).toEqual([100, 200, 400, 800, 800]);
+    expect(fallbacks).toEqual(["cx-7"]);
+    expect(subscriber.mode("cx-7")).toBe("poll-fallback");
+    subscriber.stop();
+  });
+
+  test("C57: a long-poll wake-up after a failure also counts as recovered (the connection works)", async () => {
+    const reader = deferredReader();
+    const sleeper = controllableSleep();
+    const subscriber = startEnvelopeStreamSubscriber({ read: reader.read, sleep: sleeper.sleep });
+    subscriber.follow(["cx-7"]);
+    await tick();
+    reader.failNext("cx-7", new Error("down"));
+    await tick();
+    sleeper.releaseNext();
+    await tick();
+    reader.failNext("cx-7", Object.assign(new Error("idle"), { subStatus: "longPollTimeout" }));
+    await tick();
+    expect(subscriber.mode("cx-7")).toBe("stream");
+    subscriber.stop();
+  });
+
+  test("C57: stop() or dropping the flow while backing off ends the loop (no read afterwards)", async () => {
+    const reader = deferredReader();
+    const sleeper = controllableSleep();
+    const subscriber = startEnvelopeStreamSubscriber({ read: reader.read, sleep: sleeper.sleep });
+    subscriber.follow(["cx-7", "cx-6"]);
+    await tick();
+    reader.failNext("cx-7", new Error("down"));
+    reader.failNext("cx-6", new Error("down"));
+    await tick();
+    expect(sleeper.waits).toHaveLength(2);
+    subscriber.follow(["cx-7"]); // cx-6 leaves the selection while backing off
+    subscriber.stop(); // and everything stops
+    sleeper.releaseNext();
+    sleeper.releaseNext();
+    await tick();
+    expect(reader.pendingCount()).toBe(0);
   });
 
   test("the per-flow ring buffer is bounded (oldest dropped)", async () => {

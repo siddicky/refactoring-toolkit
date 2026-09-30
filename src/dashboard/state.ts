@@ -34,6 +34,7 @@ import type {
   NormalizedKillEvent,
   QueueSummaryView,
   SourceStatus,
+  StreamMode,
   AgentUsageView,
   TscAccountingSample,
   UsageSplitView,
@@ -905,6 +906,11 @@ export interface DashboardInput {
    * Projection-only: this field feeds RENDERING; nothing else consumes it.
    */
   streamFeed?: readonly { flowId: string; event: unknown }[];
+  /**
+   * Per-flow mode of the stream subscriber (stream | poll-fallback), surfaced
+   * as FlowView.streamMode. Absent = subscriber not running.
+   */
+  streamModes?: Readonly<Record<string, StreamMode>>;
   feedLimit: number;
   commitLimit: number;
 }
@@ -1105,6 +1111,7 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     startTime: f.startTime ?? "",
     closeTime: f.closeTime ?? null,
     runId: f.runId,
+    ...(input.streamModes?.[f.flowId] !== undefined ? { streamMode: input.streamModes[f.flowId] } : {}),
   }));
 
   // Feed: history walk (with context threading), state fallback per flow.

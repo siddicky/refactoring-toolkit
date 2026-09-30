@@ -1162,6 +1162,21 @@ describe("buildDashboardState headline state + degraded across SubFlow children 
     expect(state.headlineDegraded).toBe(false);
   });
 
+  test("C57: per-flow stream mode is surfaced on the flow views (omitted when not followed)", () => {
+    const state = buildDashboardState({
+      now: "2026-09-25T22:00:00.000Z",
+      dex: { available: true, error: null, detail: null, flows: [parent, child], states: {}, histories: {} },
+      git: { available: false, error: null, repoRoot: "/tmp/x", commits: [], worktrees: [] },
+      killEvents: { available: false, error: null, filesScanned: [], events: [] },
+      burnDownFiles: [],
+      streamModes: { [parent.flowId]: "poll-fallback" },
+      feedLimit: 80,
+      commitLimit: 40,
+    });
+    expect(state.flows.find((f) => f.flowId === parent.flowId)?.streamMode).toBe("poll-fallback");
+    expect(state.flows.find((f) => f.flowId === child.flowId)?.streamMode).toBeUndefined();
+  });
+
   test("no flows: headline state none", () => {
     const state = build([], {});
     expect(state.headlineState).toBe("none");

@@ -108,7 +108,7 @@
     <div>
       <h2><span class="n">04</span>flows</h2>
       <div class="panel"><table id="flows"><thead>
-        <tr><th>flow id</th><th>type</th><th>status</th><th>started</th><th>closed</th></tr>
+        <tr><th>flow id</th><th>type</th><th>status</th><th>feed</th><th>started</th><th>closed</th></tr>
       </thead><tbody></tbody></table><div class="empty" id="flows-empty" hidden></div></div>
     </div>
   </section>
@@ -290,10 +290,14 @@ function renderFlows(flows) {
   const tb = $("flows").tBodies[0];
   $("flows-empty").hidden = flows.length > 0;
   $("flows-empty").textContent = flows.length ? "" : "dex unreachable — no flows visible";
+  const feedMode = (m) => m === "stream" ? '<span class="green" title="live envelope stream">stream</span>'
+    : m === "poll-fallback" ? '<span class="amber" title="stream failed (retrying with backoff); dexcli polling serves the feed">poll</span>'
+    : '<span class="faint" title="stream subscriber not following this flow">-</span>';
   tb.innerHTML = flows.map((f) => `<tr>
     <td class="cyan" title="${esc(f.flowId)}">${esc(short(f.flowId, 34))}</td>
     <td class="dim">${esc(f.flowType)}</td>
     <td><span class="badge ${esc(f.status)}">${esc(f.status.replace("FLOW_STATUS_", "").toLowerCase())}</span></td>
+    <td>${feedMode(f.streamMode)}</td>
     <td class="dim" title="${esc(utcFull(f.startTime))}">${utcTime(f.startTime)} <span class="faint">(${esc(rel(f.startTime))} ago)</span></td>
     <td class="dim">${f.closeTime ? utcTime(f.closeTime) : '<span class="faint">-</span>'}</td>
   </tr>`).join("");

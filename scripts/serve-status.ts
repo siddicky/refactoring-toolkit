@@ -263,6 +263,7 @@ async function snapshot(
     },
     burnDownFiles: burnRes,
     streamFeed,
+    ...(stream !== null ? { streamModes: stream.modes() } : {}),
     feedLimit: cfg.feedLimit,
     commitLimit: cfg.commitLimit,
   });

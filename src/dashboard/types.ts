@@ -210,6 +210,9 @@ export interface SourceStatus {
   detail: string | null;
 }
 
+/** Per-flow live-feed source: the telemetry stream, or dexcli polling after a failure. */
+export type StreamMode = "stream" | "poll-fallback";
+
 export interface FlowView {
   flowId: string;
   flowType: string;
@@ -217,6 +220,11 @@ export interface FlowView {
   startTime: string;
   closeTime: string | null;
   runId: string;
+  /**
+   * Live-feed source for this flow. Omitted when the stream subscriber is not
+   * running or does not follow the flow (dexcli polling only).
+   */
+  streamMode?: StreamMode;
 }
 
 export interface GridRow {

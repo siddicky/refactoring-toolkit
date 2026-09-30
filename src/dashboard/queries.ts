@@ -32,6 +32,7 @@ import type {
   GitWorktreeRow,
   NormalizedKillEvent,
   StreamEventMessage,
+  StreamMode,
 } from "./types.js";
 
 const execFileP = promisify(execFile);
@@ -452,7 +453,7 @@ export type EnvelopeStreamReader = (
 ) => Promise<StreamRead>;
 
 /** Per-flow subscriber mode: live stream, or poll fallback after a failure. */
-export type SubscriberMode = "stream" | "poll-fallback";
+export type SubscriberMode = StreamMode;
 
 export interface EnvelopeStreamSubscriber {
   /** Follow the given flow ids (starts loops; stops loops for removed ids). */
@@ -461,6 +462,8 @@ export interface EnvelopeStreamSubscriber {
   recentEvents(flowId: string): StreamEventMessage[];
   /** Current mode of one flow's source ("poll-fallback" once it has failed). */
   mode(flowId: string): SubscriberMode;
+  /** Mode of every FOLLOWED flow (surfaced per flow in /api/state). */
+  modes(): Record<string, SubscriberMode>;
   /** Count of buffered events per flow (render/test convenience). */
   size(flowId: string): number;
   /** Stops every loop; the buffered events remain readable. */
@@ -474,10 +477,18 @@ export interface EnvelopeStreamSubscriberOptions {
   longPollMs?: number;
   /** Per-flow ring-buffer cap (oldest dropped). Default 200. */
   bufferLimit?: number;
-  /** Called ONCE per flow when the stream fails and poll fallback engages. */
+  /** Called ONCE per failure streak (not per retry) when poll fallback engages. */
   onFallback?: (flowId: string, error: string) => void;
+  /** Called when a flow's stream source recovers after a failure streak. */
+  onRecover?: (flowId: string) => void;
   /** Called after each message lands in the buffer (observability/tests). */
   onEvent?: (message: StreamEventMessage) => void;
+  /** First retry delay after a failed read; doubles per failure. Default 1 s. */
+  retryBaseMs?: number;
+  /** Upper bound of the retry delay. Default 30 s. */
+  retryMaxMs?: number;
+  /** Injected delay (tests); default is an unref'd setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -497,13 +508,24 @@ function describeStreamError(err: unknown): string {
   return String(err);
 }
 
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    (timer as { unref?: () => void }).unref?.();
+  });
+}
+
 /**
  * Starts a ReadStream-based event source for `port/<flowId>/events` — one
  * long-poll loop per followed flow with resumable tokens. ANY non-wake-up
- * read failure (server down, unregistered stream, decode defect) flips that
- * flow to `poll-fallback`, notifies `onFallback` once, and ENDS the loop:
- * the retained dexcli polling path keeps serving the feed (ENGAGED fallback
- * — asserted by tests), and the buffered events stay available.
+ * read failure (server down or restarting, unregistered stream, decode
+ * defect) flips that flow to `poll-fallback` and notifies `onFallback` once
+ * per failure streak; the retained dexcli polling path keeps serving the feed
+ * meanwhile (ENGAGED fallback — asserted by tests). The loop then retries
+ * with bounded exponential backoff from the same resume token, and the first
+ * successful read (or long-poll wake-up) flips the flow back to `stream`, so
+ * a dex restart does not silently end the live feed for the life of the
+ * process.
  */
 export function startEnvelopeStreamSubscriber(
   options: EnvelopeStreamSubscriberOptions,
@@ -511,35 +533,49 @@ export function startEnvelopeStreamSubscriber(
   const read = options.read;
   const longPollMs = options.longPollMs ?? 25_000;
   const bufferLimit = Math.max(1, options.bufferLimit ?? 200);
+  const retryBaseMs = Math.max(1, options.retryBaseMs ?? 1_000);
+  const retryMaxMs = Math.max(retryBaseMs, options.retryMaxMs ?? 30_000);
+  const sleep = options.sleep ?? defaultSleep;
 
   interface LoopState {
     token: string;
     buffer: StreamEventMessage[];
     mode: SubscriberMode;
+    /** Cleared by follow() dropping the flow and by stop(): ends the loop. */
     active: boolean;
-    seq: number; // guards stale loops after follow()/stop() races
   }
   const loops = new Map<string, LoopState>();
 
   function loop(flowId: string, state: LoopState): void {
-    const seq = state.seq;
     void (async () => {
-      while (state.active && state.seq === seq) {
+      let failures = 0;
+      const markHealthy = () => {
+        if (state.mode === "stream") return;
+        state.mode = "stream";
+        failures = 0;
+        options.onRecover?.(flowId);
+      };
+      while (state.active) {
         try {
           const res = await read(flowId, state.token, longPollMs);
-          if (!state.active || state.seq !== seq) return;
+          if (!state.active) return;
+          markHealthy();
           state.token = res.resumeToken;
           state.buffer.push(res.value);
           if (state.buffer.length > bufferLimit) state.buffer.shift();
           options.onEvent?.(res.value);
         } catch (err) {
-          if (!state.active || state.seq !== seq) return;
-          if (isLongPollWakeUp(err)) continue; // nothing new within the window
-          // REAL failure: engage the poll fallback for this flow and stop.
-          state.mode = "poll-fallback";
-          state.active = false;
-          options.onFallback?.(flowId, describeStreamError(err));
-          return;
+          if (!state.active) return;
+          if (isLongPollWakeUp(err)) {
+            markHealthy(); // nothing new within the window, but the source is reachable
+            continue;
+          }
+          failures += 1;
+          if (failures === 1) {
+            state.mode = "poll-fallback";
+            options.onFallback?.(flowId, describeStreamError(err));
+          }
+          await sleep(Math.min(retryMaxMs, retryBaseMs * 2 ** (failures - 1)));
         }
       }
     })();
@@ -556,7 +592,7 @@ export function startEnvelopeStreamSubscriber(
       }
       for (const flowId of flowIds) {
         if (loops.has(flowId)) continue;
-        const state: LoopState = { token: "", buffer: [], mode: "stream", active: true, seq: 0 };
+        const state: LoopState = { token: "", buffer: [], mode: "stream", active: true };
         loops.set(flowId, state);
         loop(flowId, state);
       }
@@ -566,6 +602,11 @@ export function startEnvelopeStreamSubscriber(
     },
     mode(flowId) {
       return loops.get(flowId)?.mode ?? "poll-fallback";
+    },
+    modes() {
+      const out: Record<string, SubscriberMode> = {};
+      for (const [flowId, state] of loops) out[flowId] = state.mode;
+      return out;
     },
     size(flowId) {
       return loops.get(flowId)?.buffer.length ?? 0;

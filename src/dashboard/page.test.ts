@@ -208,6 +208,32 @@ describe("headline styling (C54)", () => {
   });
 });
 
+describe("flows table stream mode (C57)", () => {
+  const flow = (over: Record<string, unknown>) => ({
+    flowId: "cx-5",
+    flowType: "port.Project",
+    status: "running",
+    startTime: "2026-09-26T10:00:00Z",
+    closeTime: null,
+    runId: "r1",
+    ...over,
+  });
+
+  test("the per-flow feed source is shown: stream, poll (fallback), or - (not followed)", () => {
+    const page = loadPage();
+    page.api.renderFlows([
+      flow({ flowId: "a", streamMode: "stream" }),
+      flow({ flowId: "b", streamMode: "poll-fallback" }),
+      flow({ flowId: "c" }),
+    ]);
+    const html = page.el("flows").tBodies[0]?.innerHTML ?? "";
+    expect(html).toContain(">stream<");
+    expect(html).toContain(">poll<");
+    expect(html.match(/<tr>/g)?.length).toBe(3);
+    expect(page.html).toContain("<th>feed</th>");
+  });
+});
+
 describe("usage table fresh input (C60)", () => {
   const usage = (over: Record<string, unknown>) => ({
     role: "review",
