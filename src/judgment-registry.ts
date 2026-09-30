@@ -18,6 +18,17 @@
  * Lane A: a triage classification cannot trigger a lane change.
  */
 
+/**
+ * Citation-gate keep thresholds (Lane-B "citation-check"): a finding is KEPT
+ * iff its p_cited is at least the threshold of the checker that scored it.
+ * The naive checker is binary ({0,1}); the live Jev checker returns a noul
+ * probability (live reports record 0.97-0.99 for genuinely cited findings),
+ * so demanding exactly 1 there dropped valid findings. flows/port-project.ts
+ * applies these; the registry entry below is derived from them.
+ */
+export const CITATION_MIN_P_NAIVE = 1;
+export const CITATION_MIN_P_JEV = 0.5;
+
 /** One declared Lane-B consumer. */
 export interface JudgmentRegistryEntry {
   /** Stable consumer id (test-asserted unique). */

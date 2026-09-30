@@ -25,7 +25,16 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { configurePortJudgment } from "../flows/runtime-hooks.js";
-import { liveJevClient } from "../flows/port-project.js";
+import {
+  liveJevClient,
+  markerKeyOf,
+  PortFileFlow,
+  ppDiff,
+  ppJevUsage,
+  ppKept,
+  ppVerdict,
+  type FileRoundInput,
+} from "../flows/port-project.js";
 import {
   configureEnvelopeStreamPublisher,
   envelopeStep,
@@ -76,17 +85,113 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
     expect(liveJevClient()).toBe(real);
   });
 
-  test("all three consumption sites (verdict-check, prioritize, vitest triage) resolve through liveJevClient()", () => {
+  /** Runs the REAL verdict-check and prioritize steps against `client`; returns the client's call counts. */
+  async function exerciseLaneBSteps(client: JudgmentClient): Promise<{ verdictCheckCalls: number; prioritizeCalls: number }> {
+    configurePortJudgment(client);
+    const file = "src/Money.php";
+    const key = markerKeyOf(file, 1);
+    const fri: FileRoundInput = {
+      repoRoot: "/r",
+      worktreeRoot: "/r/.wt",
+      integrationWorktreePath: "/r/.wt/integration",
+      sourceRoot: "/r/src",
+      epoch: 1,
+      file,
+      round: 1,
+      worktreePath: "/r/.wt/money-1",
+      branch: "lease/money/1",
+    };
+    const finding = {
+      finding_id: "A1",
+      severity: "major" as const,
+      summary: "s",
+      evidence: { hunk_id: "h1", start_line: 1, end_line: 1, quote: "export class Money {" },
+    };
+    const doc = {
+      diff_id: "d1",
+      file,
+      base_ref: "HEAD",
+      hunks: [
+        { hunk_id: "h1", header: "@@ -0,0 +1,1 @@", old_start: 0, old_lines: 0, new_start: 1, new_lines: 1, lines: ["+export class Money {"] },
+      ],
+    };
+    const tuple = (reviewer: string, findings: Array<typeof finding>): unknown => ({
+      agent: {
+        file,
+        reviewer,
+        round: 1,
+        diff_id: "d1",
+        findings: findings.map((f) => ({
+          finding_id: f.finding_id,
+          severity: f.severity,
+          evidence_span: { start_line: 1, end_line: 1, snippet: f.evidence.quote },
+          disposition: "fix",
+        })),
+        citation_check: [],
+      },
+      metrics: { file, reviewer, round: 1, diff_id: "d1", findings, citation_check: [] },
+    });
+    const stores = new Map<unknown, Map<string, unknown>>([
+      [ppDiff, new Map([[key, { diffId: "d1", raw: "", doc, bodyLineOffset: 0 }]])],
+      [ppVerdict, new Map([[`${key}#reviewer-A`, tuple("reviewer-A", [finding])], [`${key}#reviewer-B`, tuple("reviewer-B", [])]])],
+      [ppKept, new Map()],
+      [ppJevUsage, new Map()],
+    ]);
+    const ctx = {
+      attempt: 1,
+      flowId: "us007-wiring-steps",
+      getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
+      setAttribute: (attr: unknown, value: unknown, instance: string) => {
+        if (!stores.has(attr)) stores.set(attr, new Map());
+        stores.get(attr)?.set(instance, value);
+      },
+    } as unknown as Context;
+
+    const flow = new PortFileFlow();
+    const before = (client as { calls?: number }).calls ?? 0;
+    await flow.verdictCheck.execute(ctx as never, fri);
+    const afterVerdictCheck = (client as { calls?: number }).calls ?? 0;
+    await flow.prioritize.execute(ctx as never, fri);
+    const afterPrioritize = (client as { calls?: number }).calls ?? 0;
+    return { verdictCheckCalls: afterVerdictCheck - before, prioritizeCalls: afterPrioritize - afterVerdictCheck };
+  }
+
+  function countingClient(kind: "real" | "in-memory"): JudgmentClient & { calls: number } {
+    const client = {
+      kind,
+      calls: 0,
+      systemOne: async (request: { questions: Record<string, unknown> }) => {
+        client.calls += 1;
+        const answers: Record<string, { type: "noul"; noul: number }> = {};
+        for (const name of Object.keys(request.questions)) answers[name] = { type: "noul", noul: 0.99 };
+        return { model: "double", answers, usage: { input_tokens: 1, output_tokens: 1 } };
+      },
+    };
+    return client as unknown as JudgmentClient & { calls: number };
+  }
+
+  test("verdict-check and prioritize consume the REAL client resolved through liveJevClient()", async () => {
+    const real = countingClient("real");
+    const calls = await exerciseLaneBSteps(real);
+    expect(calls.verdictCheckCalls).toBeGreaterThan(0);
+    expect(calls.prioritizeCalls).toBeGreaterThan(0);
+  });
+
+  test("a non-real (in-memory) client is never consulted by verdict-check or prioritize (naive default)", async () => {
+    const offline = countingClient("in-memory");
+    const calls = await exerciseLaneBSteps(offline);
+    expect(calls).toEqual({ verdictCheckCalls: 0, prioritizeCalls: 0 });
+  });
+
+  test("the vitest-triage site (QueueVerifyStep -> classifyVitestRecords) resolves through liveJevClient()", () => {
+    // QueueVerifyStep shells out to tsc/vitest, so it is not executed here;
+    // the call site is pinned narrowly. The dead second seam is GONE (the
+    // drift cannot regrow silently) — code-shape checks: comments may still
+    // recount the history.
     const src = readFileSync(join(ROOT, "flows", "port-project.ts"), "utf8");
-    const sites = src.split("\n").filter((l) => l.includes("liveJevClient()"));
-    // The verdict-check consumer, the prioritize consumer, and the
-    // classifyVitestRecords consumer — plus the resolver's own definition.
-    const consumerSites = sites.filter(
-      (l) => l.includes("const jevClient = liveJevClient()") || l.includes("classifyVitestRecords("),
-    );
-    expect(consumerSites.length).toBe(3);
-    // The dead second seam is GONE (the drift cannot regrow silently) —
-    // code-shape check: comments may still recount the history.
+    const callSites = src.split("\n").filter((l) => /\bclassifyVitestRecords\(/.test(l) && !l.includes("function classifyVitestRecords"));
+    expect(callSites.length).toBe(1);
+    expect(callSites[0]).toContain("liveJevClient()");
     expect(src.match(/let PORT_JEV_LIVE\b/)).toBeNull();
     expect(src.match(/function configurePortJevLive\b/)).toBeNull();
     expect(src.match(/function portJevLiveClient\b/)).toBeNull();

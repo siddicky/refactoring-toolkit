@@ -117,8 +117,10 @@ import {
 import { portJevLive } from "./runtime-hooks.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
 import { createJevFailureClassifier } from "../src/typesafe/vitest-triage.js";
+import { CITATION_MIN_P_JEV, CITATION_MIN_P_NAIVE } from "../src/judgment-registry.js";
 import {
   buildRetryContextDiagnosis,
+  type CitationCheckResult,
   type DiffDocument,
   type Finding as MetricsFinding,
   type TokenUsage,
@@ -342,9 +344,27 @@ export interface ReviewTuple {
  */
 export type ReviewVerdict = ReviewTuple | VerdictTombstone;
 
+/** Which implementation produced a Lane-B gate's scores/order (provenance). */
+export type JudgmentChecker = "naive" | "jev" | "naive-fallback";
+
+/** One reviewer's citation-gate scores, with the checker that produced them. */
+export interface CitationGateRecord {
+  reviewer: string;
+  checker: JudgmentChecker;
+  /** Why live Jev was abandoned (checker "naive-fallback"); null otherwise. */
+  fallbackReason: string | null;
+  /** p_cited per checked finding (kept AND dropped) — the gate's audit trail. */
+  scores: Array<{ finding_id: string; p_cited: number }>;
+}
+
 export interface KeptFindings {
   findings: MetricsFinding[];
-  dropped: Array<{ finding_id: string; reviewer: string; reason: string }>;
+  /** `p_cited` is set on citation-gate drops (the score the gate applied). */
+  dropped: Array<{ finding_id: string; reviewer: string; reason: string; p_cited?: number }>;
+  /** Lane-B "citation-check" provenance (absent on records predating it). */
+  citationGate?: CitationGateRecord[];
+  /** Lane-B "prioritize" provenance (set by PrioritizeStep). */
+  prioritize?: { checker: JudgmentChecker; fallbackReason: string | null };
 }
 
 export interface OutPathRef {
@@ -638,6 +658,115 @@ async function recordJevUsage(ctx: Context, stepId: string, tokens: number): Pro
   const log = ppJevUsage.get(ctx, "usage") ?? [];
   log.push({ stepId, tokens, atUtc: new Date().toISOString() });
   ppJevUsage.set(ctx, "usage", log);
+}
+
+// Lane-B gates with a fail-open fallback (registry: citation-check, prioritize)
+// ---------------------------------------------------------------------------
+
+/**
+ * The citation gate's keep decision — the single authority for the port-loop
+ * gate (VerdictCheckStep) and the prep gate (PrepVerdictCheckStep). Thresholds
+ * live in src/judgment-registry.ts next to the registry entry that documents
+ * them: the naive checker is binary (keep iff 1), the live Jev checker returns
+ * a probability (keep iff >= CITATION_MIN_P_JEV).
+ */
+export function citationKept(pCited: number, checker: JudgmentChecker): boolean {
+  return pCited >= (checker === "jev" ? CITATION_MIN_P_JEV : CITATION_MIN_P_NAIVE);
+}
+
+/** Counts System One tokens across every call, including calls that fail later. */
+function countingJevClient(client: JudgmentClient): { client: JudgmentClient; tokens: () => number } {
+  let total = 0;
+  return {
+    client: {
+      kind: client.kind,
+      systemOne: async (request) => {
+        const r = await client.systemOne(request);
+        total += r.usage.input_tokens + r.usage.output_tokens;
+        return r;
+      },
+    },
+    tokens: () => total,
+  };
+}
+
+function failureReason(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).slice(0, 300);
+}
+
+export interface CitationGateOutcome {
+  citations: CitationCheckResult[];
+  checker: JudgmentChecker;
+  fallbackReason: string | null;
+  /** Live Jev tokens spent, including before a failure (0 on the naive path). */
+  jevTokens: number;
+}
+
+/**
+ * Citation scores for one reviewer's verdict: live Jev when a client is
+ * configured, the naive code-only checker otherwise. A Jev failure (client
+ * error, or no answer for a finding) FAILS OPEN to the naive checker — never
+ * a step failure (a thrown step is retried by dex and re-bills the batch) —
+ * and the degradation is returned for the caller to record.
+ */
+export async function runCitationGate(
+  verdict: MetricsVerdictRecord,
+  diff: DiffDocument,
+  jev: JudgmentClient | undefined,
+): Promise<CitationGateOutcome> {
+  if (jev === undefined) {
+    return {
+      citations: naiveCitationCheck(verdict, diff),
+      checker: "naive",
+      fallbackReason: null,
+      jevTokens: 0,
+    };
+  }
+  const counting = countingJevClient(jev);
+  try {
+    const citations = await createCitationChecker(counting.client).check(verdict, diff);
+    return { citations, checker: "jev", fallbackReason: null, jevTokens: counting.tokens() };
+  } catch (err) {
+    return {
+      citations: naiveCitationCheck(verdict, diff),
+      checker: "naive-fallback",
+      fallbackReason: failureReason(err),
+      jevTokens: counting.tokens(),
+    };
+  }
+}
+
+export interface PrioritizeGateOutcome {
+  ordered: MetricsFinding[];
+  checker: JudgmentChecker;
+  fallbackReason: string | null;
+  jevTokens: number;
+}
+
+/**
+ * Fixer-queue ordering: live Jev rerank when configured, naive severity order
+ * otherwise; a Jev failure fails open to the naive order (same policy and
+ * recording as {@link runCitationGate}).
+ */
+export async function runPrioritizeGate(
+  findings: readonly MetricsFinding[],
+  jev: JudgmentClient | undefined,
+): Promise<PrioritizeGateOutcome> {
+  if (jev === undefined || findings.length === 0) {
+    return { ordered: naivePrioritize(findings), checker: "naive", fallbackReason: null, jevTokens: 0 };
+  }
+  const counting = countingJevClient(jev);
+  try {
+    const ordered = await createJevPrioritizer(counting.client).prioritize(findings);
+    return { ordered, checker: "jev", fallbackReason: null, jevTokens: counting.tokens() };
+  } catch (err) {
+    return {
+      ordered: naivePrioritize(findings),
+      checker: "naive-fallback",
+      fallbackReason: failureReason(err),
+      jevTokens: counting.tokens(),
+    };
+  }
 }
 
 // Vitest triage (Lane-B "vitest-triage", declared in src/judgment-registry.ts)
@@ -1692,6 +1821,7 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
     if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
     const kept: MetricsFinding[] = [];
     const dropped: KeptFindings["dropped"] = [];
+    const gate: CitationGateRecord[] = [];
     for (const reviewerId of ["reviewer-A", "reviewer-B"] as const) {
       const key = verdictKeyOf(fri.file, fri.round, reviewerId);
       const verdict = ppVerdict.get(ctx, key);
@@ -1710,36 +1840,32 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
         });
         continue;
       }
-      // Citation check: LIVE Jev nouls when configured (Phase 3 swap-in,
-      // createCitationChecker seam), else the naive code-only default. A
-      // finding survives iff its cited evidence appears in the reviewed diff
-      // (p_cited === 1) and its disposition asks for a fix.
-      const jevClient = liveJevClient();
-      let citations;
-      if (jevClient !== undefined) {
-        let jt = 0;
-        const counting: JudgmentClient = {
-          kind: jevClient.kind,
-          systemOne: async (request) => {
-            const r = await jevClient.systemOne(request);
-            jt += r.usage.input_tokens + r.usage.output_tokens;
-            return r;
-          },
-        };
-        citations = await createCitationChecker(counting).check(verdict.metrics, diff.doc);
-        if (jt > 0) await recordJevUsage(ctx, `pp-verdict-check:${fri.file}#${fri.round}`, jt);
-      } else {
-        citations = naiveCitationCheck(verdict.metrics, diff.doc);
+      // Citation check (Lane-B "citation-check"): LIVE Jev nouls when
+      // configured (Phase 3 swap-in, createCitationChecker seam), else the
+      // naive code-only default; a Jev failure fails OPEN to the naive check
+      // (never a thrown, re-billed step). A finding survives iff its cited
+      // evidence scores at least the checker's threshold (citationKept) and
+      // its disposition asks for a fix.
+      const outcome = await runCitationGate(verdict.metrics, diff.doc, liveJevClient());
+      if (outcome.jevTokens > 0) {
+        await recordJevUsage(ctx, `pp-verdict-check:${fri.file}#${fri.round}`, outcome.jevTokens);
       }
-      for (const check of citations) {
+      gate.push({
+        reviewer: reviewerId,
+        checker: outcome.checker,
+        fallbackReason: outcome.fallbackReason,
+        scores: outcome.citations.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
+      });
+      for (const check of outcome.citations) {
         const agentFinding = verdict.agent.findings.find((f) => f.finding_id === check.finding_id);
         const metricsFinding = verdict.metrics.findings.find((f) => f.finding_id === check.finding_id);
         if (agentFinding === undefined || metricsFinding === undefined) continue;
-        if (check.p_cited < 1) {
+        if (!citationKept(check.p_cited, outcome.checker)) {
           dropped.push({
             finding_id: check.finding_id,
             reviewer: reviewerId,
             reason: `citation check failed (p_cited=${check.p_cited})`,
+            p_cited: check.p_cited,
           });
           continue;
         }
@@ -1754,7 +1880,7 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
         kept.push(metricsFinding);
       }
     }
-    ppKept.set(ctx, keptKeyOf(fri.file, fri.round), { findings: kept, dropped });
+    ppKept.set(ctx, keptKeyOf(fri.file, fri.round), { findings: kept, dropped, citationGate: gate });
     return {
       output: { ...fri, keptCount: kept.length },
       tokens: null,
@@ -1775,26 +1901,17 @@ const PrioritizeStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<File
   inner: async (ctx, fri) => {
     const kept = ppKept.get(ctx, keptKeyOf(fri.file, fri.round));
     if (kept === undefined) throw new Error(`kept findings missing for ${fri.file}#${fri.round}`);
-    let ordered = kept.findings;
-    const jevClient = liveJevClient();
-    if (jevClient !== undefined && ordered.length > 0) {
-      let jt = 0;
-      const counting: JudgmentClient = {
-        kind: jevClient.kind,
-        systemOne: async (request) => {
-          const r = await jevClient.systemOne(request);
-          jt += r.usage.input_tokens + r.usage.output_tokens;
-          return r;
-        },
-      };
-      ordered = await createJevPrioritizer(counting).prioritize(ordered);
-      if (jt > 0) await recordJevUsage(ctx, `pp-prioritize:${fri.file}#${fri.round}`, jt);
-    } else {
-      ordered = naivePrioritize(ordered);
+    // Lane-B "prioritize": live Jev rerank when configured, naive severity
+    // order otherwise; a Jev failure fails OPEN to the naive order and the
+    // degradation rides the pp-kept record (never a thrown, re-billed step).
+    const outcome = await runPrioritizeGate(kept.findings, liveJevClient());
+    if (outcome.jevTokens > 0) {
+      await recordJevUsage(ctx, `pp-prioritize:${fri.file}#${fri.round}`, outcome.jevTokens);
     }
     ppKept.set(ctx, keptKeyOf(fri.file, fri.round), {
       ...kept,
-      findings: ordered,
+      findings: outcome.ordered,
+      prioritize: { checker: outcome.checker, fallbackReason: outcome.fallbackReason },
     });
     return { output: fri, tokens: null };
   },
@@ -2334,6 +2451,7 @@ const PrepVerdictCheckStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     }
     const kept: MetricsFinding[] = [];
     const dropped: KeptFindings["dropped"] = [];
+    const gate: CitationGateRecord[] = [];
     for (const reviewerId of ["reviewer-A", "reviewer-B"] as const) {
       const key = verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, reviewerId);
       const verdict = ppPrepVerdict.get(ctx, key);
@@ -2350,15 +2468,26 @@ const PrepVerdictCheckStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
         });
         continue;
       }
-      for (const check of naiveCitationCheck(verdict.metrics, diff.doc)) {
+      // The prep gate is deliberately NAIVE-only (registry "prep-citation-check"):
+      // the spec-map diff is reviewed against a deterministic baseline and
+      // never consults a judgment client.
+      const citations = naiveCitationCheck(verdict.metrics, diff.doc);
+      gate.push({
+        reviewer: reviewerId,
+        checker: "naive",
+        fallbackReason: null,
+        scores: citations.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
+      });
+      for (const check of citations) {
         const agentFinding = verdict.agent.findings.find((f) => f.finding_id === check.finding_id);
         const metricsFinding = verdict.metrics.findings.find((f) => f.finding_id === check.finding_id);
         if (agentFinding === undefined || metricsFinding === undefined) continue;
-        if (check.p_cited < 1) {
+        if (!citationKept(check.p_cited, "naive")) {
           dropped.push({
             finding_id: check.finding_id,
             reviewer: reviewerId,
             reason: `citation check failed (p_cited=${check.p_cited})`,
+            p_cited: check.p_cited,
           });
           continue;
         }
@@ -2373,7 +2502,7 @@ const PrepVerdictCheckStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
         kept.push(metricsFinding);
       }
     }
-    ppPrepFindings.set(ctx, "findings", { findings: kept, dropped });
+    ppPrepFindings.set(ctx, "findings", { findings: kept, dropped, citationGate: gate });
     // Counter ownership lives in PrepLoopDecision (single place decides a
     // revision; the increment rides with that decision — no double-count).
     void state;
