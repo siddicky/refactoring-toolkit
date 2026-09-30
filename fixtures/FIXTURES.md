@@ -39,7 +39,7 @@ Current digests:
 
 ```
 php-sample:            76728d34a578a21d0b364ba5a5de1c603e61cff903750a055f22b050900196f9
-creatorex-middleware:  42df6fd634a57b5b9630609c2b794972e7499c0746c5c210ca99c69ab72b015c
+creatorex-middleware:  461d9f9286fabb80aee3e274837eaa64f4899b815a44d4fbc07408dda91ace54
 ```
 
 Verified on 2026-09-25: for each fixture, two consecutive runs produced
@@ -144,18 +144,18 @@ LOC = non-blank lines; "code" excludes comment-only lines.
 | `src/Support/legacy_helpers.php` | 59 | 51 |
 | **src total (5 files)** | **514** | **430 (307 code)** |
 | `tests/Billing/SubscriptionServiceTest.php` | 135 | 103 |
-| `tests/Access/EntitlementCheckerTest.php` | 106 | 80 |
+| `tests/Access/EntitlementCheckerTest.php` | 126 | 96 |
 | `tests/Payouts/EarningsLedgerTest.php` | 69 | 53 |
 | `tests/Moderation/ChatSentinelTest.php` | 74 | 55 |
-| `tests/Support/LegacyHelpersTest.php` | 58 | 45 |
-| **tests total (5 files)** | **442** | **336 (324 code)** |
+| `tests/Support/LegacyHelpersTest.php` | 59 | 46 |
+| **tests total (5 files)** | **463** | **353 (333 code)** |
 
 ### Landmine map
 
 | File | Landmines (all pinned by tests) |
 |---|---|
 | `src/Billing/SubscriptionService.php` | Money as float+string mix: `'12.99'` vs `29.99` prices, `balance_due` rebuilt via `(float)+(float)` then `(string)`. Loose `==` on plan codes: `'100'` resolves for int `100`, but `'premium'`/`'Premium'` are *different* plans and `'PREMIUM'` misses → `??` substitutes `'0.00'` (mistyped codes are free). Lying docblock: `applyCharge` claims declines "never throw" — hard declines throw `RuntimeException`. Grace window checks only an upper bound. Dunning transitions via an explicit allowed-map (`trialing → past_due` is legal). |
-| `src/Access/EntitlementChecker.php` | Geo gate via non-strict `in_array`: int `840` matches legacy alias `'840'`, lowercase `'us'` is denied. Null-coalescing traps: `'0'` entitlement short-circuits the `??` lookup (denied), `null` falls through; `requireEntitlement(false)` disables the whole check via `?? false`. Magic `__call` fluent `require*` gates; unknown gate throws; gates are sticky mutable state until `resetGates()`. Array-shape session rows; `$content` param and `requireGeo()` argument are silently unused. |
+| `src/Access/EntitlementChecker.php` | Geo gate via non-strict `in_array`: int `840` matches legacy alias `'840'`, lowercase `'us'` is denied. Null-coalescing traps: `'0'` entitlement short-circuits the `??` lookup (denied), `null` falls through; `requireEntitlement(false)` disables the whole check via `?? false`. Magic `__call` fluent `require*` gates: only names that do *not* start with `require` throw `BadMethodCallException`, while an unknown `require*` name (e.g. `requireFriendInvite()`) silently registers a gate that `decide()` never evaluates; gates are sticky mutable state until `resetGates()`. Array-shape session rows; `$content` param and `requireGeo()` argument are silently unused. |
 | `src/Payouts/EarningsLedger.php` | Rounding drift: half-away-from-zero (`round`) vs banker's (custom branch) — `2.345 → 2.35 / 2.34`; the banker's branch is unreachable for negatives (`floor` moves away from zero). USD/EUR entries summed 1:1, `balance()` currency argument ignored. "Never negative" docblock on `payable()` contradicted by a pinned `-2.5` payout. Raw amount types preserved per entry (string `'10.00'` vs float `2.5`). |
 | `src/Moderation/ChatSentinel.php` | Substring blocklist: `'crypto'` matches inside `'Crypto news'` (false positive on legit content) while leetspeak `'fr33 m0ney'` evades entirely. Phone regex redacts the date `'2026-01-15'` → `[phone]`, contradicting the "no false positives on stored content" docblock; bare 7-digit phones leak below the length threshold. `snippetAround` passes `$pos + 20` as the *length* argument (and a negative start counts from the end) — pinned to a 17-char window from the tail. |
 | `src/Support/legacy_helpers.php` | `creatorex_pluck` yields `null` for missing keys / non-array rows (not skipped) and reads object properties. `creatorex_format_date` claims "Timezones and DST are handled" — named zones are silently ignored (`(int) 'Europe/Berlin' === 0`), numeric zones are fixed-hour shifts, DST never handled. `creatorex_money_string` rounds via `sprintf('%.2f')` — a third rounding behavior, distinct from `round()` and the banker's path in the ledger. |

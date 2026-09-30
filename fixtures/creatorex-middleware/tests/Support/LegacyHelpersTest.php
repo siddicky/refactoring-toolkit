@@ -52,7 +52,8 @@ final class LegacyHelpersTest extends TestCase
 
     public function testMoneyStringRoundsViaSprintf(): void
     {
-        $this->assertSame('12.99', creatorex_money_string('12.999'));
+        // sprintf('%.2f') rounds to nearest; it does not truncate.
+        $this->assertSame('13.00', creatorex_money_string('12.999'));
         $this->assertSame('7.00', creatorex_money_string(7));
     }
 }

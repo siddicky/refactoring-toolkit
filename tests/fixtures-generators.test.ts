@@ -143,3 +143,62 @@ describe("generator --out handling", () => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Fixture test hygiene. No PHP runtime runs in this pipeline, so these are
+// structural checks on the committed PHP tests: each pins an assertion that
+// was hand-traced against its source and found to contradict it.
+// ---------------------------------------------------------------------------
+
+function readFixture(spec: FixtureSpec, rel: string): string {
+  return readFileSync(join(spec.committed, rel), "utf8");
+}
+
+/** Source of one PHP test method: from its signature to the next public method. */
+function phpMethod(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`PHP method ${name} not found`);
+  const next = source.indexOf("    public function ", start + 1);
+  return source.slice(start, next < 0 ? undefined : next);
+}
+
+describe("creatorex PHP tests agree with their sources (audit C66)", () => {
+  const entitlement = readFixture(CREATOREX, "tests/Access/EntitlementCheckerTest.php");
+
+  test("entitlement tests run against a session that satisfies the age and geo gates", () => {
+    // checker() registers age+geo+entitlement gates; a bare ['user_id', 'entitled'] session
+    // also fails age and geo, so the asserted reasons / allowed flag cannot hold.
+    for (const name of ["testStringZeroEntitlementDeniesDespiteLookup", "testNullEntitlementFallsThroughToLookup"]) {
+      const body = phpMethod(entitlement, name);
+      expect(body, name).not.toMatch(/decide\(\['user_id' => 42, 'entitled' => /);
+      expect(body, name).toContain("$this->session()");
+    }
+  });
+
+  test("the exception test calls a method EntitlementChecker::__call really rejects", () => {
+    // __call only throws for names that do not start with "require".
+    const body = phpMethod(entitlement, "testUnknownGateMethodThrows");
+    expect(body).toContain("expectException(\\BadMethodCallException::class)");
+    const call = /->(\w+)\(\);/.exec(body);
+    expect(call?.[1]).toBeDefined();
+    expect(call?.[1]?.startsWith("require")).toBe(false);
+  });
+
+  test("an unknown require* gate is pinned as accepted-but-unevaluated, not as a throw", () => {
+    const body = phpMethod(entitlement, "testUnknownRequireGateIsRegisteredButNeverEvaluated");
+    expect(body).toContain("requireFriendInvite()");
+    expect(body).not.toContain("expectException");
+    expect(body).toContain("assertTrue($checker->decide([])['allowed'])");
+  });
+
+  test("money_string assertions equal a round-to-nearest of the input, not a truncation", () => {
+    const helpers = readFixture(CREATOREX, "tests/Support/LegacyHelpersTest.php");
+    const body = phpMethod(helpers, "testMoneyStringRoundsViaSprintf");
+    const assertions = [...body.matchAll(/assertSame\('(\d+\.\d\d)', creatorex_money_string\('?(\d+(?:\.\d+)?)'?\)\)/g)];
+    expect(assertions.length).toBeGreaterThanOrEqual(2);
+    for (const m of assertions) {
+      // None of the inputs is a binary tie, so JS toFixed agrees with PHP sprintf('%.2f').
+      expect(m[1], `creatorex_money_string(${m[2]})`).toBe(Number(m[2]).toFixed(2));
+    }
+  });
+});
