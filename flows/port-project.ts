@@ -141,7 +141,6 @@ import {
   composeImplementerTurn,
   composeReviewerRepairTurn,
   composeReviewerTurn,
-  demoteReviewerLane,
   extractCodeFence,
   extractJsonObject,
   mapVerdictToMetrics,
@@ -1036,8 +1035,9 @@ async function diagnoseAmbiguousThrow(input: {
  *   the Tier-0 degenerateReply guard applies to it). Repair success = the
  *   repaired verdict passes schema AND is not suspect. Repair failure =
  *   TOMBSTONE;
- * - attempt EXHAUSTION (deterministic: ctx.attempt >= maxAttempts, the step's
- *   own retry policy) converts the final attempt's failure into a TOMBSTONE
+ * - attempt EXHAUSTION (deterministic: ctx.attempt >= maxAttempts, the
+ *   in-step bound REVIEW_STEP_MAX_ATTEMPTS — independent of the step's dex
+ *   executeRetry budget) converts that attempt's failure into a TOMBSTONE
  *   instead of a throw — with the failed turn's usage when the failure shape
  *   exposed it (the Tier-0 degenerate class does). A no-usage exhaustion
  *   (nothing measurable to anchor — provenance never zero) stays fatal:
@@ -1076,7 +1076,16 @@ function inStepMemoKey(input: {
   stepId?: string;
   diff: ReviewTurnDiff;
 }): string {
-  return `${input.ctx.flowId}/${input.ctx.runId}:${input.stepId ?? `pp-review-${input.reviewerId}`}:${input.diff.diffId}`;
+  return `${input.ctx.flowId}/${input.ctx.runId}:${input.stepId ?? reviewStepIdOf(input.reviewerId)}:${input.diff.diffId}`;
+}
+
+/**
+ * Envelope step id of a port-loop review step for a reviewer id
+ * ("reviewer-A" -> "pp-review-a", matching ReviewAStep's stepId). Callers in
+ * other loops (prep review) pass their own explicit `stepId`.
+ */
+function reviewStepIdOf(reviewerId: string): string {
+  return `pp-review-${reviewerId.replace(/^reviewer-/, "").toLowerCase()}`;
 }
 
 /** Test seam: clears the in-step verbatim memo (per-test isolation). */
@@ -1084,7 +1093,16 @@ export function resetInStepVerdictMemo(): void {
   inStepVerdictTexts.clear();
 }
 
-/** Review-step retry policy (dex executeRetry) — the exhaustion bound. */
+/**
+ * In-step exhaustion bound for a review turn: on dex attempt >= this value a
+ * failing turn with measurable provider usage becomes a TOMBSTONE instead of
+ * a throw. It is NOT the step's dex retry budget: the review steps run
+ * MODEL_STEP_OPTIONS (RESTART_WINDOW_RETRY, 8 attempts, sized to outlive a
+ * worker restart), and connection-refused attempts during a restart also
+ * count toward dex's attempt number. The two bounds are deliberately
+ * independent (stage 3c, BUILD_NOTES); a usage-less failure at or past this
+ * bound still throws and is retried within the dex budget.
+ */
 export const REVIEW_STEP_MAX_ATTEMPTS = 3;
 
 /** Sums two usage splits (original turn + repair turn burned tokens). */
@@ -1124,7 +1142,7 @@ export async function runReviewTurn(input: {
   attempt?: number;
   /** The durable step's id (diagnosis turn identity: `<stepId>@<identity>`). */
   stepId?: string;
-  /** The step's retry policy bound (default REVIEW_STEP_MAX_ATTEMPTS). */
+  /** In-step exhaustion bound (default REVIEW_STEP_MAX_ATTEMPTS); not dex's retry budget. */
   maxAttempts?: number;
 }): Promise<{
   verdict: ReviewVerdict;
@@ -1158,11 +1176,14 @@ async function runReviewTurnOnce(input: {
   turnDiagnosis: TurnDiagnosis | null;
 }> {
   const harness = requireHarness();
+  // The envelope step this turn runs inside — the fence owner, the memo key
+  // and every diagnosis turn label name the SAME id as the step's envelope.
+  const stepId = input.stepId ?? reviewStepIdOf(input.reviewerId);
   const label = fenceLabel(input.file, input.round, input.epoch);
   const session = await harness.createSession(label);
   sessionFenceMap.set(input.ctx, label, {
     sessionId: session.id,
-    stepId: `pp-review-${input.reviewerId}`,
+    stepId,
     epoch: input.epoch,
     label,
     persistedAtUtc: new Date().toISOString(),
@@ -1225,9 +1246,6 @@ async function runReviewTurnOnce(input: {
     // runs the reviewer lane (gpt-6-luna @ high), attempt >= 2 demotes to the
     // fallback model or the executor lane. See src/harness/lanes.ts.
     const routing = reviewLaneRouting(attemptNo);
-    // Lane LABEL from the same f(attempt) policy (generic instantiation) — used
-    // only in diagnosis records, never for decisions (AC-B2).
-    const lane = demoteReviewerLane<"default" | "demoted">(attemptNo, "default", "demoted");
     const result = await runAgentTurn({
       def: REVIEWER,
       sessionId: session.id,
@@ -1253,7 +1271,7 @@ async function runReviewTurnOnce(input: {
       attemptNo >= 2
         ? buildRetryContextDiagnosis({
             file: input.file,
-            stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+            stepId,
             identity: markerKeyOf(input.file, input.round),
             reviewer: input.reviewerId,
             attempt: attemptNo,
@@ -1281,7 +1299,7 @@ async function runReviewTurnOnce(input: {
         file: input.file,
         round: input.round,
         reviewerId: input.reviewerId,
-        stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+        stepId,
         attempt: attemptNo,
         usage: result.usage,
         text: result.text,
@@ -1319,7 +1337,7 @@ async function runReviewTurnOnce(input: {
         file: input.file,
         round: input.round,
         reviewerId: input.reviewerId,
-        stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+        stepId,
         attempt: attemptNo,
         usage: result.usage,
         text: result.text,
@@ -1765,6 +1783,7 @@ const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
     const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-A",
+      stepId: "pp-review-a",
       file: fri.file,
       round: fri.round,
       epoch: fri.epoch,
@@ -1799,6 +1818,7 @@ const ReviewBStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
     const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-B",
+      stepId: "pp-review-b",
       file: fri.file,
       round: fri.round,
       epoch: fri.epoch,
@@ -2391,6 +2411,7 @@ const PrepReviewAStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-A",
+      stepId: "pp-prep-review-a",
       file: PREP_SPEC_FILE,
       round: state.prepIteration,
       epoch: input.epoch,
@@ -2427,6 +2448,7 @@ const PrepReviewBStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-B",
+      stepId: "pp-prep-review-b",
       file: PREP_SPEC_FILE,
       round: state.prepIteration,
       epoch: input.epoch,
