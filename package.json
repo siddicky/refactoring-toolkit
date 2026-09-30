@@ -18,7 +18,9 @@
     "metrics": "bun run scripts/render-metrics.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "check": "bun run typecheck && bun test"
+    "check": "bun run typecheck && bun test",
+    "lint": "biome lint .",
+    "format:check": "biome format ."
   },
   "dependencies": {
     "@grpc/grpc-js": "1.14.5",
@@ -27,6 +29,7 @@
     "@typesafe-ai/sdk": "0.6.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.14",
     "@types/bun": "1.3.14",
     "@types/node": "24.13.6",
     "typescript": "5.9.3"

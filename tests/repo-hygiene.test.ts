@@ -138,15 +138,15 @@ describe("C86: package.json metadata and scripts", () => {
 
   test("has aliases for every documented entry point plus a combined check", () => {
     const s = pkg.scripts ?? {};
-    expect(s["check"]).toBe("bun run typecheck && bun test");
-    expect(s["worker"]).toBe("bun run scripts/run-demo.ts worker");
-    expect(s["dashboard"]).toBe("bun run scripts/serve-status.ts");
-    expect(s["metrics"]).toBe("bun run scripts/render-metrics.ts");
+    expect(s.check).toBe("bun run typecheck && bun test");
+    expect(s.worker).toBe("bun run scripts/run-demo.ts worker");
+    expect(s.dashboard).toBe("bun run scripts/serve-status.ts");
+    expect(s.metrics).toBe("bun run scripts/render-metrics.ts");
     // existing names are kept
-    expect(s["typecheck"]).toBe("tsc --noEmit");
-    expect(s["test"]).toBe("bun test");
-    expect(s["demo"]).toBe("bun run scripts/run-demo.ts");
-    expect(s["chaos"]).toBe("bun run scripts/chaos-kill.ts");
+    expect(s.typecheck).toBe("tsc --noEmit");
+    expect(s.test).toBe("bun test");
+    expect(s.demo).toBe("bun run scripts/run-demo.ts");
+    expect(s.chaos).toBe("bun run scripts/chaos-kill.ts");
   });
 
   test("every script alias points at a file that exists", () => {
@@ -188,7 +188,10 @@ describe("C36: every bare import is a declared dependency", () => {
 
   test("imports of third-party packages appear in package.json", () => {
     const pkg = readPackageJson();
-    const declared = new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})]);
+    const declared = new Set([
+      ...Object.keys(pkg.dependencies ?? {}),
+      ...Object.keys(pkg.devDependencies ?? {}),
+    ]);
     const files: string[] = [];
     for (const d of SCAN_DIRS) if (existsSync(join(ROOT, d))) walk(d, files);
     expect(files.length).toBeGreaterThan(20);
@@ -252,5 +255,63 @@ describe("C80: CI workflow", () => {
     expect(idx("bun install --frozen-lockfile")).toBeGreaterThanOrEqual(0);
     expect(idx("bun run typecheck")).toBeGreaterThan(idx("bun install --frozen-lockfile"));
     expect(idx("bun test")).toBeGreaterThan(idx("bun install --frozen-lockfile"));
+  });
+});
+
+describe("C82: Biome is wired in", () => {
+  interface BiomeConfig {
+    $schema?: string;
+    vcs?: Record<string, unknown>;
+    files?: { includes?: string[] };
+    formatter?: { includes?: string[]; indentStyle?: string; indentWidth?: number };
+    assist?: { actions?: { source?: { organizeImports?: string } } };
+  }
+
+  const biomeBin = join(ROOT, "node_modules/.bin/biome");
+  const config = () => JSON.parse(readFileSync(join(ROOT, "biome.json"), "utf8")) as BiomeConfig;
+
+  function biome(...args: string[]): { status: number | null; output: string } {
+    const r = spawnSync(biomeBin, args, { cwd: ROOT, encoding: "utf8" });
+    if (r.error) throw r.error;
+    return { status: r.status, output: `${r.stdout}${r.stderr}` };
+  }
+
+  test("is an exact-pinned devDependency matching the biome.json schema version", () => {
+    const version = readPackageJson().devDependencies?.["@biomejs/biome"];
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(config().$schema).toBe(`https://biomejs.dev/schemas/${version}/schema.json`);
+  });
+
+  test("has lint and format:check scripts", () => {
+    const s = readPackageJson().scripts ?? {};
+    expect(s.lint).toBe("biome lint .");
+    expect(s["format:check"]).toBe("biome format .");
+  });
+
+  test("formatter matches the repo style and respects .gitignore", () => {
+    const c = config();
+    expect(c.formatter?.indentStyle).toBe("space");
+    expect(c.formatter?.indentWidth).toBe(2);
+    expect(c.vcs).toMatchObject({ enabled: true, clientKind: "git", useIgnoreFile: true });
+    // organizeImports stays off to avoid import-order churn
+    expect(c.assist?.actions?.source?.organizeImports).toBe("off");
+  });
+
+  test("third-party trees are excluded, and presentation is lint-only", () => {
+    const c = config();
+    for (const dir of ["node_modules", "fixtures/php-sample", "fixtures/creatorex-middleware"]) {
+      expect(c.files?.includes).toContain(`!**/${dir}`);
+    }
+    // presentation/index.html keeps its documented a11y lint override; only formatting skips it
+    expect(c.files?.includes).not.toContain("!**/presentation");
+    expect(c.formatter?.includes).toContain("!**/presentation");
+  });
+
+  test("the installed biome loads the config and accepts the repo's own config files", () => {
+    expect(existsSync(biomeBin)).toBe(true);
+    const fmt = biome("format", "package.json", "biome.json");
+    expect(fmt.output).not.toContain("Formatter would have printed");
+    expect(fmt.status).toBe(0);
+    expect(biome("lint", "package.json", "biome.json").status).toBe(0);
   });
 });
