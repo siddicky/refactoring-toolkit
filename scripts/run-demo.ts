@@ -35,7 +35,8 @@ import {
   startDexWorker,
 } from "../src/dex/client.js";
 import { waitForFlowTerminal } from "../src/dex/wait-for-terminal.js";
-import { DexServiceError } from "@superdurable/dex";
+import { DexServiceError, LongPollTimeoutError } from "@superdurable/dex";
+import type { FlowResult, StepCompletion } from "@superdurable/dex";
 import {
   OpencodeHarness,
   type AgentSessionClient,
@@ -62,7 +63,12 @@ import {
   probeFlows,
   type RoundInput,
 } from "./probe-flow.js";
-import { PortProjectFlow, PortFileFlowInstance, configurePortHarness } from "../flows/port-project.js";
+import {
+  PortProjectFlow,
+  PortFileFlowInstance,
+  configurePortHarness,
+  type PortRunResult,
+} from "../flows/port-project.js";
 import {
   configureEnvelopeStreamPublisher,
   envelopeStream,
@@ -356,9 +362,7 @@ async function startRound(
     const flowId = `round-${file.replace(/\//g, "__")}-${round}-${epoch}-${Date.now()}`;
     const runId = await runtime.client.startFlow(flow, flowId, input);
     console.log(`[round] flowId=${flowId} runId=${runId} worktree=${lease.worktreePath}`);
-    const result = await runtime.client.waitForFlow(flowId);
-    console.log(`[round] completed: ${JSON.stringify(result)}`);
-    return 0;
+    return await waitAndReport(runtime, flowId, 30, "round");
   } finally {
     await runtime.close();
   }
@@ -443,6 +447,94 @@ async function resolveJudgment(): Promise<JudgmentClient> {
  * matching flagged by the dex-sdk review, area 1.6).
  */
 
+/**
+ * Exit codes for the commands that wait on a flow. The wait returning means
+ * the flow is CLOSED, not that it succeeded, so the outcome is mapped
+ * explicitly (an orchestrating agent keys off these):
+ *   0 completed, nothing left unresolved
+ *   1 failed / cancelled / terminated (also any fatal CLI error)
+ *   2 usage error
+ *   3 completed, but files are blocked or tsc / vitest report failures
+ *   4 the wait elapsed while the flow is STILL RUNNING (healthy; keep waiting
+ *     with `wait-flow --id <flowId>`, do NOT re-dispatch)
+ */
+export const EXIT_FLOW_FAILED = 1;
+export const EXIT_UNRESOLVED = 3;
+export const EXIT_STILL_RUNNING = 4;
+
+/** The PpFinal completion's payload (the port flow's gracefulComplete output), when present. */
+export function decodePortRunResult(result: FlowResult): PortRunResult | undefined {
+  const final = result.completions.find((c: StepCompletion) => c.stepType === "PpFinal");
+  if (final === undefined) return undefined;
+  try {
+    return final.decode<PortRunResult>();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Maps a FlowResult to an exit code and the lines to print (pure; see the exit-code table above). */
+export function flowOutcome(
+  label: string,
+  flowId: string,
+  result: FlowResult,
+): { code: number; lines: string[] } {
+  const head = `[${label}] flowId=${flowId} status=${result.status}`;
+  if (!result.isTerminal) {
+    return {
+      code: EXIT_STILL_RUNNING,
+      lines: [`${head} — flow still running: use \`run-demo.ts wait-flow --id ${flowId}\``],
+    };
+  }
+  if (result.status !== "completed") {
+    return {
+      code: EXIT_FLOW_FAILED,
+      lines: [
+        `${head} errorType=${result.errorType ?? "n/a"} message=${JSON.stringify(result.errorMessage ?? "")}`,
+      ],
+    };
+  }
+  const port = decodePortRunResult(result);
+  if (port === undefined) return { code: 0, lines: [`${head} result=${JSON.stringify(result)}`] };
+  const blocked = port.blocked.length;
+  const tsc = port.verification?.tscTotal ?? 0;
+  const vitest = port.verification?.vitestTotal ?? 0;
+  const unresolved = blocked > 0 || tsc > 0 || vitest > 0;
+  return {
+    code: unresolved ? EXIT_UNRESOLVED : 0,
+    lines: [
+      `${head} completed=${port.completed.length} blocked=${blocked} tsc=${tsc} vitest=${vitest}${unresolved ? " (unresolved work remains)" : ""}`,
+      `[${label}] result: ${JSON.stringify(port)}`,
+    ],
+  };
+}
+
+/** Waits for a flow through the typed helper, prints the outcome, and returns its exit code. */
+export async function waitAndReport(
+  runtime: { client: { waitForFlow(flowId: string): Promise<FlowResult> } },
+  flowId: string,
+  waitMinutes: number,
+  label: string,
+  retryDelayMs?: number,
+): Promise<number> {
+  try {
+    const result = await waitForFlowTerminal(runtime, flowId, waitMinutes * 60_000, retryDelayMs);
+    const outcome = flowOutcome(label, flowId, result);
+    for (const line of outcome.lines) (outcome.code === 0 ? console.log : console.error)(line);
+    return outcome.code;
+  } catch (err) {
+    // The deadline elapsed on a healthy long poll: the durable flow is still
+    // running. Say so and use a distinct code instead of calling it fatal.
+    if (err instanceof LongPollTimeoutError) {
+      console.error(
+        `[${label}] flowId=${flowId} — wait of ${waitMinutes} min elapsed, flow still running: use \`run-demo.ts wait-flow --id ${flowId}\` (do not re-dispatch)`,
+      );
+      return EXIT_STILL_RUNNING;
+    }
+    throw err;
+  }
+}
+
 async function startDemo(): Promise<number> {
   const config = dexConfigFromEnv();
   const dir = argValue("--dir");
@@ -498,9 +590,7 @@ async function startDemo(): Promise<number> {
       console.log(`[demo] dashboard: http://127.0.0.1:${process.env.PORT ?? "4646"} (pid ${child.pid})`);
     }
     if (process.argv.includes("--start-only")) return 0;
-    const result = await waitForFlowTerminal(runtime, flowId, waitMinutes * 60_000);
-    console.log(`[demo] completed: ${JSON.stringify(result)}`);
-    return 0;
+    return await waitAndReport(runtime, flowId, waitMinutes, "demo");
   } finally {
     await runtime.close();
   }
@@ -819,9 +909,7 @@ async function main(): Promise<number> {
         if (flow === undefined) throw new Error("probe.Hello not registered");
         const flowId = argValue("--flow-id", `hello-${Date.now()}`) as string;
         await runtime.client.startFlow(flow, flowId, undefined);
-        const result = await runtime.client.waitForFlow(flowId);
-        console.log(`[hello] flowId=${flowId} result=${JSON.stringify(result)}`);
-        return 0;
+        return await waitAndReport(runtime, flowId, 30, "hello");
       } finally {
         await runtime.close();
       }
@@ -838,9 +926,8 @@ async function main(): Promise<number> {
         await runtime.client.startFlow(flow, flowId, { ms });
         console.log(`[long-step] started flowId=${flowId} ms=${ms}`);
         if (startOnly) return 0;
-        const result = await runtime.client.waitForFlow(flowId);
-        console.log(`[long-step] result=${JSON.stringify(result)}`);
-        return 0;
+        // The step itself runs `ms`; allow the same again plus slack to finish.
+        return await waitAndReport(runtime, flowId, Math.ceil((ms * 2) / 60_000) + 5, "long-step");
       } finally {
         await runtime.close();
       }
@@ -851,9 +938,7 @@ async function main(): Promise<number> {
       const waitMinutes = Number.parseInt(argValue("--wait-minutes", "30") as string, 10);
       const runtime = await openDexClient(probeFlows(), config);
       try {
-        const result = await waitForFlowTerminal(runtime, flowId, waitMinutes * 60_000);
-        console.log(`[wait-flow] flowId=${flowId} result=${JSON.stringify(result)}`);
-        return 0;
+        return await waitAndReport(runtime, flowId, waitMinutes, "wait-flow");
       } finally {
         await runtime.close();
       }
