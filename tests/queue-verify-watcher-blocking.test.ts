@@ -121,3 +121,21 @@ describe("C27: catch-up reads must not absorb the DONE that closes the kill wind
     expect(world.logs.some((l) => l.includes("skipped 1 stale queue-verify start(s)"))).toBe(true);
   });
 });
+
+describe("the kill gate overlaps the lookahead instead of adding to it", () => {
+  test("the flow-status gate probe starts when the START is read, not after the batch closes", async () => {
+    const world = virtualWorld([{ at: 10_000, event: START }]);
+    const probeAt: number[] = [];
+    await runQueueVerifyWatcher({
+      ...world.options({ pollIntervalMs: 60_000, deadlineMs: 5 * 60_000 }),
+      flowStatus: async () => {
+        probeAt.push(world.clock());
+        return "running";
+      },
+    });
+    // START read at t=10 s, the 1 s lookahead ends at t=11 s; the gate probe
+    // was issued at t=10 s (its latency is hidden inside the lookahead).
+    expect(probeAt[0]).toBe(10_000);
+    expect(world.firings[0]!.at).toBe(11_000);
+  });
+});

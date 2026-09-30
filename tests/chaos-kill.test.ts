@@ -12,6 +12,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { WATCHER_EXIT } from "../src/watcher/cli-args.js";
+
 import {
   CHAOS_KILL_EXIT,
   DEFAULT_KILL_EVENTS_PATH,
@@ -239,8 +241,23 @@ describe("C42 (writer side, Contract B): default path, parent dir, run identity"
 });
 
 describe("chaos-kill exit codes and --flag=value", () => {
-  test("the codes are disjoint and aligned with watch-queue-verify's usage (64) / fatal (70) / no-op (3)", () => {
-    expect(CHAOS_KILL_EXIT).toEqual({ ok: 0, survivors: 1, noop: 3, usage: 64, fatal: 70 });
+  test("one exit-code table covers both tools: same numbers and meanings as watch-queue-verify", () => {
+    expect(CHAOS_KILL_EXIT).toEqual({ ok: 0, noop: 3, survivors: 4, usage: 64, fatal: 70 });
+    expect(CHAOS_KILL_EXIT.ok).toBe(WATCHER_EXIT.fired);
+    expect(CHAOS_KILL_EXIT.noop).toBe(WATCHER_EXIT.noop);
+    expect(CHAOS_KILL_EXIT.survivors).toBe(WATCHER_EXIT.survivor);
+    // chaos-kill never reuses a code the watcher gives another meaning (1 = terminal, 2 = timeout).
+    const codes = Object.values(CHAOS_KILL_EXIT) as number[];
+    expect(codes).not.toContain(WATCHER_EXIT.terminal);
+    expect(codes).not.toContain(WATCHER_EXIT.timeout);
+  });
+
+  test("empty, repeated and valueless flags are usage errors (a repeated --pids must not silently drop the first list)", () => {
+    expect(parseChaosKillArgs(["--pids", "123", "--events="]).ok).toBe(false);
+    expect(parseChaosKillArgs(["--pids", "123", "--events", ""]).ok).toBe(false);
+    const repeated = parseChaosKillArgs(["--pids", "1234,5678", "--pids", "9999"]);
+    expect(repeated.ok).toBe(false);
+    if (!repeated.ok) expect(repeated.error).toContain("--pids was given more than once");
   });
 
   test("--flag=value lets a value start with -- (a space-separated one is still rejected)", () => {

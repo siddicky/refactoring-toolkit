@@ -294,19 +294,26 @@ export async function runQueueVerifyWatcher(
   };
   const statusGateMs = options.statusGateTimeoutMs ?? DEFAULT_STATUS_GATE_TIMEOUT_MS;
 
+  let firstResult: WatcherResult | undefined;
   const fireOnce = async (via: "stream" | "poll"): Promise<WatcherResult> => {
     if (fired) {
+      // Reports what the FIRST trigger really did (never a synthetic success).
       log(`duplicate trigger via ${via} suppressed (already fired)`);
-      return { outcome: "fired", via, firings: 0 };
+      return { ...(firstResult ?? { outcome: "no-op", via }), firings: 0 };
     }
     fired = true;
     log(`TRIGGER via ${via} — firing chaos kill`);
+    // A throw from the kill action propagates (see the catch blocks below):
+    // the exactly-once guard is spent, so swallowing it would end the run as a
+    // silent "no kill".
     const result = await options.fire({ via, atUtc: new Date().toISOString() });
     if (result !== undefined && !result.killed) {
       log(`trigger via ${via} seen but the kill was a NO-OP: ${result.detail ?? "nothing was killed"}`);
-      return { outcome: "no-op", via, firings: 0 };
+      firstResult = { outcome: "no-op", via, firings: 0 };
+      return firstResult;
     }
-    return { outcome: "fired", via, firings: 1 };
+    firstResult = { outcome: "fired", via, firings: 1 };
+    return firstResult;
   };
 
   log(
@@ -346,6 +353,7 @@ export async function runQueueVerifyWatcher(
         );
       }
     } catch (err) {
+      if (fired) throw err; // the kill action itself failed: never swallow it as a drain failure
       log(
         `backlog drain failed — following from the current cursor (poll fallback unaffected): ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -386,9 +394,15 @@ export async function runQueueVerifyWatcher(
           // whole pollInterval ends regardless, so a constantly busy stream
           // cannot starve the poll/terminal probes until the deadline.
           let startSeenAt: number | null = null;
+          // The kill gate's status probe starts the moment a START is read, so
+          // it overlaps the lookahead instead of adding its latency after it.
+          let gate: Promise<WatcherFlowStatus> | undefined;
           while (event !== null) {
             batch.push(event);
-            if (startSeenAt === null && isQueueVerifyStart(event)) startSeenAt = now();
+            if (startSeenAt === null && isQueueVerifyStart(event)) {
+              startSeenAt = now();
+              gate ??= probeStatus(statusGateMs);
+            }
             if (now() - start >= options.deadlineMs) break; // bounded drain
             if (startSeenAt !== null && now() - startSeenAt >= catchUpTimeoutMs) break;
             if (now() - batchStartedAt >= options.pollIntervalMs) break;
@@ -404,7 +418,7 @@ export async function runQueueVerifyWatcher(
           const startsInBatch = batch.filter((e) => isQueueVerifyStart(e)).length;
           const active = activeAttemptStarts(batch);
           if (active.length > 0) {
-            const status = await probeStatus(statusGateMs);
+            const status = await (gate ?? probeStatus(statusGateMs));
             if (isTerminalFlowStatus(status)) {
               log(
                 `follow start is stale — flow ${status} before the trigger; exiting cleanly (no kill)`,
@@ -421,6 +435,7 @@ export async function runQueueVerifyWatcher(
           }
         }
       } catch (err) {
+        if (fired) throw err; // the kill action itself failed: never swallow it as a stream failure
         // Stream failed: the poll fallback is now the ONLY source (ENGAGED),
         // logged loudly. Never retried this run — deterministic and visible.
         streamUsable = false;

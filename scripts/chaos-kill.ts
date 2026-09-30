@@ -19,10 +19,10 @@
  * milliseconds: an unparsable value is a usage error (exit 64), never silently
  * dropped (a dropped PID would shrink the kill set without a trace).
  *
- * Exit codes ({@link CHAOS_KILL_EXIT}, aligned with watch-queue-verify's
- * usage/fatal codes): 0 every target exited after SIGKILL; 1 a target survived;
- * 3 NO-OP (no target was alive, nothing was killed); 64 usage error;
- * 70 fatal internal error.
+ * Exit codes ({@link CHAOS_KILL_EXIT}, the SAME numbers and meanings as
+ * watch-queue-verify's, so one table covers both tools): 0 every target exited
+ * after SIGKILL; 3 NO-OP (no target was alive, nothing was killed); 4 a target
+ * survived SIGKILL; 64 usage error; 70 fatal internal error.
  *
  * Sidecar path: `--events`, default {@link DEFAULT_KILL_EVENTS_PATH}
  * (`metrics/kill-events.jsonl`, relative to the cwd; /metrics/ is the repo's
@@ -40,7 +40,7 @@
 import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { parseFlagValues } from "../src/watcher/cli-args.js";
+import { WATCHER_EXIT, parseFlagValues } from "../src/watcher/cli-args.js";
 
 /**
  * Default kill-event sidecar path (Contract B): JSON Lines, relative to the
@@ -49,17 +49,18 @@ import { parseFlagValues } from "../src/watcher/cli-args.js";
  */
 export const DEFAULT_KILL_EVENTS_PATH = "metrics/kill-events.jsonl";
 
-/** Exit codes of the chaos-kill CLI. */
+/**
+ * Exit codes of the chaos-kill CLI: a subset of watch-queue-verify's table
+ * (WATCHER_EXIT) with identical numbers and meanings, never overlapping it.
+ */
 export const CHAOS_KILL_EXIT = {
-  ok: 0,
-  /** A target survived SIGKILL. */
-  survivors: 1,
+  ok: WATCHER_EXIT.fired,
   /** No target was alive: nothing was killed. */
-  noop: 3,
-  /** Usage error (sysexits EX_USAGE). */
-  usage: 64,
-  /** Fatal internal error (sysexits EX_SOFTWARE). */
-  fatal: 70,
+  noop: WATCHER_EXIT.noop,
+  /** A target survived SIGKILL. */
+  survivors: WATCHER_EXIT.survivor,
+  usage: WATCHER_EXIT.usage,
+  fatal: WATCHER_EXIT.fatal,
 } as const;
 
 export interface KillEventIntent {

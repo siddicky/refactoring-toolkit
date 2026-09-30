@@ -34,10 +34,11 @@ export type ParsedFlagValues =
 
 /**
  * Strict `--flag value` / `--flag=value` scan shared by the watcher and
- * chaos-kill CLIs. Unknown flags, stray positionals and a flag without a value
- * are errors; a SPACE-separated value may not itself start with `--` (so a
- * forgotten value cannot swallow the next flag) — write `--flag=--value` for a
- * value that legitimately starts with `--`.
+ * chaos-kill CLIs. Unknown flags, stray positionals, a flag without a value,
+ * an EMPTY value and a repeated flag are errors (a repeat would silently drop
+ * the earlier value, e.g. shrink a PID list); a SPACE-separated value may not
+ * itself start with `--` (so a forgotten value cannot swallow the next flag) —
+ * write `--flag=--value` for a value that legitimately starts with `--`.
  */
 export function parseFlagValues(
   argv: readonly string[],
@@ -51,16 +52,23 @@ export function parseFlagValues(
     if (!knownFlags.includes(flag)) {
       return { ok: false, error: `unknown argument: ${flag}` };
     }
-    if (eq > 0) {
-      values.set(flag, token.slice(eq + 1));
-      continue;
+    if (values.has(flag)) {
+      return { ok: false, error: `${flag} was given more than once` };
     }
-    const value = argv[i + 1];
-    if (value === undefined || value.startsWith("--")) {
-      return { ok: false, error: `${flag} requires a value` };
+    let value: string | undefined;
+    if (eq > 0) {
+      value = token.slice(eq + 1);
+    } else {
+      value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) {
+        return { ok: false, error: `${flag} requires a value` };
+      }
+      i++;
+    }
+    if (value.trim() === "") {
+      return { ok: false, error: `${flag} requires a non-empty value` };
     }
     values.set(flag, value);
-    i++;
   }
   return { ok: true, values };
 }

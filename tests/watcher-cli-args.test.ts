@@ -160,10 +160,27 @@ describe("shared flag scanner: --flag=value escape hatch", () => {
     const known = ["--a", "--b"];
     const ok = parseFlagValues(["--a=1", "--b", "2"], known);
     expect(ok.ok && Object.fromEntries(ok.values)).toEqual({ "--a": "1", "--b": "2" });
-    const empty = parseFlagValues(["--a="], known);
-    expect(empty.ok && empty.values.get("--a")).toBe("");
     const eqInValue = parseFlagValues(["--a=x=y"], known);
     expect(eqInValue.ok && eqInValue.values.get("--a")).toBe("x=y");
     expect(parseFlagValues(["--c=1"], known).ok).toBe(false);
+  });
+});
+
+describe("shared flag scanner: empty and repeated values", () => {
+  test("an empty value (--events=, --events '') is a usage error, not a path that fails inside the kill window", () => {
+    expect(parse("--flow-id", "f", "--events=").ok).toBe(false);
+    expect(parse("--flow-id", "f", "--events", "").ok).toBe(false);
+    expect(parse("--flow-id", "f", "--run-id", "  ").ok).toBe(false);
+    expect(parse("--flow-id", "f", "--flow-run-id=").ok).toBe(false);
+    const empty = parseFlagValues(["--a="], ["--a"]);
+    expect(empty.ok).toBe(false);
+    if (!empty.ok) expect(empty.error).toContain("non-empty");
+  });
+
+  test("a repeated flag is rejected instead of silently overwriting the earlier value", () => {
+    const repeated = parse("--flow-id", "a", "--flow-id", "b");
+    expect(repeated.ok).toBe(false);
+    if (!repeated.ok) expect(repeated.error).toContain("--flow-id was given more than once");
+    expect(parse("--flow-id=a", "--flow-id", "b").ok).toBe(false); // mixed spellings too
   });
 });

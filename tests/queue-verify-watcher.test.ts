@@ -427,3 +427,32 @@ describe("queue-verify kill watcher (C71): a no-op kill is not 'fired'", () => {
     expect(r2.firings).toBe(1);
   });
 });
+
+// Audit review: a THROW from the kill action must surface. fireOnce used to run
+// inside the stream/drain try blocks, whose catch swallowed it after the
+// exactly-once guard was already spent; a later duplicate trigger then returned
+// a synthetic "fired" and the script exited 0 with no kill and no record.
+describe("queue-verify kill watcher: a failing kill action is never swallowed", () => {
+  const boom = async () => {
+    throw new Error("EACCES: sidecar path is not writable");
+  };
+
+  test("a throw on the follow (stream) path propagates and does not degrade the stream lane", async () => {
+    const h = harness({ events: [START_EVENT, START_EVENT], polls: [true] });
+    await expect(h.run({ fire: boom })).rejects.toThrow("EACCES");
+    expect(h.logs.some((l) => l.includes("stream subscription failed"))).toBe(false);
+  });
+
+  test("a throw on the arm-time drain path propagates and is not logged as a drain failure", async () => {
+    const h = harness({ events: [null] });
+    await expect(
+      h.run({ drainBacklog: async () => [START_EVENT], fire: boom }),
+    ).rejects.toThrow("EACCES");
+    expect(h.logs.some((l) => l.includes("backlog drain failed"))).toBe(false);
+  });
+
+  test("a throw on the poll path propagates too", async () => {
+    const h = harness({ events: [null], polls: [true] });
+    await expect(h.run({ fire: boom })).rejects.toThrow("EACCES");
+  });
+});
