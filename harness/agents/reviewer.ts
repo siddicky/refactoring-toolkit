@@ -12,15 +12,23 @@
  * harness/agents/verdict-schema.ts — an EMPTY findings array is a valid
  * completed clean review, distinct from a missing record.
  *
- * Wave-5 Tier-1 lens: the prompt carries a REMOVED-BEHAVIOR attack angle
- * ("what did the source do that the port no longer does?") — prompt-only,
- * no verdict-schema change (the findings still cite in-diff evidence; a
- * dropped behavior is reported against the + lines that should carry it).
+ * Wave-5 Tier-1 lens: the prompt carries a REMOVED-BEHAVIOR attack angle —
+ * prompt-only, no verdict-schema change (the findings still cite in-diff
+ * evidence; a dropped behavior is reported against the + lines that should
+ * carry it).
+ *
+ * Inputs reality (audit C16): the reviewer turn delivers ONE diff by value
+ * (`git diff --cached` of the TS worktree, or the spec map against its
+ * baseline for prep reviews) plus the porting conventions reproduced in this
+ * prompt. It does NOT deliver the PHP source: round 1 is all `+` lines and
+ * later `-` lines are the PREVIOUS draft. Every rule below may only rely on
+ * those inputs (tests/agent-contracts.test.ts checks prompt vs turn).
  */
 
 import type { AgentDefinition } from "./types.js";
 import { REVIEWER_DENY_ALL } from "./types.js";
 import { dispositionList, severityList } from "./verdict-schema.js";
+import { PORTING_CONVENTIONS } from "../skills/porting-conventions.js";
 
 const VERDICT_CONTRACT = `{
   "file": "<port output file the diff applies to>",
@@ -47,20 +55,23 @@ export const REVIEWER: AgentDefinition = {
     "",
     "## Ground rules",
     "- ASSUME THE CODE IS WRONG. Your job is to find why the diff breaks behavior, types, or conventions — not to praise it.",
-    "- You receive exactly one diff, in the prompt, by value. That diff is your entire world: do not speculate about files, types, or behavior you cannot see in it. No tools are available to you, by design.",
+    "- You receive exactly one diff, in the prompt, by value, plus the porting conventions reproduced below. You are NOT given the PHP source. That diff is your entire world: do not speculate about files, types, or behavior you cannot see in it, and never claim what the PHP \"did\". No tools are available to you, by design.",
     "- Every finding MUST cite evidence that literally appears in the provided diff: evidence_span lines PLUS a verbatim snippet (required). A finding without an in-diff snippet is invalid and will be discarded by the citation check.",
     "- Severity classes: use ONLY " + severityList() + " — blocker (breaks behavior or will not compile), major (likely runtime defect or strict-mode error), minor (maintainability/correctness smell), nit (style).",
     "",
     "## What to attack, in order",
-    "1. PHP→TS semantic drift: null handling, number coercion (int/float → number), array/assoc-array confusion, reference vs value semantics, string vs number keys.",
+    "1. Semantic-drift hazards the TypeScript itself exposes (the PHP source is not delivered, so judge what the `+` lines do): null handling, number coercion (int/float → number), array/assoc-array confusion, reference vs value semantics, string vs number keys.",
     "2. Strict-mode hazards: implicit any, unchecked null, bad generic inferences, casts that silence the compiler.",
-    "3. Convention violations against the porting conventions summarized in the diff header.",
+    "3. Convention violations against the porting conventions reproduced below (the diff header only carries DIFF_ID, FILE, ROUND and line-numbering info).",
     // Tier-1 lens (takeaways-synthesis #1, pi-dw-quality "angle B"): the most
     // migration-relevant review question is what the SOURCE did that the port
     // no longer does. Kept as a prompt-only lens (no plan amendment, no
     // schema change): the reviewer still cites diff evidence; removed
     // behavior shows up as findings on the lines that dropped it.
-    "4. REMOVED BEHAVIOR: read the `-` lines as a list of things the source did. For each behavior the diff no longer performs (branches, edge-case handling, coercions, error paths), check whether the `+` side restores it. If it does not, that is a finding — cite the `+` lines that should have carried it.",
+    "4. REMOVED BEHAVIOR: the `-` lines are the PREVIOUS draft of this file (an earlier round, or the stub baseline for a spec-map review) — never the PHP source; a first-round diff has no `-` lines, so skip this lens there. For each behavior the `-` lines had that the diff no longer performs (branches, edge-case handling, coercions, error paths), check whether the `+` side restores it. If it does not, that is a finding — cite the `+` lines that should have carried it.",
+    "",
+    "## Porting conventions (reproduced by value; rule 3 refers to these)",
+    PORTING_CONVENTIONS.instructions,
     "",
     "## Verdict (the ONLY thing you emit)",
     "Emit exactly one JSON object matching this contract and nothing else:",

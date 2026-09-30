@@ -11,7 +11,7 @@ import { IMPLEMENTER } from "../harness/agents/implementer.js";
 import { REVIEWER } from "../harness/agents/reviewer.js";
 import { TOOL_CATEGORIES } from "../harness/agents/types.js";
 import { PORTING_CONVENTIONS } from "../harness/skills/porting-conventions.js";
-import { configurePortHarness, runAgentTurn } from "../flows/port-project.js";
+import { composeAgentTurn, configurePortHarness, runAgentTurn } from "../flows/port-project.js";
 import type { AgentSessionClient, PromptOptions } from "../src/harness/opencode.js";
 import { evaluateSuspicion } from "../src/metrics/suspicion.js";
 import type { Finding, VerdictRecord } from "../src/metrics/types.js";
@@ -19,6 +19,7 @@ import {
   composeFixerTurn,
   composePrepGenerateTurn,
   composePrepReviseTurn,
+  composeReviewerTurn,
   DIFF_HEADER_LINES,
   extractCodeFence,
   extractJsonObject,
@@ -26,6 +27,7 @@ import {
   fenceFor,
   mapVerdictToMetrics,
   parseUnifiedDiff,
+  renderDiffForReview,
   specMapProblems,
   toolOverridesAllOff,
   toolPolicyBlock,
@@ -456,5 +458,47 @@ describe("C15: tool policy block is rendered from the tools map actually sent", 
     }
     expect(IMPLEMENTER.prompt).toContain("READ-ONLY");
     expect(PORTING_CONVENTIONS.instructions).not.toContain("PHP fixture");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C16 — the reviewer prompt only relies on inputs the reviewer turn delivers
+// ---------------------------------------------------------------------------
+
+describe("C16: reviewer prompt vs reviewer turn consistency", () => {
+  const rendered = renderDiffForReview({ diffText: MULTI_HUNK_DIFF, file: "src/a.ts", round: 1, diffId: "d1" });
+  const turn = composeReviewerTurn({
+    reviewerId: "reviewer-A",
+    reviewerLabel: "Reviewer",
+    diffBlock: rendered.block,
+  });
+  // What the model actually reads: agent prompt + tool policy + turn text.
+  const body = composeAgentTurn(REVIEWER, turn);
+  const header = rendered.block.split("\n").slice(0, DIFF_HEADER_LINES).join("\n");
+
+  test("the conventions the prompt points at are delivered by value in the same body", () => {
+    expect(REVIEWER.prompt).toContain("porting conventions reproduced below");
+    expect(body).toContain(PORTING_CONVENTIONS.instructions);
+    // and the turn's diff block is delivered intact
+    expect(body).toContain(rendered.block);
+  });
+
+  test("the diff header carries exactly what the prompt says it carries (no conventions)", () => {
+    expect(header).toContain("DIFF_ID: d1");
+    expect(header).toContain("FILE: src/a.ts");
+    expect(header).toContain("ROUND: 1");
+    expect(header.toLowerCase()).not.toContain("convention");
+    expect(REVIEWER.prompt).not.toContain("summarized in the diff header");
+    expect(REVIEWER.prompt).toContain("diff header only carries DIFF_ID, FILE, ROUND");
+  });
+
+  test("the prompt no longer claims the PHP source is delivered or that `-` lines are source behavior", () => {
+    expect(REVIEWER.prompt).not.toContain("things the source did");
+    expect(REVIEWER.prompt).not.toContain("PHP→TS semantic drift");
+    expect(REVIEWER.prompt).toContain("You are NOT given the PHP source");
+    expect(REVIEWER.prompt).toContain("`-` lines are the PREVIOUS draft");
+    // the turn indeed contains no PHP source block
+    expect(turn).not.toContain("```php");
+    expect(body).not.toContain("PHP source (read-only, by value)");
   });
 });
