@@ -63,9 +63,10 @@ export const REVIEWER: AgentDefinition = {
     "1. Semantic-drift hazards the TypeScript itself exposes (the PHP source is not delivered, so judge what the `+` lines do): null handling, number coercion (int/float → number), array/assoc-array confusion, reference vs value semantics, string vs number keys.",
     "2. Strict-mode hazards: implicit any, unchecked null, bad generic inferences, casts that silence the compiler.",
     "3. Convention violations against the porting conventions reproduced below (the diff header only carries DIFF_ID, FILE, ROUND and line-numbering info).",
-    // Tier-1 lens (takeaways-synthesis #1, pi-dw-quality "angle B"): the most
-    // migration-relevant review question is what the SOURCE did that the port
-    // no longer does. Kept as a prompt-only lens (no plan amendment, no
+    // Tier-1 lens (takeaways-synthesis #1, pi-dw-quality "angle B"): ask what
+    // behavior the earlier draft had that the new one dropped. The diff holds
+    // only the TS worktree (the PHP source is not delivered), so the `-` lines
+    // are the previous draft, not the source. Kept as a prompt-only lens (no
     // schema change): the reviewer still cites diff evidence; removed
     // behavior shows up as findings on the lines that dropped it.
     "4. REMOVED BEHAVIOR: the `-` lines are the PREVIOUS draft of this file (an earlier round, or the stub baseline for a spec-map review) — never the PHP source; a first-round diff has no `-` lines, so skip this lens there. For each behavior the `-` lines had that the diff no longer performs (branches, edge-case handling, coercions, error paths), check whether the `+` side restores it. If it does not, that is a finding — cite the `+` lines that should have carried it.",

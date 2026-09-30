@@ -144,6 +144,20 @@ describe("C21: harvestPhpSymbols ignores comments", () => {
     ].join("\n");
     expect(harvestPhpSymbols("A.php", src).map((s) => s.name)).toEqual(["real"]);
   });
+
+  test("code that shares a line with a comment is still harvested; a string like \"src/*\" does not open a comment", () => {
+    const src = [
+      "<?php",
+      "class B {",
+      "    /** @return int */ public function inlineDoc(): int { return 1; }",
+      "    public function withGlob(): string { return glob(\"src/*\")[0]; }",
+      "    public function afterGlob(): int { return 2; }",
+      "    /* multi",
+      "       line */ public function afterClose(): int { return 3; }",
+      "}",
+    ].join("\n");
+    expect(harvestPhpSymbols("B.php", src).map((s) => s.name)).toEqual(["inlineDoc", "withGlob", "afterGlob", "afterClose"]);
+  });
 });
 
 describe("C21: the symbol cap is shared and its truncation is visible", () => {

@@ -14,10 +14,7 @@
  *   `createOfflineJevClient()` (src/harness/runtime.ts), an in-memory double
  *   over the scripted first-candidate responder. Its answers are tagged
  *   `judge: "scripted"` downstream and are never counted as live Jev usage.
- *   (An env-aware `createJevClient()` used to exist beside it, returned a
- *   responder-less double that throws on the first call, and had no caller
- *   but its own test — it was deleted rather than kept as a second offline
- *   behaviour.) `isTypesafeOffline()` (TYPESAFE_OFFLINE) stays the switch.
+ *   `isTypesafeOffline()` (TYPESAFE_OFFLINE) is the switch that selects it.
  */
 
 // ---- seam types (structural mirrors of @typesafe-ai/sdk 0.6.0) ---------------

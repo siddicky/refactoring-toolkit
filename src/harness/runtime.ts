@@ -521,7 +521,18 @@ export function extractCodeFence(text: string, hint = ""): string {
     blocks.find((b) => b.lang === "typescript" || b.lang === "ts") ??
     (hint.length === 0 ? blocks[0] : undefined) ??
     blocks.find((b) => b.lang === "");
-  if (pick === undefined) throw new Error("no fenced code block in reply");
+  if (pick === undefined) {
+    // Legacy leniency: a closing fence glued to the last code line ("...;```")
+    // is not a line-start closer, so the scanner saw an unterminated block.
+    const loose =
+      /```(?:typescript|ts)[ \t]*\n([\s\S]*?)```/.exec(text) ??
+      (hint.length === 0 ? /```[A-Za-z]*[ \t]*\n([\s\S]*?)```/.exec(text) : null) ??
+      /```[ \t]*\n([\s\S]*?)```/.exec(text);
+    if (loose?.[1] === undefined || loose[1].trim().length === 0) {
+      throw new Error("no fenced code block in reply");
+    }
+    return loose[1].replace(/\s+$/, "") + "\n";
+  }
   return pick.body.replace(/\s+$/, "") + "\n";
 }
 
@@ -575,12 +586,19 @@ function endsInsideFence(text: string): boolean {
 /**
  * Structural check of a generated spec map: it must still carry the
  * source-map table. `expectedFiles` (the files the run ports) must each
- * appear in a table row. Returns the problems found (empty = acceptable).
+ * appear in a table row — by full path, or by basename when that basename is
+ * unique among the expected files (a planner may shorten `src/Money.php` to
+ * `Money.php`). Returns the problems found (empty = acceptable).
  */
 export function specMapProblems(specText: string, expectedFiles: readonly string[] = []): string[] {
   const rows = specText.split("\n").filter((l) => l.trimStart().startsWith("|"));
   if (rows.length === 0) return ["no source-map table (no `|` table rows)"];
-  const missing = expectedFiles.filter((f) => !rows.some((r) => r.includes(f)));
+  const basename = (f: string): string => f.slice(f.lastIndexOf("/") + 1);
+  const mentions = (f: string): boolean => {
+    const unique = expectedFiles.filter((g) => basename(g) === basename(f)).length === 1;
+    return rows.some((r) => r.includes(f) || (unique && r.includes(basename(f))));
+  };
+  const missing = expectedFiles.filter((f) => !mentions(f));
   return missing.length > 0 ? [`source-map table lacks rows for: ${missing.join(", ")}`] : [];
 }
 
@@ -643,7 +661,6 @@ export function mapVerdictToMetrics(input: {
     });
   }
 
-  const naive = input.naiveCited;
   return {
     ok: true,
     agentRecord,
@@ -653,7 +670,7 @@ export function mapVerdictToMetrics(input: {
       round: input.round,
       diff_id: input.diffId,
       findings,
-      citation_check: findings.map((f) => ({ finding_id: f.finding_id, p_cited: naive(f) })),
+      citation_check: findings.map((f) => ({ finding_id: f.finding_id, p_cited: input.naiveCited(f) })),
     },
   };
 }
@@ -835,8 +852,8 @@ export interface SymbolHarvest {
  * Deterministic, code-only harvest of PHP symbols from one source file
  * (read-only input for the per-symbol table). Zero model calls. Captures
  * named functions, class methods, and typed properties, each with its
- * immediately preceding docblock when present. Comment lines never yield
- * symbols (`/** ... function helper(x) ... *\/` is prose, not a function).
+ * immediately preceding docblock when present. Comments never yield symbols
+ * (a docblock that mentions "function helper(x)" is prose, not a function).
  *
  * @param cap maximum symbols returned (cost guard); default {@link SYMBOL_HARVEST_CAP}.
  */
@@ -908,24 +925,32 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
   let inBlockComment = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    const trimmed = line.trim();
-    // Comment lines are prose: neither a declaration regex nor a phantom
-    // `function` mention inside a docblock may produce a symbol.
-    let isComment = false;
+    // Strip comments so neither a declaration regex nor a phantom `function`
+    // mention inside a docblock / `// ...` / `# ...` can produce a symbol;
+    // code sharing a line with a comment (`/** @return int */ public function
+    // f()`) is still harvested. A block opener must follow whitespace or
+    // punctuation, so a string such as "src/*" cannot open a bogus comment.
+    let code: string;
     if (inBlockComment) {
-      isComment = true;
-      if (trimmed.includes("*/")) inBlockComment = false;
-    } else if (trimmed.startsWith("/*")) {
-      isComment = true;
-      if (!trimmed.includes("*/")) inBlockComment = true;
-    } else if (trimmed.startsWith("//") || (trimmed.startsWith("#") && !trimmed.startsWith("#["))) {
-      isComment = true;
+      const end = line.indexOf("*/");
+      inBlockComment = end < 0;
+      code = end < 0 ? "" : line.slice(end + 2);
+    } else {
+      code = line.replace(/\/\*.*?\*\//g, "");
+      const opener = /(^|[\s;{}(),])\/\*/.exec(code);
+      if (opener !== null) {
+        inBlockComment = true;
+        code = code.slice(0, opener.index + (opener[1] ?? "").length);
+      }
     }
-    if (!isComment) {
+    const codeTrimmed = code.trim();
+    code =
+      codeTrimmed.startsWith("//") || (codeTrimmed.startsWith("#") && !codeTrimmed.startsWith("#["))
+        ? ""
+        : code.replace(/\s\/\/.*$/, "");
+    if (code.trim().length > 0) {
       // Typed properties with a @var docblock are harvested via their docblock
       // annotation (handled below); functions and methods via signatures.
-      // Trailing comments are dropped so `// function x(` is not a symbol.
-      const code = line.replace(/\/\*.*?\*\//g, "").replace(/\s\/\/.*$/, "");
       const fn = /(?:public|protected|private)?\s*(?:static\s+)?function\s+(\w+)\s*\(([^)]*)\)/.exec(code);
       if (fn !== null) {
         push("method", fn[1] ?? "", code.trim(), i);

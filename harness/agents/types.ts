@@ -49,7 +49,12 @@ export interface AgentDefinition {
   tools: AgentToolConfig;
 }
 
-/** Tools the implementer/fixer may use — scoped to their lease worktree. */
+/**
+ * Declarative tool surface of the implementer/fixer (scoped to their lease
+ * worktree). Config view only: in the v1 bridge every turn is sent with ALL
+ * tools disabled (src/harness/runtime.ts toolOverridesAllOff) and the toolkit
+ * writes the reply's fenced file itself, so a turn never actually gets these.
+ */
 export const AGENT_WRITE_TOOLS: readonly ToolCategory[] = [
   "read",
   "write",

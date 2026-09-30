@@ -340,6 +340,13 @@ describe("C13: extractSpecMap returns the OUTERMOST markdown block", () => {
     expect(() => extractSpecMap(partial, { expectedFiles: ["src/Money.php", "src/Invoice.php"] })).toThrow(/src\/Invoice\.php/);
     expect(extractSpecMap(partial, { expectedFiles: ["src/Money.php"] })).toContain("src/Money.php");
   });
+
+  test("a planner that shortens a path to its unique basename is tolerated; an ambiguous basename is not", () => {
+    const shortened = ["```markdown", "| `Money.php` | `src/money.ts` |", "| `Invoice.php` | `src/invoice.ts` |", "```"].join("\n");
+    expect(specMapProblems(extractSpecMap(shortened), ["src/Money.php", "src/Invoice.php"])).toEqual([]);
+    const ambiguous = ["| `Arrayable.php` | `a.ts` |"].join("\n");
+    expect(specMapProblems(ambiguous, ["src/Support/Arrayable.php", "src/Other/Arrayable.php"])).toHaveLength(1);
+  });
 });
 
 describe("C13: extractCodeFence is fence-length aware", () => {
@@ -355,6 +362,11 @@ describe("C13: extractCodeFence is fence-length aware", () => {
       "SUMMARY: ok",
     ].join("\n");
     expect(extractCodeFence(reply, ".ts")).toBe("const doc = `\n```\ninner\n```\n`;\n");
+  });
+
+  test("a closing fence glued to the last code line (legacy leniency) is still accepted; a truncated reply is not", () => {
+    expect(extractCodeFence("```typescript\nexport const x = 1;```", ".ts")).toBe("export const x = 1;\n");
+    expect(() => extractCodeFence("```typescript\nexport const x = 1;\n", ".ts")).toThrow();
   });
 
   test("ordinary replies still work (typescript preferred, bare fence, no fence throws)", () => {
