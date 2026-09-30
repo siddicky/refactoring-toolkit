@@ -279,7 +279,7 @@ async function gitSelftest(): Promise<number> {
  * branches); 0 when the file has no committed round yet.
  */
 async function latestRoundFor(repoDir: string, file: string): Promise<number> {
-  const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = escapeRegExp(file);
   const { stdout } = await execFileP(
     "git",
     ["log", "--all", "--grep", `Operation-ID: ${escaped}#`, "--format=%B"],
@@ -900,7 +900,7 @@ export function parseWorktreeList(porcelain: string): WorktreeRef[] {
 }
 
 /** Worktrees registered with the repository: durable git state, never an in-memory store. */
-export async function listWorktrees(repoDir: string): Promise<WorktreeRef[]> {
+async function listWorktrees(repoDir: string): Promise<WorktreeRef[]> {
   const { stdout } = await execFileP("git", ["worktree", "list", "--porcelain"], { cwd: repoDir });
   return parseWorktreeList(stdout);
 }

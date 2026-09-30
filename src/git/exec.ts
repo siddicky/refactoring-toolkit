@@ -39,7 +39,7 @@ function asText(value: unknown): string {
 }
 
 /** Normalizes whatever execFile threw into {@link GitFailure}. */
-export function classifyExecError(err: unknown, timeoutMs: number = GIT_TIMEOUT_MS): GitFailure {
+function classifyExecError(err: unknown, timeoutMs: number = GIT_TIMEOUT_MS): GitFailure {
   const e = (typeof err === "object" && err !== null ? err : {}) as {
     stdout?: unknown;
     stderr?: unknown;
@@ -70,7 +70,7 @@ export function classifyExecError(err: unknown, timeoutMs: number = GIT_TIMEOUT_
  * exit code / timeout / signal facts are appended so a timeout (where node
  * leaves stderr empty) still says what happened.
  */
-export function describeGitFailure(f: GitFailure): string {
+function describeGitFailure(f: GitFailure): string {
   const text = f.stderr.trim() || f.stdout.trim();
   const facts: string[] = [];
   if (f.timedOut) facts.push(`timed out after ${f.timeoutMs}ms`);
