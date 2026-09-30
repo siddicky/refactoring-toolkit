@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   createInMemoryJevClient,
-  createJevClient,
   createRealJevClient,
   isTypesafeOffline,
   JevConfigError,
@@ -93,23 +92,6 @@ describe("offline mode (network skippable via env flag)", () => {
     } finally {
       if (saved === undefined) env.set(TYPESAFE_ENV_VARS.offline, undefined);
       else env.set(TYPESAFE_ENV_VARS.offline, saved);
-    }
-  });
-
-  test("createJevClient returns the in-memory double under TYPESAFE_OFFLINE=1 even with a key set", async () => {
-    const env = envAccessor();
-    const savedOffline = env.get(TYPESAFE_ENV_VARS.offline);
-    const savedKey = env.get(TYPESAFE_ENV_VARS.apiKey);
-    env.set(TYPESAFE_ENV_VARS.offline, "1");
-    env.set(TYPESAFE_ENV_VARS.apiKey, "unused-in-offline-mode");
-    try {
-      const client = await createJevClient();
-      expect(client.kind).toBe("in-memory");
-    } finally {
-      if (savedOffline === undefined) env.set(TYPESAFE_ENV_VARS.offline, undefined);
-      else env.set(TYPESAFE_ENV_VARS.offline, savedOffline);
-      if (savedKey === undefined) env.set(TYPESAFE_ENV_VARS.apiKey, undefined);
-      else env.set(TYPESAFE_ENV_VARS.apiKey, savedKey);
     }
   });
 });

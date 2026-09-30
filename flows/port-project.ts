@@ -225,6 +225,11 @@ export interface SymbolTableRow {
   selected: string;
   flagged: boolean;
   escalations: number;
+  /**
+   * "live" = judged by the real Jev client; "scripted" = the offline double's
+   * first-candidate pick (UNVERIFIED). Absent on rows persisted before the tag.
+   */
+  judge?: "live" | "scripted";
 }
 
 export interface PrepDraft {
@@ -2045,6 +2050,9 @@ const SymbolTableStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const client = requirePortJudgment();
     const seed = ppPrepSeed.get(ctx, "seed");
     if (seed === undefined) throw new Error("prep seed missing");
+    // Only the real client produces judgments; the offline double's answers
+    // are scripted first-candidate picks and its token counts are synthetic.
+    const scripted = client.kind !== "real";
 
     // Usage accumulator: selectSymbolType consumes the client internally, so
     // wrap it to capture System One usage for the envelope (never zero-null).
@@ -2070,6 +2078,7 @@ const SymbolTableStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
         selected: decision.selected,
         flagged: decision.flagged,
         escalations: decision.escalations.length,
+        judge: scripted ? "scripted" : "live",
       });
     }
 
@@ -2080,7 +2089,10 @@ const SymbolTableStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     }
 
     ppSymtab.set(ctx, "symtab", { rows });
-    return { output: input, tokens: usageTokens > 0 ? usageTokens : 1 };
+    // Real usage only: the scripted double's synthetic counts must not land in
+    // the judgment-role totals, and "no calls were made" is an honest 0, not an
+    // invented 1.
+    return { output: input, tokens: scripted ? 0 : usageTokens };
   },
   route: (_ctx, _input, out) => goTo(PrepStart, out),
 });

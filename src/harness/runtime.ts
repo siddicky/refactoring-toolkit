@@ -923,6 +923,9 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
   return { symbols, omitted };
 }
 
+/** Who produced a row's `selected` value: the live model or the offline scripted double. */
+export type SymbolJudge = "live" | "scripted";
+
 /** One per-symbol table row as the planner turn renders it. */
 export interface SymbolTableRowView {
   file: string;
@@ -931,23 +934,36 @@ export interface SymbolTableRowView {
   candidates: readonly string[];
   selected: string;
   flagged: boolean;
+  /** Absent on rows persisted before the judge tag existed (provenance unknown). */
+  judge?: SymbolJudge;
 }
 
 /**
- * Markdown per-symbol table handed to the planner. When `sources` are given,
- * a file whose harvest was cut by the cap gets an explicit note, so the table
- * is never mistaken for complete ("N of M symbols listed").
+ * Markdown per-symbol table handed to the planner, headed by a PROVENANCE line
+ * so scripted (offline first-candidate) picks are never presented as verified
+ * model judgments. When `sources` are given, a file whose harvest was cut by
+ * the cap gets an explicit note, so the table is never mistaken for complete
+ * ("N of M symbols listed").
  */
 export function renderSymbolTable(
   rows: readonly SymbolTableRowView[],
   sources: ReadonlyArray<{ name: string; source: string }> = [],
 ): string {
+  const anyScripted = rows.some((r) => r.judge === "scripted");
+  const allLive = rows.length > 0 && rows.every((r) => r.judge === "live");
+  const provenance = anyScripted
+    ? "> PROVENANCE: SCRIPTED OFFLINE PICKS (UNVERIFIED) — no model judged the rows marked `scripted` (no TYPESAFE_API_KEY, or TYPESAFE_OFFLINE). Their `Selected` is merely the first code-recalled candidate: use Candidates as evidence and decide each type from the PHP source."
+    : allLive
+      ? "> PROVENANCE: LIVE — `Selected` was judged by the live Jev model (selection + verification cascade)."
+      : "> PROVENANCE: not recorded for these rows — treat `Selected` as an unverified hint.";
   const lines = [
-    "| Symbol | Kind | File | Candidates | Selected | Flagged |",
-    "|---|---|---|---|---|---|",
+    provenance,
+    "",
+    "| Symbol | Kind | File | Candidates | Selected | Flagged | Judge |",
+    "|---|---|---|---|---|---|---|",
     ...rows.map(
       (r) =>
-        `| ${r.symbol} | ${r.kind} | ${r.file} | ${r.candidates.join(", ") || "—"} | ${r.selected} | ${r.flagged ? "yes" : "no"} |`,
+        `| ${r.symbol} | ${r.kind} | ${r.file} | ${r.candidates.join(", ") || "—"} | ${r.selected} | ${r.flagged ? "yes" : "no"} | ${r.judge ?? "unknown"} |`,
     ),
   ];
   for (const f of sources) {
@@ -967,8 +983,11 @@ export function renderSymbolTable(
  * Deterministic offline responder for the in-memory Jev double (Phase 3
  * default when TYPESAFE_API_KEY is absent): Choice picks the first
  * non-NONE candidate at 0.9; nouls answer 0.95 (above the 0.8 escalation
- * threshold). These are SCRIPTED FIXTURES — never reported as live Jev
- * usage (BUILD_NOTES: Jev-live is BLOCKED-pending-key).
+ * threshold). These are SCRIPTED FIXTURES, not judgments: the symbol-table
+ * step tags every row `judge: "scripted"`, the planner table is labelled
+ * UNVERIFIED (see {@link renderSymbolTable}), and the double's synthetic
+ * token counts never enter the judgment-role envelope (BUILD_NOTES: Jev-live
+ * is BLOCKED-pending-key).
  */
 export const offlineJevResponder: InMemoryResponder = (request) => {
   const answers: Record<string, unknown> = {};
@@ -986,9 +1005,26 @@ export const offlineJevResponder: InMemoryResponder = (request) => {
   return answers;
 };
 
-/** In-memory Jev double over the deterministic offline responder. */
+/**
+ * THE offline judgment factory: an in-memory Jev double over the scripted
+ * responder. (client.ts no longer has a second, responder-less factory that
+ * throws on the first call.) Its `kind` is "in-memory", which is what the
+ * flow's scripted-vs-live tagging keys on.
+ */
 export function createOfflineJevClient(): JudgmentClient {
   return createInMemoryJevClient(offlineJevResponder);
+}
+
+/**
+ * The worker's startup line for the active judgment lane. Names EVERY
+ * consumer, including the symbol table, which keeps calling the offline
+ * double (scripted first-candidate picks) when no real client is configured —
+ * the old banner only mentioned verdict-check/prioritize/vitest-triage.
+ */
+export function judgmentLaneSummary(kind: JudgmentClient["kind"]): string {
+  return kind === "real"
+    ? "LIVE JEV — symbol-table/verdict-check/prioritize/vitest-triage consume the real billed client"
+    : "NAIVE — verdict-check/prioritize/vitest-triage consume deterministic naive defaults (no Jev calls); symbol-table consumes the SCRIPTED offline double (first-candidate picks tagged judge=scripted, UNVERIFIED)";
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,7 +1057,8 @@ export function composePrepGenerateTurn(input: {
     "## PHP sources (read-only, by value)",
     sources,
     "",
-    "## Per-symbol table (pre-computed; treat as binding input)",
+    "## Per-symbol table (pre-computed; binding only where the Judge column says live)",
+    "Rows judged `live` are binding input. Rows marked `scripted` or `unknown` are UNVERIFIED hints: Candidates are code-recalled evidence, but the PHP source wins over a `Selected` value.",
     input.symbolTableText,
     "",
     "## Prior stub baseline (supersede it; keep its section structure)",

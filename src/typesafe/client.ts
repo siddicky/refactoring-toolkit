@@ -10,8 +10,14 @@
  * - The IN-MEMORY double (`createInMemoryJevClient`) answers from a scripted
  *   responder: deterministic, offline, and used by all unit tests. With no
  *   responder it throws — it never fabricates judgments silently.
- * - `createJevClient()` is the env-aware factory: TYPESAFE_OFFLINE=1 forces
- *   the in-memory double so real network calls are skippable in tests/CI.
+ * - There is ONE offline factory for production flows: the worker's
+ *   `createOfflineJevClient()` (src/harness/runtime.ts), an in-memory double
+ *   over the scripted first-candidate responder. Its answers are tagged
+ *   `judge: "scripted"` downstream and are never counted as live Jev usage.
+ *   (An env-aware `createJevClient()` used to exist beside it, returned a
+ *   responder-less double that throws on the first call, and had no caller
+ *   but its own test — it was deleted rather than kept as a second offline
+ *   behaviour.) `isTypesafeOffline()` (TYPESAFE_OFFLINE) stays the switch.
  */
 
 // ---- seam types (structural mirrors of @typesafe-ai/sdk 0.6.0) ---------------
@@ -291,14 +297,4 @@ export async function createRealJevClient(config?: {
     },
   };
   return adapter;
-}
-
-/**
- * Env-aware factory used by production flows: TYPESAFE_OFFLINE=1 forces the
- * in-memory double; otherwise the real SDK client (requires TYPESAFE_API_KEY,
- * throws JevConfigError otherwise).
- */
-export async function createJevClient(): Promise<JudgmentClient> {
-  if (isTypesafeOffline()) return createInMemoryJevClient();
-  return createRealJevClient();
 }

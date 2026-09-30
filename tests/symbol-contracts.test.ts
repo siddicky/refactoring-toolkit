@@ -4,16 +4,39 @@
  * offline judgments are tagged, not presented as verified picks).
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Context } from "@superdurable/dex";
 
 import {
   SYMBOL_HARVEST_CAP,
+  composePrepGenerateTurn,
+  createOfflineJevClient,
   harvestPhpSymbols,
   harvestPhpSymbolsReport,
+  judgmentLaneSummary,
+  offlineJevResponder,
   renderSymbolTable,
+  type SymbolTableRowView,
 } from "../src/harness/runtime.js";
+import {
+  PortProjectFlow,
+  ppPrepSeed,
+  ppSymtab,
+  type PortRunInput,
+  type PrepSeedState,
+  type SymbolTableRow,
+} from "../flows/port-project.js";
+import { configurePortJudgment } from "../flows/runtime-hooks.js";
+import { envelopeEvents } from "../flows/steps/envelope.js";
+import type { EnvelopeEvent } from "../src/metrics/types.js";
+import * as typesafeClientModule from "../src/typesafe/client.js";
+import {
+  createInMemoryJevClient,
+  type InMemoryJudgmentClient,
+  type JudgmentClient,
+} from "../src/typesafe/client.js";
 import { phpTypeToTsType, recallCandidates, type PhpSymbol } from "../src/typesafe/symbol-types.js";
 import {
   BASELINE_MARGIN,
@@ -231,5 +254,165 @@ describe("C21: phpTypeToTsType handles PHPStan array shapes", () => {
   test("array shapes become Record<string, unknown> and unions around them split correctly", () => {
     expect(phpTypeToTsType("array{id: int, name: string}")).toBe("Record<string, unknown>");
     expect(phpTypeToTsType("array{id: int|string}|null")).toBe("Record<string, unknown> | null");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C18 — scripted/offline judgments are tagged, not presented as verified
+// ---------------------------------------------------------------------------
+
+function rowView(judge: SymbolTableRowView["judge"], symbolName = "add"): SymbolTableRowView {
+  return {
+    file: "src/Money.php",
+    symbol: symbolName,
+    kind: "method",
+    candidates: ["Money"],
+    selected: "Money",
+    flagged: false,
+    ...(judge !== undefined ? { judge } : {}),
+  };
+}
+
+describe("C18: the planner's symbol table carries its provenance", () => {
+  test("scripted rows: UNVERIFIED provenance banner + a Judge column saying scripted", () => {
+    const table = renderSymbolTable([rowView("scripted")]);
+    expect(table).toContain("PROVENANCE: SCRIPTED OFFLINE PICKS (UNVERIFIED)");
+    expect(table).toContain("| Judge |");
+    expect(table).toMatch(/\| Money \| no \| scripted \|/);
+    expect(table).not.toContain("judged by the live Jev model");
+  });
+
+  test("live rows: LIVE provenance and no UNVERIFIED claim", () => {
+    const table = renderSymbolTable([rowView("live")]);
+    expect(table).toContain("PROVENANCE: LIVE");
+    expect(table).not.toContain("UNVERIFIED");
+    expect(table).toMatch(/\| Money \| no \| live \|/);
+  });
+
+  test("a mix counts as scripted; rows from before the tag are `unknown`, never claimed live", () => {
+    expect(renderSymbolTable([rowView("live"), rowView("scripted", "sub")])).toContain("SCRIPTED OFFLINE PICKS");
+    const legacy = renderSymbolTable([rowView(undefined)]);
+    expect(legacy).toContain("PROVENANCE: not recorded");
+    expect(legacy).toMatch(/\| no \| unknown \|/);
+  });
+
+  test("the prep turn no longer labels the table 'binding input' unconditionally", () => {
+    const table = renderSymbolTable([rowView("scripted")]);
+    const turn = composePrepGenerateTurn({ phpFiles: [], symbolTableText: table, stubPrepBaseline: "# stub" });
+    expect(turn).not.toContain("treat as binding input");
+    expect(turn).toContain("binding only where the Judge column says live");
+    expect(turn).toContain("UNVERIFIED hints");
+    expect(turn).toContain(table);
+  });
+});
+
+describe("C18: one offline factory, and the lane banner names the symbol table", () => {
+  test("createJevClient (the responder-less double that throws on first use) is gone; createOfflineJevClient is the offline factory", async () => {
+    expect("createJevClient" in typesafeClientModule).toBe(false);
+    expect(createOfflineJevClient().kind).toBe("in-memory");
+  });
+
+  test("the non-real lane summary says the symbol table consumes the SCRIPTED double; the live one names it as live", () => {
+    const naive = judgmentLaneSummary("in-memory");
+    expect(naive).toContain("symbol-table");
+    expect(naive).toContain("SCRIPTED");
+    expect(naive).toContain("UNVERIFIED");
+    expect(naive).toContain("no Jev calls");
+    const live = judgmentLaneSummary("real");
+    expect(live).toContain("LIVE JEV");
+    expect(live).toContain("symbol-table");
+    expect(live).not.toContain("SCRIPTED");
+  });
+
+  test("the worker prints the summary under its JUDGMENT LANE label", () => {
+    const src = readFileSync(join(ROOT, "scripts", "run-demo.ts"), "utf8");
+    expect(src).toContain("JUDGMENT LANE: ${judgmentLaneSummary(judgment.kind)}");
+  });
+});
+
+/** Context stub answering getAttribute by AttributeMap identity (flow-step harness). */
+function stepCtx(stores: Map<unknown, Map<string, unknown>>): Context {
+  return {
+    attempt: 1,
+    flowId: "c18-flow",
+    getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
+    setAttribute: (attr: unknown, value: unknown, instance: string) => {
+      let store = stores.get(attr);
+      if (store === undefined) {
+        store = new Map();
+        stores.set(attr, store);
+      }
+      store.set(instance, value);
+    },
+  } as unknown as Context;
+}
+
+const RUN_INPUT: PortRunInput = {
+  repoRoot: "/tmp/c18",
+  worktreeRoot: "/tmp/c18/.wt",
+  integrationWorktreePath: "/tmp/c18/.wt/integration",
+  epoch: 1,
+  sourceRoot: "/tmp/c18/src",
+  prepPath: "/tmp/c18/PORTING.md",
+  files: ["src/Money.php"],
+  maxRounds: 2,
+};
+
+const TYPED: PhpSymbol = symbol({
+  name: "add",
+  kind: "method",
+  file: "src/Money.php",
+  signature: "public function add(Money $other): Money {",
+});
+const UNTYPED: PhpSymbol = symbol({ name: "mystery", kind: "method", file: "src/Money.php", signature: "function mystery($x) {" });
+
+async function runSymbolTable(client: JudgmentClient, symbols: PhpSymbol[]) {
+  configurePortJudgment(client);
+  const stores = new Map<unknown, Map<string, unknown>>([
+    [ppPrepSeed as unknown, new Map<string, unknown>([["seed", { stubRaw: "stub", symbols } satisfies PrepSeedState]])],
+  ]);
+  const decision = await new PortProjectFlow().symbolTable.execute(stepCtx(stores) as never, RUN_INPUT);
+  const rows = (stores.get(ppSymtab as unknown)?.get("symtab") as { rows: SymbolTableRow[] } | undefined)?.rows ?? [];
+  const envelopes = [...(stores.get(envelopeEvents as unknown)?.values() ?? [])] as EnvelopeEvent[];
+  const completed = envelopes.find((e) => e.ended_at !== null);
+  return { decision, rows, completed };
+}
+
+describe("C18: SymbolTableStep tags rows by client kind and excludes scripted tokens", () => {
+  afterEach(() => {
+    configurePortJudgment(createInMemoryJevClient());
+  });
+
+  test("the offline scripted double -> rows tagged scripted, judgment envelope tokens are 0 (not the synthetic counts, not an invented 1)", async () => {
+    const offline = createOfflineJevClient();
+    const { decision, rows, completed } = await runSymbolTable(offline, [TYPED, UNTYPED]);
+    expect(decision.kind).toBe("next");
+    expect(rows.map((r) => [r.symbol, r.judge])).toEqual([
+      ["add", "scripted"],
+      ["mystery", "scripted"],
+    ]);
+    // the double DID fabricate usage (proof the exclusion is deliberate) ...
+    expect((offline as InMemoryJudgmentClient).inputTokens).toBeGreaterThan(0);
+    // ... but none of it reaches the judgment-role envelope
+    expect(completed?.role).toBe("judgment");
+    expect(completed?.tokens).toBe(0);
+  });
+
+  test("a REAL client -> rows tagged live and the envelope carries the real usage", async () => {
+    const inner = createInMemoryJevClient(offlineJevResponder);
+    const real: JudgmentClient = { kind: "real", systemOne: (req) => inner.systemOne(req) };
+    const { rows, completed } = await runSymbolTable(real, [TYPED, UNTYPED]);
+    expect(rows.map((r) => r.judge)).toEqual(["live", "live"]);
+    expect(inner.inputTokens + inner.outputTokens).toBeGreaterThan(0);
+    expect(completed?.tokens).toBe(inner.inputTokens + inner.outputTokens);
+  });
+
+  test("a REAL client that made no calls (all recall-empty) reports an honest 0, not an invented 1", async () => {
+    const inner = createInMemoryJevClient(offlineJevResponder);
+    const real: JudgmentClient = { kind: "real", systemOne: (req) => inner.systemOne(req) };
+    const { rows, completed } = await runSymbolTable(real, [UNTYPED]);
+    expect(rows.map((r) => r.judge)).toEqual(["live"]);
+    expect(inner.callCount).toBe(0);
+    expect(completed?.tokens).toBe(0);
   });
 });

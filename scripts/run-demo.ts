@@ -71,7 +71,7 @@ import {
   configurePortJudgment,
   configureTurnHealthAssessor,
 } from "../flows/runtime-hooks.js";
-import { createOfflineJevClient } from "../src/harness/runtime.js";
+import { createOfflineJevClient, judgmentLaneSummary } from "../src/harness/runtime.js";
 import { createRealJevClient, isTypesafeOffline } from "../src/typesafe/client.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
 import { createTurnHealthAssessor } from "../src/typesafe/turn-health.js";
@@ -667,7 +667,7 @@ async function main(): Promise<number> {
       // second seam is gone, so the log can no longer claim REAL while the
       // steps silently run naive.
       console.log(
-        `[worker] JUDGMENT LANE: ${judgment.kind === "real" ? "LIVE JEV" : "NAIVE"} — verdict-check/prioritize/vitest-triage consume ${judgment.kind === "real" ? "the real billed client" : "deterministic naive defaults (no Jev calls)"}`,
+        `[worker] JUDGMENT LANE: ${judgmentLaneSummary(judgment.kind)}`,
       );
       const handle = await startDexWorker(flows, config);
       // US-002 stream publish (runner-side deviation, see envelope.ts): the
