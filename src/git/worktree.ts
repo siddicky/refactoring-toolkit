@@ -397,6 +397,23 @@ export function roundOfOpId(opId: OperationId): number {
 }
 
 /**
+ * Picks the branch to report for a commit from its `%D` decoration string.
+ * `%D` lists HEAD first as `HEAD -> <branch>` when the main checkout's branch
+ * sits on the commit - that is not a ref name (`rev-parse "HEAD -> main"`
+ * fails), so the prefix is stripped. A `lease/*` branch is preferred because
+ * it is the one the round was committed on; otherwise the first branch wins.
+ * Returns undefined when no branch decorates the commit (caller falls back to
+ * the sha).
+ */
+export function keyedBranchFromDecoration(decoration: string): string | undefined {
+  const names = decoration
+    .split(",")
+    .map((r) => r.trim().replace(/^HEAD\s*->\s*/, ""))
+    .filter((r) => r.length > 0 && r !== "HEAD" && !r.startsWith("tag: "));
+  return names.find((n) => n.startsWith("lease/")) ?? names[0];
+}
+
+/**
  * Scans ALL branches (shared object store) for a commit carrying the
  * operation-ID trailer, so a redo on a spare or reclaimed worktree still
  * finds a commit landed elsewhere.
@@ -406,7 +423,14 @@ export async function findCommitByOpId(
   opId: OperationId,
 ): Promise<KeyedCommit | undefined> {
   const runner = git(repoRoot);
-  const out = await runner.run(["log", "--all", "--format=%H%x1f%D%x1f%b%x1e"]);
+  // --decorate-refs=refs/heads/: decorations (%D) name only local branches, so
+  // remote-tracking refs and notes never show up as the keyed "branch".
+  const out = await runner.run([
+    "log",
+    "--all",
+    "--decorate-refs=refs/heads/",
+    "--format=%H%x1f%D%x1f%b%x1e",
+  ]);
   const records = out.split("\x1e").map((r) => r.trim()).filter(Boolean);
   for (const record of records) {
     const fields = record.split("\x1f").map((p) => p.trim());
@@ -417,11 +441,7 @@ export async function findCommitByOpId(
     const bodyLines = body.split("\n").map((l) => l.trim());
     if (bodyLines.includes(trailerLine)) {
       const hashLine = bodyLines.find((l) => l.startsWith(`${CONTENT_HASH_TRAILER} `));
-      const branch =
-        refs
-          .split(",")
-          .map((r) => r.trim().replace(/^->\s*/, ""))
-          .find((r) => r.length > 0 && r !== "HEAD" && !r.startsWith("tag: ")) ?? sha;
+      const branch = keyedBranchFromDecoration(refs) ?? sha;
       return {
         opId,
         sha,
@@ -667,8 +687,20 @@ export async function integratedContentExists(
   return gitPredicate(runner, ["cat-file", "-e", `HEAD:${path}`], [1, 128]);
 }
 
-function sanitizePathSegment(input: string): string {
-  const safe = input.replace(/[^a-zA-Z0-9._-]+/g, "__");
+/**
+ * One path/ref-safe segment for a file: the lease branch is
+ * `lease/<segment>/<epoch>` and the worktree directory `<segment>-<epoch>`.
+ * Beyond the character whitelist the segment must also be a valid ref
+ * component (`git check-ref-format`): no leading `.`, no `..`, no trailing
+ * `.lock` - those are rewritten, which forces the hash suffix below. Names
+ * that were already valid are returned unchanged.
+ */
+export function sanitizePathSegment(input: string): string {
+  const safe = input
+    .replace(/[^a-zA-Z0-9._-]+/g, "__")
+    .replace(/\.{2,}/g, "__")
+    .replace(/^\./, "_")
+    .replace(/\.lock$/, "_lock");
   if (safe.length === 0 || safe.length > 96) return `seg-${hashOf(input)}`;
   // m3: inputs differing only in sanitized-away characters (e.g. `a/b` vs
   // `a.b`) would otherwise collide; suffix the hash whenever sanitizing
