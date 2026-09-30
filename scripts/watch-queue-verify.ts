@@ -117,6 +117,12 @@ function isLongPollWakeUp(err: unknown): boolean {
   );
 }
 
+/** Collapses a (possibly multi-line, e.g. dexcli stdout) error into one log line. */
+function oneLine(err: unknown): string {
+  const text = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").trim();
+  return text.length > 400 ? `${text.slice(0, 400)}...` : text;
+}
+
 function log(line: string): void {
   console.log(`[watch-queue-verify ${new Date().toISOString()}] ${line}`);
 }
@@ -187,19 +193,23 @@ async function main(): Promise<number> {
   // fetched inside the kill window.
   let observedRunId: string | null = null;
   const fetchFlowSummary = async () => {
-    const out = await execFileP(
-      dexcliBin,
-      ["flow", "summary", flowId, "-server", config.serverAddress, "-output", "json"],
-      { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-    );
-    const summary = parseFlowSummary(out.stdout);
-    if (summary.runId !== null) observedRunId = summary.runId;
-    return summary;
+    try {
+      const out = await execFileP(
+        dexcliBin,
+        ["flow", "summary", flowId, "-server", config.serverAddress, "-output", "json"],
+        { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
+      );
+      const summary = parseFlowSummary(out.stdout);
+      if (summary.runId !== null) observedRunId = summary.runId;
+      return summary;
+    } catch (err) {
+      throw new Error(`dexcli flow summary failed: ${oneLine(err)}`);
+    }
   };
   try {
     await fetchFlowSummary();
   } catch (err) {
-    log(`flow summary unavailable at arm (${(err as Error).message}) — flow_run_id stays unknown until a probe succeeds`);
+    log(`${(err as Error).message} (at arm) — flow_run_id stays unknown until a probe succeeds`);
   }
 
   try {
@@ -254,7 +264,7 @@ async function main(): Promise<number> {
         const state = await cli.flowState(flowId);
         // Throw (do not return false): the watcher logs probe failures, so a
         // missing/misconfigured dexcli no longer leaves this lane silently blind.
-        if (!state.ok) throw new Error(`dexcli flow state failed: ${state.error}`);
+        if (!state.ok) throw new Error(`dexcli flow state failed: ${oneLine(state.error)}`);
         return (state.value.activeStepExecutions ?? []).some(
           (s) => s.stepType === "PpQueueVerify",
         );
