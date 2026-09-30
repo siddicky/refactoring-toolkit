@@ -5,11 +5,15 @@
 
 import {
   buildTscQueueState,
+  capErrorsPerFile,
   emptyBurnDown,
+  parseTscDiagnostics,
   parseTscOutput,
   parseTscQueueState,
   recordBurnDown,
+  tscOutcomeFromRun,
   type BurnDownSeries,
+  type TscProcessRun,
   type TscQueueState,
 } from "./tsc-queue.js";
 import { TSC_SAMPLE_1, TSC_SAMPLE_2, TSC_SAMPLE_3 } from "./testdata/tsc-fixtures.js";
@@ -132,6 +136,128 @@ runTestFile("tsc-queue", {
     series = recordBurnDown(series, 1, 5);
     assertEquals(series.entries.length, 3);
     assertEquals(series.entries[1], { iteration: 1, errorCount: 5 });
+  },
+
+  "C06: global (file-less) diagnostics are counted, never glued onto a located record": () => {
+    const output = [
+      "src/a.ts(3,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+      "error TS18003: No inputs were found in config file '/itg/tsconfig.json'. Specified 'include' paths were [\"src/**/*.ts\"]",
+      "error TS2688: Cannot find type definition file for 'nonexistent-types'.",
+      "  The file is in the program because:",
+      "    Entry point for implicit type library 'nonexistent-types'",
+      "",
+    ].join("\n");
+    const parsed = parseTscDiagnostics(output);
+    assertEquals(parsed.errors.length, 1, "one located record");
+    assertEquals(
+      parsed.errors[0]!.message,
+      "Type 'string' is not assignable to type 'number'.",
+      "the global line does not become a continuation of the located record",
+    );
+    assertEquals(parsed.unlocated.map((u) => u.code), ["TS18003", "TS2688"]);
+    assertTrue(
+      parsed.unlocated[1]!.message.includes("Entry point for implicit type library"),
+      "indented detail lines attach to the global diagnostic",
+    );
+    assertEquals(parseTscOutput(output).length, 1, "parseTscOutput stays located-only");
+  },
+
+  "C06: CRLF output parses like LF output": () => {
+    const crlf = "src/a.ts(1,2): error TS2304: Cannot find name 'x'.\r\n  detail\r\nerror TS5083: Cannot read file 'nope.json'.\r\n";
+    const parsed = parseTscDiagnostics(crlf);
+    assertEquals(parsed.errors.length, 1);
+    assertEquals(parsed.errors[0]!.message, "Cannot find name 'x'.\n  detail");
+    assertEquals(parsed.unlocated.length, 1);
+  },
+
+  "C06: tscOutcomeFromRun never reads a failed tsc as a clean typecheck": () => {
+    const run = (over: Partial<TscProcessRun>): TscProcessRun => ({
+      output: "",
+      exitCode: 0,
+      signal: null,
+      killed: false,
+      errorCode: null,
+      timeoutMs: 180_000,
+      ...over,
+    });
+
+    // TS18003 (no inputs): exit 2, zero located diagnostics -> NOT-RUN.
+    const noInputs = tscOutcomeFromRun(
+      run({ exitCode: 2, output: "error TS18003: No inputs were found in config file '/itg/tsconfig.json'.\n" }),
+    );
+    assertEquals(noInputs.errors.length, 0);
+    assertEquals(noInputs.accounting.state, "not-run");
+    assertEquals(noInputs.accounting.exit_code, 2);
+    assertEquals(noInputs.accounting.unlocated, 1);
+    assertTrue(
+      (noInputs.accounting.reason ?? "").startsWith("tsc exited 2 with no located diagnostics: error TS18003: No inputs were found"),
+      `reason names exit code and first global diagnostic, got ${noInputs.accounting.reason}`,
+    );
+
+    // TS5083 unreadable tsconfig.
+    const unreadable = tscOutcomeFromRun(run({ exitCode: 2, output: "error TS5083: Cannot read file '/itg/nope.json'.\n" }));
+    assertEquals(unreadable.accounting.state, "not-run");
+
+    // Non-zero exit and completely empty output.
+    const empty = tscOutcomeFromRun(run({ exitCode: 1, output: "" }));
+    assertEquals(empty.accounting.state, "not-run");
+    assertTrue((empty.accounting.reason ?? "").includes("no output"), "empty output is named");
+
+    // Missing binary: spawn error, no exit code.
+    const enoent = tscOutcomeFromRun(run({ exitCode: null, errorCode: "ENOENT", output: "\n" }));
+    assertEquals(enoent.accounting, {
+      state: "not-run",
+      reason: "tsc binary not found (ENOENT)",
+      exit_code: null,
+      unlocated: 0,
+    });
+
+    // Timeout kill, even with partial located output.
+    const timedOut = tscOutcomeFromRun(
+      run({ exitCode: null, killed: true, signal: "SIGTERM", timeoutMs: 180_000, output: "src/a.ts(1,1): error TS2304: x\n" }),
+    );
+    assertEquals(timedOut.accounting.state, "not-run");
+    assertEquals(timedOut.accounting.reason, "tsc timed out after 180s");
+
+    // External signal (not our timeout).
+    const signalled = tscOutcomeFromRun(run({ exitCode: null, signal: "SIGKILL" }));
+    assertEquals(signalled.accounting.reason, "tsc terminated by SIGKILL");
+
+    // Buffer overflow is a spawn-level failure, not a timeout.
+    const overflow = tscOutcomeFromRun(
+      run({ exitCode: null, killed: true, errorCode: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }),
+    );
+    assertTrue((overflow.accounting.reason ?? "").includes("capture buffer"), "maxBuffer named");
+
+    // Honest RAN paths: exit 0 with no output is a genuine clean typecheck...
+    const clean = tscOutcomeFromRun(run({ exitCode: 0, output: "" }));
+    assertEquals(clean.accounting, { state: "ran", reason: null, exit_code: 0, unlocated: 0 });
+    // ...and exit 2 with located diagnostics is a real error count (plus the global ones seen).
+    const errorsFound = tscOutcomeFromRun(
+      run({
+        exitCode: 2,
+        output: "src/a.ts(1,1): error TS2304: Cannot find name 'x'.\nerror TS2688: Cannot find type definition file for 'y'.\n",
+      }),
+    );
+    assertEquals(errorsFound.errors.length, 1);
+    assertEquals(errorsFound.accounting, { state: "ran", reason: null, exit_code: 2, unlocated: 1 });
+  },
+
+  "C05: capErrorsPerFile caps each file, not the whole list, and keeps order": () => {
+    const errs = [
+      ...Array.from({ length: 5 }, (_, i) => ({ file: "src/a.ts", n: i })),
+      { file: "./src/b.ts", n: 0 },
+      { file: "src/b.ts", n: 1 },
+      { file: "./src/b.ts", n: 2 },
+      { file: "src/c.ts", n: 0 },
+    ];
+    const kept = capErrorsPerFile(errs, 2);
+    assertEquals(
+      kept.map((e) => `${e.file}#${e.n}`),
+      ["src/a.ts#0", "src/a.ts#1", "./src/b.ts#0", "src/b.ts#1", "src/c.ts#0"],
+      "a.ts capped at 2; b.ts (with and without ./) shares one budget; c.ts is never starved",
+    );
+    assertEquals(capErrorsPerFile([], 2), []);
   },
 
   "buildTscQueueState on an empty error list produces an empty queue": () => {
