@@ -447,6 +447,12 @@ export function keyedBranchFromDecoration(decoration: string): string | undefine
  * Scans ALL branches (shared object store) for a commit carrying the
  * operation-ID trailer, so a redo on a spare or reclaimed worktree still
  * finds a commit landed elsewhere.
+ *
+ * When several commits carry the same op-ID (a naive replay on a spare
+ * worktree after a quarantine), the ORIGINAL - the one with the oldest commit
+ * time - is returned. `git log` lists newest first, so taking the first match
+ * returned the replay whenever the two commits fell in different seconds; ties
+ * within one second keep log order.
  */
 export async function findCommitByOpId(
   repoRoot: string,
@@ -459,29 +465,31 @@ export async function findCommitByOpId(
     "log",
     "--all",
     "--decorate-refs=refs/heads/",
-    "--format=%H%x1f%D%x1f%b%x1e",
+    "--format=%H%x1f%ct%x1f%D%x1f%b%x1e",
   ]);
   const records = out.split("\x1e").map((r) => r.trim()).filter(Boolean);
+  const trailerLine = `${OP_ID_TRAILER} ${opId}`;
+  let oldest: { commitTime: number; keyed: KeyedCommit } | undefined;
   for (const record of records) {
     const fields = record.split("\x1f").map((p) => p.trim());
+    const bodyLines = (fields[3] ?? "").split("\n").map((l) => l.trim());
+    if (!bodyLines.includes(trailerLine)) continue;
+    const commitTime = Number.parseInt(fields[1] ?? "", 10);
+    if (oldest !== undefined && !(commitTime < oldest.commitTime)) continue;
     const sha = fields[0] ?? "";
-    const refs = fields[1] ?? "";
-    const body = fields[2] ?? "";
-    const trailerLine = `${OP_ID_TRAILER} ${opId}`;
-    const bodyLines = body.split("\n").map((l) => l.trim());
-    if (bodyLines.includes(trailerLine)) {
-      const hashLine = bodyLines.find((l) => l.startsWith(`${CONTENT_HASH_TRAILER} `));
-      const branch = keyedBranchFromDecoration(refs) ?? sha;
-      return {
+    const hashLine = bodyLines.find((l) => l.startsWith(`${CONTENT_HASH_TRAILER} `));
+    oldest = {
+      commitTime,
+      keyed: {
         opId,
         sha,
         contentHash: hashLine ? hashLine.slice(CONTENT_HASH_TRAILER.length + 1) : null,
-        branch,
+        branch: keyedBranchFromDecoration(fields[2] ?? "") ?? sha,
         round: roundOfOpId(opId),
-      };
-    }
+      },
+    };
   }
-  return undefined;
+  return oldest?.keyed;
 }
 
 /**
