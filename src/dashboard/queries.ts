@@ -155,28 +155,7 @@ export function gitQueries(gitBin = "git"): GitQueries {
           ],
           10_000,
         );
-        const commits: GitCommitRow[] = [];
-        for (const record of out.split(LOG_REC)) {
-          const trimmed = record.replace(/^\n+/, "").trimEnd();
-          if (trimmed.length === 0) continue;
-          const fields = trimmed.split(LOG_SEP);
-          const sha = fields[0] ?? "";
-          if (!/^[0-9a-f]{7,40}$/i.test(sha)) continue;
-          const body = fields[6] ?? "";
-          const opId = findTrailer(body, "Operation-ID:");
-          const contentHash = findTrailer(body, "Content-Hash:");
-          commits.push({
-            sha,
-            shortSha: fields[1] ?? sha.slice(0, 7),
-            author: fields[2] ?? "",
-            date: fields[3] ?? "",
-            subject: fields[4] ?? "",
-            refs: fields[5] ?? "",
-            opId,
-            contentHash,
-          });
-        }
-        return ok(commits);
+        return ok(parseGitLog(out));
       } catch (e) {
         return err(describeError(e));
       }
@@ -189,22 +168,7 @@ export function gitQueries(gitBin = "git"): GitQueries {
           ["-C", repoRoot, "worktree", "list", "--porcelain"],
           10_000,
         );
-        const rows: GitWorktreeRow[] = [];
-        let current: { path: string; head: string; branch: string } | null = null;
-        const flush = () => {
-          if (current !== null) rows.push({ ...current, clean: null });
-        };
-        for (const line of out.split("\n")) {
-          if (line.startsWith("worktree ")) {
-            flush();
-            current = { path: line.slice("worktree ".length).trim(), head: "", branch: "" };
-          } else if (current !== null && line.startsWith("HEAD ")) {
-            current.head = line.slice("HEAD ".length).trim();
-          } else if (current !== null && line.startsWith("branch ")) {
-            current.branch = line.slice("branch ".length).trim();
-          }
-        }
-        flush();
+        const rows: GitWorktreeRow[] = parseWorktreePorcelain(out).map((w) => ({ ...w, clean: null }));
         // Cleanliness: one status call per worktree (a handful of paths at most).
         await Promise.all(
           rows.map(async (row) => {
@@ -222,6 +186,64 @@ export function gitQueries(gitBin = "git"): GitQueries {
       }
     },
   };
+}
+
+/** Parses the `log --pretty=<LOG_SEP/LOG_REC format>` output into commit rows. */
+export function parseGitLog(out: string): GitCommitRow[] {
+  const commits: GitCommitRow[] = [];
+  for (const record of out.split(LOG_REC)) {
+    const trimmed = record.replace(/^\n+/, "").trimEnd();
+    if (trimmed.length === 0) continue;
+    const fields = trimmed.split(LOG_SEP);
+    const sha = fields[0] ?? "";
+    if (!/^[0-9a-f]{7,40}$/i.test(sha)) continue;
+    const body = fields[6] ?? "";
+    commits.push({
+      sha,
+      shortSha: fields[1] ?? sha.slice(0, 7),
+      author: fields[2] ?? "",
+      date: fields[3] ?? "",
+      subject: fields[4] ?? "",
+      refs: fields[5] ?? "",
+      opId: findTrailer(body, "Operation-ID:"),
+      contentHash: findTrailer(body, "Content-Hash:"),
+    });
+  }
+  return commits;
+}
+
+/**
+ * Parses `worktree list --porcelain`: blank-line separated records of
+ * `worktree <path>`, `HEAD <sha>`, then `branch <ref>` | `detached` | `bare`
+ * plus optional `locked` / `prunable <reason>` lines (ignored: a prunable
+ * worktree keeps its row, and its cleanliness later resolves to unknown).
+ * A detached HEAD reports branch "(detached)" (the GitWorktreeRow contract).
+ */
+export function parseWorktreePorcelain(out: string): Array<{ path: string; head: string; branch: string }> {
+  const rows: Array<{ path: string; head: string; branch: string }> = [];
+  let current: { path: string; head: string; branch: string } | null = null;
+  const flush = () => {
+    if (current !== null) rows.push(current);
+    current = null;
+  };
+  for (const line of out.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      flush();
+      current = { path: line.slice("worktree ".length).trim(), head: "", branch: "" };
+    } else if (current !== null && line.startsWith("HEAD ")) {
+      current.head = line.slice("HEAD ".length).trim();
+    } else if (current !== null && line.startsWith("branch ")) {
+      current.branch = line.slice("branch ".length).trim();
+    } else if (current !== null && line.trim() === "detached") {
+      current.branch = "(detached)";
+    } else if (current !== null && line.trim() === "bare") {
+      current.branch = "(bare)";
+    } else if (line.trim() === "") {
+      flush();
+    }
+  }
+  flush();
+  return rows;
 }
 
 /** Extracts a `Key: value` trailer line from a commit body. */

@@ -567,9 +567,19 @@ describe("US-007 projection-only boundary: streams are never read for correctnes
     expect(offenders).toEqual([]);
   });
 
-  test("the durable envelope attribute remains the only correctness source (comment contract intact)", () => {
+  test("the durable envelope attribute remains the only correctness source (structural check, not comment text)", () => {
     const envelope = readFileSync(join(ROOT, "flows", "steps", "envelope.ts"), "utf8");
-    expect(envelope).toContain("the durable envelope-event attribute remains the only");
+    // The durable store exists under the key prefix every consumer matches on...
+    expect(envelope).toMatch(/new AttributeMap<EnvelopeEvent>\(\s*"envelope-event"/);
+    // ...and every durable write is immediately MIRRORED to the stream with the
+    // same arguments (the stream copy follows the write; it never replaces it).
+    const durableWrites = envelope.match(/envelopeEvents\.set\(/g) ?? [];
+    const mirroredWrites =
+      envelope.match(/envelopeEvents\.set\((\w+), (\w+), (\w+)\);\s*\n\s*publishEnvelopeEvent\(\1, \2, \3\);/g) ?? [];
+    expect(durableWrites.length).toBeGreaterThan(0);
+    expect(mirroredWrites.length).toBe(durableWrites.length);
+    // The envelope module itself never READS a stream.
+    expect(envelope).not.toMatch(/readStream|listStreamMessages/);
     // Stream consumers exist ONLY in the projection layer.
     for (const allowed of [
       join("src", "dashboard", "queries.ts"),
