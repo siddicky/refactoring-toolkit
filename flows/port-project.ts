@@ -450,7 +450,8 @@ const PP_LEASE_INSTANCE = "pool";
  * Lease/Release here; each per-file child builds its own). The pool enforces
  * the cap per LEASE STORE, and every parallel child owns its own pp-lease
  * store, so in parallel mode the effective concurrency bound is the wave
- * planner's slice width (CHILD_SLOT_CAP), not this pool cap.
+ * planner's slice width (CHILD_SLOT_CAP, derived from this constant), not
+ * this pool cap.
  */
 export const LEASE_SLOT_CAP = 2;
 
@@ -720,12 +721,12 @@ async function withJevFallback<T>(
     const value = await live(counting.client);
     return { value, checker: "jev", fallbackReason: null, jevTokens: counting.tokens() };
   } catch (err) {
-    return {
-      value: naive(),
-      checker: "naive-fallback",
-      fallbackReason: failureReason(err),
-      jevTokens: counting.tokens(),
-    };
+    const fallbackReason = failureReason(err);
+    // Failing open must not be silent: a persistent client/auth defect would
+    // otherwise degrade the whole run to naive with no signal beyond the
+    // durable pp-kept record.
+    console.warn(`[lane-b] live Jev failed; using the naive default (${fallbackReason})`);
+    return { value: naive(), checker: "naive-fallback", fallbackReason, jevTokens: counting.tokens() };
   }
 }
 
@@ -3303,7 +3304,8 @@ export interface PortFileInput {
   queueFixVitest: ReadonlyArray<ClassifiedVitestFailure>;
 }
 
-const CHILD_SLOT_CAP = 2;
+/** Wave width: one child per lease slot (the only cross-child concurrency bound). */
+const CHILD_SLOT_CAP = LEASE_SLOT_CAP;
 
 function childInputOf(
   base: PortRunInput,
@@ -3570,7 +3572,7 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
       input.repoRoot,
       input.worktreeRoot,
       bindLeaseStore(ctx, ppLease),
-      2,
+      LEASE_SLOT_CAP,
     );
     const existing = pool.store().get(input.file);
     if (existing !== undefined && !pool.isStale(existing, input.epoch)) {
@@ -3708,7 +3710,7 @@ const ChildReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<
       fri.repoRoot,
       fri.worktreeRoot,
       bindLeaseStore(ctx, ppLease),
-      2,
+      LEASE_SLOT_CAP,
     );
     await pool.release(fri.file);
     const marker = ppMarker.get(ctx, markerKeyOf(fri.file, fri.round));

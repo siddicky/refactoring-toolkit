@@ -13,7 +13,7 @@
  * - The gate's p_cited is persisted for kept and dropped findings.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Context } from "@superdurable/dex";
 
 import {
@@ -228,7 +228,18 @@ function realClient(
   return client as unknown as JudgmentClient & { calls: number };
 }
 
+let warnings: string[] = [];
+const originalWarn = console.warn;
+
+beforeEach(() => {
+  warnings = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+});
+
 afterEach(() => {
+  console.warn = originalWarn;
   // A real-kind seam must never leak into other test files (one process).
   configurePortJudgment(createInMemoryJevClient());
 });
@@ -240,9 +251,9 @@ const flow = new PortFileFlow();
 // ---------------------------------------------------------------------------
 
 describe("citationKept: one named threshold per checker kind", () => {
-  test("constants: naive is binary, live Jev keeps a probable citation", () => {
+  test("constants: naive is binary, live Jev floor sits under the observed 0.97+ and well over a coin flip", () => {
     expect(CITATION_MIN_P_NAIVE).toBe(1);
-    expect(CITATION_MIN_P_JEV).toBe(0.5);
+    expect(CITATION_MIN_P_JEV).toBe(0.8);
   });
 
   test("naive and naive-fallback keep only a full citation", () => {
@@ -257,7 +268,8 @@ describe("citationKept: one named threshold per checker kind", () => {
     expect(citationKept(0.99, "jev")).toBe(true);
     expect(citationKept(0.97, "jev")).toBe(true);
     expect(citationKept(CITATION_MIN_P_JEV, "jev")).toBe(true);
-    expect(citationKept(0.49, "jev")).toBe(false);
+    expect(citationKept(0.79, "jev")).toBe(false);
+    expect(citationKept(0.6, "jev")).toBe(false); // a paraphrased / invented quote is not kept
     expect(citationKept(0.2, "jev")).toBe(false);
     expect(citationKept(Number.NaN, "jev")).toBe(false);
   });
@@ -321,6 +333,8 @@ describe("VerdictCheckStep: live Jev failure fails open to the naive check", () 
       { finding_id: "A1", p_cited: 1 },
       { finding_id: "A2", p_cited: 0 },
     ]);
+    // Failing open is not silent: the degradation is logged for the operator.
+    expect(warnings.filter((w) => w.includes("[lane-b] live Jev failed") && w.includes("jev unavailable"))).toHaveLength(1);
   });
 
   test("a missing answer for a finding (jevCitationCheck throws) also fails open", async () => {
@@ -404,6 +418,7 @@ describe("PrioritizeStep: live rerank with naive fail-open", () => {
     expect(record?.findings.map((f) => f.finding_id)).toEqual(["F2", "F3", "F1"]); // blocker, major, nit
     expect(record?.prioritize?.checker).toBe("naive-fallback");
     expect(record?.prioritize?.fallbackReason).toContain("jev unavailable");
+    expect(warnings.some((w) => w.includes("[lane-b] live Jev failed"))).toBe(true);
   });
 
   test("a missing answer falls back to severity order", async () => {

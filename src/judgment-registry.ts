@@ -30,11 +30,15 @@ import { DEFAULT_ESCALATION_THRESHOLD } from "./typesafe/symbol-types.js";
  * iff its p_cited is at least the threshold of the checker that scored it.
  * The naive checker is binary ({0,1}); the live Jev checker returns a noul
  * probability (live reports record 0.97-0.99 for genuinely cited findings),
- * so demanding exactly 1 there dropped valid findings. flows/port-project.ts
- * applies these; the registry entry below is derived from them.
+ * so demanding exactly 1 there dropped valid findings. The Jev floor is 0.8,
+ * the repo's existing calibration for a passing verification noul
+ * (DEFAULT_ESCALATION_THRESHOLD in src/typesafe/symbol-types.ts): well under
+ * the observed 0.97+ for real citations, well over a coin flip for a
+ * paraphrased or invented quote. flows/port-project.ts applies these; the
+ * registry entry below is derived from them.
  */
 export const CITATION_MIN_P_NAIVE = 1;
-export const CITATION_MIN_P_JEV = 0.5;
+export const CITATION_MIN_P_JEV = 0.8;
 
 /** One declared Lane-B consumer. */
 export interface JudgmentRegistryEntry {
