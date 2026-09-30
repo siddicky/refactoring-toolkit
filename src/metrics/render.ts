@@ -47,6 +47,9 @@ import {
 /** The fixer step id (mirror of flows/port-project.ts) for AC2 retry counts. */
 const FIXER_STEP_ID = "pp-fixer";
 
+/** Legacy driver pseudo-file marking an aggregate burn-down row (now `file: null`). */
+const TOTAL_PSEUDO_FILE = "(total)";
+
 export interface MetricsRenderInput {
   envelopes: readonly EnvelopeEvent[];
   verdicts: readonly VerdictRecord[];
@@ -164,6 +167,7 @@ export interface ReportJson {
        * state + reason, never a bare 0.
        */
       vitest?: VitestRunAccounting;
+      /** Breakdown rows only; `error_count` above is the authoritative total. */
       per_file: Array<{ file: string; error_count: number }>;
     }>;
   }>;
@@ -499,26 +503,41 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     .sort((p, q) => compareStrings(p.file, q.file));
 
   // ---- queue burn-down ------------------------------------------------------
+  // The flow's aggregate row (file null) is AUTHORITATIVE for an iteration's
+  // total; per-file rows (tsc: capped by the flow) are breakdown only. The sum
+  // of per-file rows is only the fallback when no aggregate row exists.
+  interface IterationAgg {
+    total: number | null;
+    perFile: Array<{ file: string; error_count: number }>;
+    /** US-010: vitest accounting for this iteration (first sample with one wins). */
+    vitest?: VitestRunAccounting;
+  }
   interface QueueAgg {
     queue: QueueKind;
-    iterations: Map<number, Array<{ file: string; error_count: number }>>;
-    /** US-010: vitest accounting per iteration (first sample with one wins). */
-    vitestByIteration: Map<number, VitestRunAccounting>;
+    iterations: Map<number, IterationAgg>;
   }
+  const iterationCount = (it: IterationAgg): number =>
+    it.total ?? it.perFile.reduce((sum, e) => sum + e.error_count, 0);
   const queueAggs = new Map<QueueKind, QueueAgg>();
   for (const sample of burnDown) {
     let agg = queueAggs.get(sample.queue);
     if (!agg) {
-      agg = { queue: sample.queue, iterations: new Map(), vitestByIteration: new Map() };
+      agg = { queue: sample.queue, iterations: new Map() };
       queueAggs.set(sample.queue, agg);
     }
-    const list = agg.iterations.get(sample.iteration);
-    const entry = { file: sample.file, error_count: sample.error_count };
-    if (list) list.push(entry);
-    else agg.iterations.set(sample.iteration, [entry]);
-    if (sample.vitest !== undefined && !agg.vitestByIteration.has(sample.iteration)) {
-      agg.vitestByIteration.set(sample.iteration, sample.vitest);
+    let it = agg.iterations.get(sample.iteration);
+    if (!it) {
+      it = { total: null, perFile: [] };
+      agg.iterations.set(sample.iteration, it);
     }
+    if (sample.file === null || sample.file === TOTAL_PSEUDO_FILE) {
+      // Each flow writes one aggregate row per iteration; rows from distinct
+      // flows (parent + children) are independent counts and add up.
+      it.total = (it.total ?? 0) + sample.error_count;
+    } else {
+      it.perFile.push({ file: sample.file, error_count: sample.error_count });
+    }
+    if (sample.vitest !== undefined && it.vitest === undefined) it.vitest = sample.vitest;
   }
   const burnDownJson: ReportJson["queue_burn_down"] = [...queueAggs.values()]
     .sort((p, q) => compareStrings(p.queue, q.queue))
@@ -526,13 +545,11 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
       queue: agg.queue,
       iterations: [...agg.iterations.entries()]
         .sort((p, q) => p[0] - q[0])
-        .map(([iteration, perFile]) => ({
+        .map(([iteration, it]) => ({
           iteration,
-          error_count: perFile.reduce((sum, e) => sum + e.error_count, 0),
-          ...(agg.vitestByIteration.has(iteration)
-            ? { vitest: agg.vitestByIteration.get(iteration)! }
-            : {}),
-          per_file: [...perFile].sort((p, q) => compareStrings(p.file, q.file)),
+          error_count: iterationCount(it),
+          ...(it.vitest !== undefined ? { vitest: it.vitest } : {}),
+          per_file: [...it.perFile].sort((p, q) => compareStrings(p.file, q.file)),
         })),
     }));
 
@@ -541,16 +558,14 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   let tscFinalErrorCount: number | null = null;
   if (tscAgg !== undefined && tscAgg.iterations.size > 0) {
     const last = Math.max(...tscAgg.iterations.keys());
-    tscFinalErrorCount = (tscAgg.iterations.get(last) ?? []).reduce(
-      (sum, e) => sum + e.error_count,
-      0,
-    );
+    const lastIteration = tscAgg.iterations.get(last);
+    tscFinalErrorCount = lastIteration === undefined ? null : iterationCount(lastIteration);
   }
-  const vitAgg = queueAggs.get("vitest");
-  const vitestVerification =
-    vitAgg !== undefined && vitAgg.vitestByIteration.size > 0
-      ? (vitAgg.vitestByIteration.get(Math.max(...vitAgg.vitestByIteration.keys())) ?? null)
-      : null;
+  const vitestIterations = [...(queueAggs.get("vitest")?.iterations.entries() ?? [])].filter(
+    ([, it]) => it.vitest !== undefined,
+  );
+  const lastVitest = vitestIterations.sort((p, q) => p[0] - q[0]).at(-1);
+  const vitestVerification = lastVitest?.[1].vitest ?? null;
   const verification: ReportJson["summary"]["verification"] = {
     tsc_final_error_count: tscFinalErrorCount,
     tsc_verified: tscFinalErrorCount === null ? null : tscFinalErrorCount === 0,

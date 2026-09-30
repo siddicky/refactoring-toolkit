@@ -456,10 +456,15 @@ export interface VitestRunAccounting {
  * checkout). `error_count` is the number of type errors (tsc) or failing tests
  * (vitest) at that iteration. Vitest samples carry `vitest` accounting: when
  * state is "not-run" the count is vacuous and consumers must render the state.
+ *
+ * `file: null` is the flow's AGGREGATE row for the iteration: its
+ * `error_count` is the authoritative iteration total. Per-file rows (tsc only,
+ * capped by the flow) are a breakdown and never added to an existing total.
  */
 export interface QueueBurnDownEvent {
   queue: QueueKind;
-  file: string;
+  /** null = aggregate (iteration total) row; a path = per-file breakdown row. */
+  file: string | null;
   iteration: number;
   error_count: number;
   /** UTC ISO-8601 timestamp of the sample. */

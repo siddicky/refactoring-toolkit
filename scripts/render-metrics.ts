@@ -24,23 +24,23 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import {
+  collectBurnDown,
+  collectEnvelopes,
+  collectTombstones,
+  collectVerdicts,
+  type StateAttribute,
+} from "../src/metrics/collect.js";
 import { renderReport } from "../src/metrics/render.js";
 import type {
   EnvelopeEvent,
   KillEvent,
   KillEventsFile,
   QueueBurnDownEvent,
-  QueueKind,
-  TokenUsage,
   VerdictRecord,
   VerdictTombstone,
 } from "../src/metrics/types.js";
 import type { DispatchHistory } from "../src/metrics/dispatch-anchor.js";
-
-interface StateAttribute {
-  key: string;
-  value: unknown;
-}
 
 interface FlowState {
   flowId?: string;
@@ -100,147 +100,6 @@ function mergedHistory(flowId: string): DispatchHistory {
     ...(summary.runId !== undefined ? { runId: summary.runId } : {}),
     events,
   };
-}
-
-/**
- * Burn-down total rows (flow writes `file: null`) carry the iteration total;
- * per-file rows carry the groups. The renderer SUMS per iteration, so feed
- * per-file rows plus a "(total)" row only when a 0-count iteration has no
- * per-file rows (otherwise totals would double-count).
- */
-function collectBurnDown(attrs: StateAttribute[]): QueueBurnDownEvent[] {
-  const perFile: QueueBurnDownEvent[] = [];
-  const totals = new Map<string, QueueBurnDownEvent>();
-  for (const a of attrs) {
-    if (!a.key.startsWith("queue-burndown/")) continue;
-    const v = a.value as Partial<QueueBurnDownEvent> & { file?: string | null };
-    if (
-      typeof v?.queue !== "string" ||
-      typeof v.iteration !== "number" ||
-      typeof v.error_count !== "number" ||
-      typeof v.recorded_at !== "string"
-    ) {
-      continue;
-    }
-    const queue = v.queue as QueueKind;
-    // US-010 honest vitest accounting: state travels with the sample when the
-    // flow wrote it (legacy rows keep the field absent).
-    let vitest: QueueBurnDownEvent["vitest"];
-    if (
-      v.vitest !== undefined &&
-      typeof v.vitest === "object" &&
-      v.vitest !== null &&
-      (v.vitest.state === "ran" || v.vitest.state === "not-run")
-    ) {
-      vitest = {
-        state: v.vitest.state,
-        reason: typeof v.vitest.reason === "string" ? v.vitest.reason : null,
-        passed: typeof v.vitest.passed === "number" ? v.vitest.passed : null,
-        failed: typeof v.vitest.failed === "number" ? v.vitest.failed : null,
-        total: typeof v.vitest.total === "number" ? v.vitest.total : null,
-      };
-    }
-    const sample: QueueBurnDownEvent = {
-      queue,
-      // Renderer's QueueBurnDownEvent.file is a string; "(total)" marks the
-      // flow's aggregate row and is only emitted when no per-file rows exist.
-      file: typeof v.file === "string" && v.file !== "" ? v.file : "(total)",
-      iteration: v.iteration,
-      error_count: v.error_count,
-      recorded_at: v.recorded_at,
-      ...(vitest !== undefined ? { vitest } : {}),
-    };
-    if (typeof v.file === "string" && v.file !== "") {
-      perFile.push(sample);
-    } else {
-      totals.set(`${queue}\u0000${v.iteration}`, sample);
-    }
-  }
-  const iterationsWithFiles = new Set(perFile.map((s) => `${s.queue}\u0000${s.iteration}`));
-  const out = [...perFile];
-  for (const [key, total] of totals) {
-    if (!iterationsWithFiles.has(key)) out.push(total);
-  }
-  return out;
-}
-
-function collectVerdicts(attrs: StateAttribute[]): VerdictRecord[] {
-  const out: VerdictRecord[] = [];
-  for (const a of attrs) {
-    if (!a.key.startsWith("pp-verdict/") && !a.key.startsWith("pp-prep-verdict/")) continue;
-    const tuple = a.value as { metrics?: VerdictRecord } | null;
-    const rec = tuple?.metrics;
-    if (
-      rec !== undefined &&
-      rec !== null &&
-      typeof rec.file === "string" &&
-      typeof rec.reviewer === "string" &&
-      Array.isArray(rec.findings)
-    ) {
-      out.push(rec);
-    }
-  }
-  return out.sort((p, q) =>
-    `${p.file}#${p.round}#${p.reviewer}`.localeCompare(`${q.file}#${q.round}#${q.reviewer}`),
-  );
-}
-
-/**
- * US-006 tombstones (discarded reviewer verdicts) stored under the same
- * pp-verdict / pp-prep-verdict keys a completed tuple would use. The value
- * carries {reviewer, discarded, reason, attempt, tokens}; file+round are
- * recovered from the attribute key (`<sanitized-file>#<round>#<reviewer>` —
- * "__" -> "/" is lossy for filenames containing "__", documented pattern of
- * fileFromIdentity). Tombstones never enter the VerdictRecord stream; the
- * renderer uses them for the degraded marker and the exhaustion under-count
- * note.
- */
-function collectTombstones(
-  attrs: StateAttribute[],
-): Array<VerdictTombstone & { file: string; round: number }> {
-  const out: Array<VerdictTombstone & { file: string; round: number }> = [];
-  for (const a of attrs) {
-    if (!a.key.startsWith("pp-verdict/") && !a.key.startsWith("pp-prep-verdict/")) continue;
-    const suffix = a.key.slice(a.key.indexOf("/") + 1);
-    const reviewerSep = suffix.lastIndexOf("#");
-    const roundSep = reviewerSep > 0 ? suffix.lastIndexOf("#", reviewerSep - 1) : -1;
-    if (reviewerSep <= 0 || roundSep <= 0) continue;
-    const v = a.value as Partial<VerdictTombstone> | null;
-    if (v === null || typeof v !== "object" || v.discarded !== true) continue;
-    if (typeof v.reviewer !== "string" || typeof v.reason !== "string") continue;
-    if (typeof v.attempt !== "number") continue;
-    out.push({
-      file: suffix.slice(0, roundSep).replace(/__/g, "/"),
-      round: Number(suffix.slice(roundSep + 1, reviewerSep)),
-      reviewer: v.reviewer,
-      discarded: true,
-      reason: v.reason,
-      attempt: v.attempt,
-      tokens: (v.tokens ?? null) as number | TokenUsage | null,
-    });
-  }
-  return out.sort((p, q) =>
-    `${p.file}#${p.round}#${p.reviewer}`.localeCompare(`${q.file}#${q.round}#${q.reviewer}`),
-  );
-}
-
-function collectEnvelopes(attrs: StateAttribute[]): EnvelopeEvent[] {
-  const out: EnvelopeEvent[] = [];
-  for (const a of attrs) {
-    if (!a.key.startsWith("envelope-event/")) continue;
-    const v = a.value as Partial<EnvelopeEvent> | null;
-    if (
-      v !== null &&
-      typeof v === "object" &&
-      typeof v.stepId === "string" &&
-      typeof v.role === "string" &&
-      typeof v.attempt === "number" &&
-      typeof v.outcome === "string"
-    ) {
-      out.push(v as EnvelopeEvent);
-    }
-  }
-  return out.sort((p, q) => p.started_at.localeCompare(q.started_at));
 }
 
 /** Sidecar JSONL (kind "intent"/"completed") → renderer KillEventsFile. */

@@ -418,3 +418,75 @@ describe("renderReport usage_by_role (cost honesty)", () => {
     expect(rendered.markdown).toContain("~$0");
   });
 });
+
+// ---------------------------------------------------------------------------
+// C41: the flow's aggregate (file null) row is authoritative for the iteration
+// total; per-file rows are breakdown only (the flow caps them at 8 files).
+// ---------------------------------------------------------------------------
+
+describe("renderReport queue burn-down totals (aggregate row authoritative)", () => {
+  const row = (
+    queue: QueueBurnDownEvent["queue"],
+    file: string | null,
+    iteration: number,
+    error_count: number,
+  ): QueueBurnDownEvent => ({
+    queue,
+    file,
+    iteration,
+    error_count,
+    recorded_at: `2026-09-26T10:0${iteration}:00Z`,
+  });
+  const render = (burnDown: QueueBurnDownEvent[]) =>
+    renderReport({ envelopes: [], verdicts: [], burnDown });
+
+  test("total row wins over the capped per-file rows (12 errors, 8 files shown)", () => {
+    // Shape the flow writes: tsc-<iter> total + byFile.slice(0, 8) rows.
+    const rows: QueueBurnDownEvent[] = [
+      row("tsc", null, 1, 12),
+      ...["a", "b", "c", "d", "e", "f", "g", "h"].map((f) => row("tsc", `src/${f}.php`, 1, 1)),
+    ];
+    const rendered = render(rows);
+    const tsc = rendered.json.queue_burn_down[0];
+    expect(tsc?.queue).toBe("tsc");
+    expect(tsc?.iterations[0]?.error_count).toBe(12);
+    expect(tsc?.iterations[0]?.per_file.length).toBe(8);
+    expect(rendered.json.summary.verification.tsc_final_error_count).toBe(12);
+    expect(rendered.json.summary.verification.tsc_verified).toBe(false);
+  });
+
+  test("aggregate-only rows (vitest style) give empty per_file and never leak a (total) pseudo-file", () => {
+    const rendered = render([row("tsc", null, 3, 0), row("vitest", null, 3, 2)]);
+    for (const q of rendered.json.queue_burn_down) {
+      for (const it of q.iterations) expect(it.per_file).toEqual([]);
+    }
+    expect(rendered.markdown).not.toContain("(total)");
+    expect(rendered.json.summary.verification.tsc_final_error_count).toBe(0);
+    expect(rendered.json.summary.verification.tsc_verified).toBe(true);
+  });
+
+  test("legacy (total) pseudo-file rows are treated as the total, not a file", () => {
+    const rendered = render([row("tsc", "(total)", 1, 5), row("tsc", "src/a.php", 1, 3)]);
+    const it = rendered.json.queue_burn_down[0]?.iterations[0];
+    expect(it?.error_count).toBe(5);
+    expect(it?.per_file).toEqual([{ file: "src/a.php", error_count: 3 }]);
+  });
+
+  test("without an aggregate row the per-file rows are summed (recorded fixtures)", () => {
+    const rendered = render([row("tsc", "src/a.php", 1, 3), row("tsc", "src/b.php", 1, 4)]);
+    expect(rendered.json.queue_burn_down[0]?.iterations[0]?.error_count).toBe(7);
+  });
+
+  test("per-iteration totals decrease monotonically without zig-zag (one y per iteration)", () => {
+    const rendered = render([
+      row("tsc", null, 1, 12),
+      row("tsc", "src/a.php", 1, 7),
+      row("tsc", "src/b.php", 1, 5),
+      row("tsc", null, 2, 4),
+      row("tsc", "src/a.php", 2, 3),
+      row("tsc", "src/b.php", 2, 1),
+    ]);
+    expect(rendered.json.queue_burn_down[0]?.iterations.map((i) => i.error_count)).toEqual([12, 4]);
+    expect(rendered.json.summary.verification.tsc_final_error_count).toBe(4);
+  });
+});
