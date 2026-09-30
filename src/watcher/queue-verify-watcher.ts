@@ -237,6 +237,10 @@ export async function runQueueVerifyWatcher(
     options.catchUpTimeoutMs !== undefined && options.catchUpTimeoutMs > 0
       ? options.catchUpTimeoutMs
       : Math.min(options.pollIntervalMs, DEFAULT_CATCH_UP_TIMEOUT_MS);
+  const statusGateMs = options.statusGateTimeoutMs ?? DEFAULT_STATUS_GATE_TIMEOUT_MS;
+  // Tolerance for a long-poll that wakes marginally early, which would
+  // otherwise skip a probe and double the probe cadence.
+  const probeToleranceMs = Math.min(DEFAULT_CATCH_UP_TIMEOUT_MS, options.pollIntervalMs / 2);
   let fired = false;
   let streamUsable = true;
 
@@ -292,7 +296,6 @@ export async function runQueueVerifyWatcher(
       if (timer !== undefined) clearTimeout(timer);
     }
   };
-  const statusGateMs = options.statusGateTimeoutMs ?? DEFAULT_STATUS_GATE_TIMEOUT_MS;
 
   let firstResult: WatcherResult | undefined;
   const fireOnce = async (via: "stream" | "poll"): Promise<WatcherResult> => {
@@ -316,6 +319,27 @@ export async function runQueueVerifyWatcher(
     return firstResult;
   };
 
+  /**
+   * The kill gate shared by the arm-time drain and the follow batch: a flow
+   * that is already terminal exits cleanly, anything else fires.
+   */
+  const fireIfLive = async (
+    where: "backlog" | "follow",
+    trigger: WatcherStreamEvent,
+    status: WatcherFlowStatus,
+  ): Promise<WatcherResult> => {
+    if (isTerminalFlowStatus(status)) {
+      log(`${where} start is stale — flow ${status} before the trigger; exiting cleanly (no kill)`);
+      return { outcome: "terminal", firings: 0 };
+    }
+    log(
+      where === "backlog"
+        ? `trigger found in drained backlog: ${trigger.eventKey}`
+        : `trigger in follow batch: ${trigger.eventKey}`,
+    );
+    return await fireOnce("stream");
+  };
+
   log(
     `watcher start: waiting for pp-queue-verify start (stream + ${Math.round(options.pollIntervalMs / 1000)}s poll fallback, bounded ${Math.round(options.deadlineMs / 60000)}min)`,
   );
@@ -335,17 +359,8 @@ export async function runQueueVerifyWatcher(
       log(`drained ${backlog.length} retained stream event(s) to head — following from head`);
       const startsInBacklog = backlog.filter((e) => isQueueVerifyStart(e)).length;
       const active = activeAttemptStarts(backlog);
-      if (active.length > 0) {
-        const status = await probeStatus(statusGateMs);
-        if (isTerminalFlowStatus(status)) {
-          log(
-            `backlog start is stale — flow ${status} before the trigger; exiting cleanly (no kill)`,
-          );
-          return { outcome: "terminal", firings: 0 };
-        }
-        const trigger = active[0] as WatcherStreamEvent;
-        log(`trigger found in drained backlog: ${trigger.eventKey}`);
-        return await fireOnce("stream");
+      if (active[0] !== undefined) {
+        return await fireIfLive("backlog", active[0], await probeStatus(statusGateMs));
       }
       if (startsInBacklog > 0) {
         log(
@@ -417,16 +432,8 @@ export async function runQueueVerifyWatcher(
           log(`catch-up drained ${batch.length} follow event(s) to exhaustion before checks`);
           const startsInBatch = batch.filter((e) => isQueueVerifyStart(e)).length;
           const active = activeAttemptStarts(batch);
-          if (active.length > 0) {
-            const status = await (gate ?? probeStatus(statusGateMs));
-            if (isTerminalFlowStatus(status)) {
-              log(
-                `follow start is stale — flow ${status} before the trigger; exiting cleanly (no kill)`,
-              );
-              return { outcome: "terminal", firings: 0 };
-            }
-            log(`trigger in follow batch: ${active[0]!.eventKey}`);
-            return await fireOnce("stream");
+          if (active[0] !== undefined) {
+            return await fireIfLive("follow", active[0], await (gate ?? probeStatus(statusGateMs)));
           }
           if (startsInBatch > 0) {
             log(
@@ -449,12 +456,9 @@ export async function runQueueVerifyWatcher(
     const streamBlockedMs = now() - cycleStart;
 
     // Probe cadence: the dexcli probes run once per pollInterval however fast
-    // the cycles turn over (a busy stream must not spawn dexcli per event). The
-    // tolerance absorbs a long-poll that wakes marginally early, which would
-    // otherwise skip a probe and double the cadence.
-    const probeTolerance = Math.min(DEFAULT_CATCH_UP_TIMEOUT_MS, options.pollIntervalMs / 2);
+    // the cycles turn over (a busy stream must not spawn dexcli per event).
     const probeDue =
-      lastProbeAt === null || now() - lastProbeAt >= options.pollIntervalMs - probeTolerance;
+      lastProbeAt === null || now() - lastProbeAt >= options.pollIntervalMs - probeToleranceMs;
     if (probeDue) {
       lastProbeAt = now();
 

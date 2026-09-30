@@ -194,8 +194,8 @@ async function main(): Promise<number> {
   });
 
   // The REAL Dex run id for the sidecar's flow_run_id (audit C42), learned from
-  // `dexcli flow summary` at arm and refreshed by every status probe — never
-  // fetched inside the kill window.
+  // `dexcli flow summary` at arm and refreshed by every status probe, so the
+  // kill itself never waits on an extra fetch.
   let observedRunId: string | null = null;
   // The last kill's survivors, for the exit code: a target that survived SIGKILL
   // invalidates the experiment even though the trigger fired.

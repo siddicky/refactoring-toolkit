@@ -12,8 +12,6 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { WATCHER_EXIT } from "../src/watcher/cli-args.js";
-
 import {
   CHAOS_KILL_EXIT,
   DEFAULT_KILL_EVENTS_PATH,
@@ -22,6 +20,7 @@ import {
   monotonicMs,
   parseChaosKillArgs,
 } from "../scripts/chaos-kill.js";
+import { WATCHER_EXIT } from "../src/watcher/cli-args.js";
 
 const CHAOS_KILL_SCRIPT = join(import.meta.dir, "..", "scripts", "chaos-kill.ts");
 
