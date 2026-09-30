@@ -89,6 +89,12 @@ describe("resolveDemoInputs", () => {
     expect(() => resolveDemoInputs(argv("--dir", "/p", "--dispatch", "weird"))).toThrow("--dispatch");
     expect(resolveDemoInputs(argv("--dir", "/p", "--dispatch", "sequential", "--epoch", "4", "--max-rounds", "2")).epoch).toBe(4);
   });
+
+  test("a value flag with no value (last argument, or followed by another flag) is an error, not a swallowed neighbour", () => {
+    expect(() => resolveDemoInputs(argv("--dir", "/p", "--files"))).toThrow("--files requires a value");
+    expect(() => resolveDemoInputs(argv("--dir", "/p", "--epoch", "--max-rounds", "2"))).toThrow("--epoch requires a value");
+    expect(() => resolveDemoInputs(argv("--dir"))).toThrow("--dir requires a value");
+  });
 });
 
 describe("preflightDemoInputs", () => {

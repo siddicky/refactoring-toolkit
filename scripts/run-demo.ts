@@ -607,12 +607,21 @@ export function resolveDemoInputs(
   argv: readonly string[] = process.argv,
   fixturesDir: string = FIXTURES_DIR,
 ): DemoInputs {
-  const dir = argValue("--dir", undefined, argv);
+  // A value flag given without a value (last argument, or followed by another
+  // flag) is an error here, not a silently swallowed neighbour.
+  const value = (flag: string, fallback?: string): string | undefined => {
+    const i = argv.indexOf(flag);
+    if (i < 0) return fallback;
+    const v = argv[i + 1];
+    if (v === undefined || v.startsWith("--")) throw new Error(`${flag} requires a value`);
+    return v;
+  };
+  const dir = value("--dir");
   if (dir === undefined) throw new Error("demo requires --dir <projectRepoDir>");
-  const filesArg = (argValue("--files", DEMO_DEFAULT_FILES, argv) as string).trim();
+  const filesArg = (value("--files", DEMO_DEFAULT_FILES) as string).trim();
   const creatorex = filesArg === "creatorex";
   const creatorexDir = join(fixturesDir, "creatorex-middleware");
-  const dispatch = argValue("--dispatch", "parallel", argv) as string;
+  const dispatch = value("--dispatch", "parallel") as string;
   if (dispatch !== "parallel" && dispatch !== "sequential") {
     throw new Error(`--dispatch must be "parallel" or "sequential" (got ${JSON.stringify(dispatch)})`);
   }
@@ -622,15 +631,14 @@ export function resolveDemoInputs(
     filesArg,
     files: expandFilesArg(filesArg),
     prepPath: resolve(
-      argValue("--prep", undefined, argv) ??
-        (creatorex ? join(creatorexDir, "prep-stub.md") : join(fixturesDir, "stub-prep.md")),
+      value("--prep") ?? (creatorex ? join(creatorexDir, "prep-stub.md") : join(fixturesDir, "stub-prep.md")),
     ),
     sourceRoot: resolve(
-      argValue("--source-root", undefined, argv) ?? (creatorex ? creatorexDir : join(fixturesDir, "php-sample")),
+      value("--source-root") ?? (creatorex ? creatorexDir : join(fixturesDir, "php-sample")),
     ),
-    epoch: parsePositiveInt("--epoch", argValue("--epoch", "1", argv) as string),
-    maxRounds: parsePositiveInt("--max-rounds", argValue("--max-rounds", "1", argv) as string),
-    waitMinutes: parsePositiveInt("--wait-minutes", argValue("--wait-minutes", "30", argv) as string),
+    epoch: parsePositiveInt("--epoch", value("--epoch", "1") as string),
+    maxRounds: parsePositiveInt("--max-rounds", value("--max-rounds", "1") as string),
+    waitMinutes: parsePositiveInt("--wait-minutes", value("--wait-minutes", "30") as string),
     dispatchMode: dispatch,
   };
 }
