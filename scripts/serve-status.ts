@@ -20,17 +20,23 @@
  *
  * Launch:
  *   bun run scripts/serve-status.ts
- * Env:
- *   PORT                 (default 4646)
+ * Env (numeric values are validated; an invalid one falls back to its
+ * default with a startup warning):
+ *   STATUS_PORT          (default 4646; the generic PORT is a deprecated
+ *                         fallback used only when STATUS_PORT is unset)
  *   STATUS_HOST          (default 127.0.0.1)
- *   STATUS_REPO_ROOT     (default /tmp/pk-trial — the live trial repo)
+ *   STATUS_REPO_ROOT     (default: the working directory — set it to the
+ *                         porting TARGET repo whose commits/worktrees to show)
  *   DEXCLI_BIN           (default "dexcli")
  *   DEX_SERVER_ADDRESS   (default 127.0.0.1:8801)
  *   STATUS_MAX_FLOWS     (default 12 — flows that get state/history queries;
  *                         the newest port.Project parent(s) are always kept)
  *   STATUS_MAX_CHILD_FLOWS (default 8 — SubFlow port.File children within
  *                         that budget)
- *   KILL_EVENT_FILES     (default metrics/kill-events.json,metrics/kill-events.jsonl,/tmp/kill-events-phase0.jsonl)
+ *   KILL_EVENT_FILES     (default metrics/kill-events.jsonl,
+ *                         metrics/kill-events.json,kill-events.json — paths
+ *                         relative to the working directory; the first is the
+ *                         data-contract default, the others are legacy names)
  *   BURN_DOWN_FILES      (default metrics/burn-down.json,metrics/burn-down.jsonl)
  */
 
@@ -90,6 +96,7 @@ async function handleState(res: ServerResponse, snapshot: Snapshotter): Promise<
 
 export function main(): void {
   const cfg = configFromEnv();
+  for (const warning of cfg.warnings) console.warn(`[serve-status] config: ${warning}`);
   const dex = dexCliQueries({ bin: cfg.dexcliBin, server: cfg.dexServer, timeoutMs: 15_000 });
   const git = gitQueries("git");
 

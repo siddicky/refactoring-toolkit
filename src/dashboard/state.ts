@@ -782,6 +782,7 @@ export function killTimeline(events: readonly NormalizedKillEvent[]): KillTimeli
       reason: e.reason,
       note: e.note,
       resumed: e.resumed,
+      fired: e.fired ?? null,
       source: e.source,
     };
     const list = byRun.get(e.runId) ?? [];
@@ -1069,6 +1070,26 @@ export function terminalStatusWord(status: string): string {
   return status.replace(/_/g, "-");
 }
 
+/**
+ * The kill events that may colour `flow`'s headline (data contract B):
+ * - a run whose completion recorded `fired: false` killed nothing, so neither
+ *   its intent nor its completion is a kill (never a killed/resumed overlay);
+ * - an event that names a Dex run id (`flow_run_id`) only applies to the flow
+ *   with that run id (legacy sidecars may carry the flow id there instead).
+ */
+export function headlineKillEvents(
+  events: readonly NormalizedKillEvent[],
+  flow: FlowView | undefined,
+): NormalizedKillEvent[] {
+  if (flow === undefined) return [];
+  const noopRuns = new Set(events.filter((e) => e.kind === "completed" && e.fired === false).map((e) => e.runId));
+  return events.filter(
+    (e) =>
+      !noopRuns.has(e.runId) &&
+      (e.flowRunId == null || e.flowRunId === flow.runId || e.flowRunId === flow.flowId),
+  );
+}
+
 /** Parallel-wave SubFlow children (port.File) surface as their own flows. */
 export function isSubFlowChild(flowId: string): boolean {
   return flowId.startsWith("SubFlow:");
@@ -1233,7 +1254,7 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     flow: headlineFlow,
     filesDone: headlineQueue.done + headlineQueue.blocked,
     filesTotal: headlineQueue.total,
-    killEvents: input.killEvents.events,
+    killEvents: headlineKillEvents(input.killEvents.events, headlineFlow),
     dexAvailable: input.dex.available,
     feed,
     degradedRounds:

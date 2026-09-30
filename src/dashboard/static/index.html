@@ -122,7 +122,7 @@
     </div>
     <div>
       <h2><span class="n">06</span>kill / resume timeline</h2>
-      <div class="panel" id="kills"><div class="empty">no kill sidecars found — chaos evidence appears here (metrics/kill-events.json|jsonl)</div></div>
+      <div class="panel" id="kills"><div class="empty">no kill sidecars found — chaos evidence appears here (metrics/kill-events.jsonl)</div></div>
     </div>
   </section>
 
@@ -319,15 +319,18 @@ function renderCommits(commits) {
 function renderKills(groups) {
   const host = $("kills");
   if (!groups.length) {
-    host.innerHTML = '<div class="empty">no kill sidecars found — chaos evidence appears here (metrics/kill-events.json|jsonl)</div>';
+    host.innerHTML = '<div class="empty">no kill sidecars found — chaos evidence appears here (metrics/kill-events.jsonl)</div>';
     return;
   }
   host.innerHTML = groups.map((g) => {
     const items = g.entries.map((e) => {
       const klass = e.kind === "intent" ? "intent" : "completed";
+      // A completion with fired:false killed nothing: a no-op, never a kill-and-resume.
       const detail = e.kind === "intent"
         ? `<span class="red">SIGKILL intent</span> pids [${e.pids.map(esc).join(",")}]${e.reason ? ' — ' + esc(e.reason) : ""}`
-        : `<span class="green">${e.resumed === true ? "resumed" : "kill completed"}</span> ${e.note ? esc(e.note) : ""}`;
+        : e.fired === false
+          ? `<span class="amber">no-op</span> nothing was killed ${e.note ? esc(e.note) : ""}`
+          : `<span class="green">${e.resumed === true ? "resumed" : "kill completed"}</span> ${e.note ? esc(e.note) : ""}`;
       return `<li class="${klass}"><span class="t">${utcTime(e.utc)}</span>${detail}${e.monotonicMs != null ? ` <span class="faint">(mono ${esc(e.monotonicMs)})</span>` : ""}</li>`;
     }).join("");
     const delta = g.entries.length >= 2 && g.entries[0] && g.entries[g.entries.length - 1]

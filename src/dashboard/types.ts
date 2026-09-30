@@ -150,6 +150,18 @@ export interface NormalizedKillEvent {
   reason: string | null;
   note: string | null;
   resumed: boolean | null;
+  /**
+   * Data contract B: `fired` on a completion = killed_pids.length > 0. false
+   * means the kill was a NO-OP (nothing was killed): never a successful
+   * kill-and-resume. Derived from killed_pids when the writer predates the
+   * field; null when unknown (legacy metrics-spelling rows, intents).
+   */
+  fired?: boolean | null;
+  /**
+   * The real Dex RUN id the kill targeted (`flow_run_id`), when the writer
+   * knew it. Legacy sidecars may carry the flow id here instead.
+   */
+  flowRunId?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +360,8 @@ export interface KillTimelineEntryView {
   reason: string | null;
   note: string | null;
   resumed: boolean | null;
+  /** Contract B: false = the kill was a no-op (nothing killed); null = unknown. */
+  fired: boolean | null;
   source: string;
 }
 

@@ -16,6 +16,7 @@ import {
   burnDownSeries,
   deriveGridRows,
   feedFromState,
+  headlineKillEvents,
   killTimeline,
   lifecycleHeadline,
   lifecycleHeadlineView,
@@ -1181,5 +1182,126 @@ describe("buildDashboardState headline state + degraded across SubFlow children 
     const state = build([], {});
     expect(state.headlineState).toBe("none");
     expect(state.headlineDegraded).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Data contract B (dashboard side): fired:false completions are no-ops and
+// flow_run_id scopes a kill to its flow
+// ---------------------------------------------------------------------------
+
+describe("kill-event contract B: fired / flow_run_id (C59)", () => {
+  let dir = "";
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "dash-c59-"));
+  });
+  afterAll(async () => {
+    if (dir.length > 0) await rm(dir, { recursive: true, force: true });
+  });
+
+  test("the reader parses fired (explicit, or derived from killed_pids) and flow_run_id", async () => {
+    const p = join(dir, "kill-events.jsonl");
+    await writeFile(
+      p,
+      [
+        `{"kind":"intent","run_id":"k1","flow_run_id":"run-abc","utc":"2026-09-26T10:30:00.000Z","monotonic_ms":1,"target_pids":[7],"signal":"SIGKILL","reason":"t"}`,
+        `{"kind":"completed","run_id":"k1","flow_run_id":"run-abc","utc":"2026-09-26T10:30:01.000Z","monotonic_ms":2,"killed_pids":[7],"notes":"x","fired":true}`,
+        `{"kind":"completed","run_id":"k2","utc":"2026-09-26T10:40:01.000Z","monotonic_ms":3,"killed_pids":[],"notes":"nothing was killed","fired":false}`,
+        `{"kind":"completed","run_id":"k3","utc":"2026-09-26T10:50:01.000Z","monotonic_ms":4,"killed_pids":[9],"notes":"legacy, no fired field"}`,
+        `{"kind":"completed","run_id":"k4","utc":"2026-09-26T10:55:01.000Z","monotonic_ms":5,"killed_pids":[],"notes":"legacy empty"}`,
+        `{"kind":"kill-completed","run_id":"k5","utc":"2026-09-26T10:56:01.000Z","resumed":true,"note":null}`,
+      ].join("\n"),
+      "utf8",
+    );
+    const res = await readKillEventsFile(p);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const byRun = (id: string, kind: string) => res.value.find((e) => e.runId === id && e.kind === kind);
+    expect(byRun("k1", "intent")).toMatchObject({ flowRunId: "run-abc", fired: null });
+    expect(byRun("k1", "completed")).toMatchObject({ fired: true, flowRunId: "run-abc" });
+    expect(byRun("k2", "completed")?.fired).toBe(false);
+    expect(byRun("k3", "completed")?.fired).toBe(true); // derived from killed_pids
+    expect(byRun("k4", "completed")?.fired).toBe(false); // empty killed_pids = nothing killed
+    expect(byRun("k5", "completed")?.fired).toBeNull(); // legacy metrics spelling: unknown
+  });
+
+  const flow = (over: Partial<FlowView> = {}): FlowView => ({
+    flowId: "cx-5",
+    flowType: "port.Project",
+    status: "running",
+    startTime: "2026-09-26T10:00:00Z",
+    closeTime: null,
+    runId: "run-abc",
+    ...over,
+  });
+  const ev = (over: Partial<NormalizedKillEvent>): NormalizedKillEvent => ({
+    source: "s",
+    kind: "intent",
+    runId: "k1",
+    utc: "2026-09-26T10:30:00Z",
+    monotonicMs: 1,
+    pids: [1],
+    signal: "SIGKILL",
+    reason: null,
+    note: null,
+    resumed: null,
+    fired: null,
+    flowRunId: null,
+    ...over,
+  });
+  const headline = (events: NormalizedKillEvent[], feedAt?: string) =>
+    lifecycleHeadline({
+      flow: flow(),
+      filesDone: 1,
+      filesTotal: 5,
+      killEvents: headlineKillEvents(events, flow()),
+      dexAvailable: true,
+      feed: feedAt !== undefined ? [{ flowId: "cx-5", startedAt: feedAt } as FeedEntry] : [],
+    });
+
+  test("a fired:false completion (nothing was killed) is a no-op: no killed/resumed headline", () => {
+    const noop = [
+      ev({ kind: "intent", runId: "k2" }),
+      ev({ kind: "completed", runId: "k2", utc: "2026-09-26T10:30:01Z", pids: [], fired: false }),
+    ];
+    expect(headline(noop, "2026-09-26T10:35:00Z")).toBe("◆ cx-5: 1/5 files · running");
+  });
+
+  test("a fired completion still drives the resumed overlay", () => {
+    const real = [
+      ev({ kind: "intent", runId: "k1" }),
+      ev({ kind: "completed", runId: "k1", utc: "2026-09-26T10:30:01Z", fired: true }),
+    ];
+    expect(headline(real, "2026-09-26T10:35:00Z")).toContain("resumed");
+  });
+
+  test("a legacy completion without fired (unknown) is still treated as a kill", () => {
+    const legacy = [ev({ kind: "completed", runId: "k9", fired: null })];
+    expect(headline(legacy, "2026-09-26T10:35:00Z")).toContain("resumed");
+  });
+
+  test("an intent whose completion was never written still counts (the SIGKILL may have landed)", () => {
+    expect(headline([ev({ kind: "intent", runId: "k8" })])).toContain("awaiting resume");
+  });
+
+  test("flow_run_id scopes a kill to its flow: another run's kill does not colour this headline", () => {
+    const other = [ev({ flowRunId: "run-other" })];
+    expect(headline(other, "2026-09-26T10:35:00Z")).toBe("◆ cx-5: 1/5 files · running");
+    const mine = [ev({ flowRunId: "run-abc" })];
+    expect(headline(mine, "2026-09-26T10:35:00Z")).toContain("resumed");
+    // Legacy sidecars recorded the flow id in that field.
+    const legacyFlowId = [ev({ flowRunId: "cx-5" })];
+    expect(headline(legacyFlowId, "2026-09-26T10:35:00Z")).toContain("resumed");
+  });
+
+  test("the kill timeline keeps showing a no-op run, flagged fired:false", () => {
+    const groups = killTimeline([
+      ev({ kind: "intent", runId: "k2" }),
+      ev({ kind: "completed", runId: "k2", utc: "2026-09-26T10:30:01Z", pids: [], fired: false }),
+    ]);
+    expect(groups[0]?.entries.map((e) => [e.kind, e.fired])).toEqual([
+      ["intent", null],
+      ["completed", false],
+    ]);
   });
 });

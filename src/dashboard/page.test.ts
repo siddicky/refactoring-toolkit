@@ -291,6 +291,48 @@ describe("polling discipline (C58)", () => {
   });
 });
 
+describe("kill timeline no-op rendering (C59 / contract B)", () => {
+  const entry = (over: Record<string, unknown>) => ({
+    kind: "completed",
+    utc: "2026-09-26T10:30:01.000Z",
+    monotonicMs: null,
+    pids: [],
+    signal: null,
+    reason: null,
+    note: "nothing was killed (targets already gone)",
+    resumed: null,
+    fired: null,
+    source: "s",
+    ...over,
+  });
+
+  test("a fired:false completion renders as a no-op, not as a green 'kill completed'", () => {
+    const page = loadPage();
+    page.api.renderKills([{ runId: "k2", entries: [entry({ fired: false })] }]);
+    const html = page.el("kills").innerHTML;
+    expect(html).toContain("no-op");
+    expect(html).toContain("nothing was killed");
+    expect(html).not.toContain("kill completed");
+  });
+
+  test("a fired or legacy (null) completion still renders as kill completed / resumed", () => {
+    const page = loadPage();
+    page.api.renderKills([
+      { runId: "k1", entries: [entry({ fired: true, note: "x" }), entry({ fired: null, resumed: true })] },
+    ]);
+    const html = page.el("kills").innerHTML;
+    expect(html).toContain("kill completed");
+    expect(html).toContain("resumed");
+    expect(html).not.toContain("no-op");
+  });
+
+  test("the empty-state hint names the contract default path", () => {
+    const page = loadPage();
+    page.api.renderKills([]);
+    expect(page.el("kills").innerHTML).toContain("metrics/kill-events.jsonl");
+  });
+});
+
 describe("flows table stream mode (C57)", () => {
   const flow = (over: Record<string, unknown>) => ({
     flowId: "cx-5",

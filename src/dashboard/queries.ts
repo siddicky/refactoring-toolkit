@@ -310,6 +310,17 @@ function normalizeKillEvent(obj: unknown, source: string): NormalizedKillEvent |
     : Array.isArray(rec.killed_pids)
       ? rec.killed_pids
       : [];
+  // Data contract B: `fired` = killed_pids.length > 0 on a completion. Older
+  // writers omit it: derive it from an explicit killed_pids list, else unknown.
+  const fired =
+    kind !== "completed"
+      ? null
+      : typeof rec.fired === "boolean"
+        ? rec.fired
+        : Array.isArray(rec.killed_pids)
+          ? rec.killed_pids.length > 0
+          : null;
+  const flowRunRaw = rec.flow_run_id ?? rec.flowRunId;
   return {
     source,
     kind,
@@ -321,6 +332,8 @@ function normalizeKillEvent(obj: unknown, source: string): NormalizedKillEvent |
     reason: typeof rec.reason === "string" ? rec.reason : null,
     note: typeof rec.note === "string" ? rec.note : typeof rec.notes === "string" ? rec.notes : null,
     resumed: typeof rec.resumed === "boolean" ? rec.resumed : null,
+    fired,
+    flowRunId: typeof flowRunRaw === "string" && flowRunRaw.length > 0 ? flowRunRaw : null,
   };
 }
 
