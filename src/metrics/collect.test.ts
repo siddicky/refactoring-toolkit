@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   collectBurnDown,
   collectEnvelopes,
+  collectJevUsage,
   collectTombstones,
   collectVerdicts,
   type StateAttribute,
@@ -136,5 +137,28 @@ describe("collectBurnDown tsc accounting (Contract A)", () => {
     });
     expect(rows[1]?.tsc).toBeUndefined();
     expect(rows[2]?.tsc).toBeUndefined();
+  });
+});
+
+describe("collectJevUsage (pp-jev-usage attribute)", () => {
+  test("reads the usage log array, skips malformed entries, ignores other attributes", () => {
+    const out = collectJevUsage([
+      attr("pp-jev-usage/usage", [
+        { stepId: "pp-prioritize:src/a.php#1", tokens: 50, atUtc: "2026-09-26T10:04:00Z" },
+        { stepId: "pp-verdict-check:src/a.php#1", tokens: 300, atUtc: "2026-09-26T10:02:00Z" },
+        { stepId: "bad", tokens: "12", atUtc: "2026-09-26T10:05:00Z" },
+        null,
+      ]),
+      attr("pp-verdict/x", [{ stepId: "s", tokens: 1, atUtc: "t" }]),
+      attr("pp-jev-usage/other", "not-an-array"),
+    ]);
+    expect(out).toEqual([
+      { stepId: "pp-verdict-check:src/a.php#1", tokens: 300, atUtc: "2026-09-26T10:02:00Z" },
+      { stepId: "pp-prioritize:src/a.php#1", tokens: 50, atUtc: "2026-09-26T10:04:00Z" },
+    ]);
+  });
+
+  test("no usage attribute yields an empty list", () => {
+    expect(collectJevUsage([])).toEqual([]);
   });
 });

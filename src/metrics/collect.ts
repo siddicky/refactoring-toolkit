@@ -7,6 +7,7 @@
  */
 import type {
   EnvelopeEvent,
+  JevUsageEntry,
   QueueBurnDownEvent,
   QueueKind,
   TokenUsage,
@@ -168,4 +169,32 @@ export function collectEnvelopes(attrs: readonly StateAttribute[]): EnvelopeEven
     }
   }
   return out.sort((p, q) => p.started_at.localeCompare(q.started_at));
+}
+
+/**
+ * Live Jev usage (`pp-jev-usage/*`, value = array of {stepId, tokens, atUtc}).
+ * Each flow (parent and every child) keeps its own log; the driver passes the
+ * concatenation. Malformed entries are skipped.
+ */
+export function collectJevUsage(attrs: readonly StateAttribute[]): JevUsageEntry[] {
+  const out: JevUsageEntry[] = [];
+  for (const a of attrs) {
+    if (!a.key.startsWith("pp-jev-usage/")) continue;
+    if (!Array.isArray(a.value)) continue;
+    for (const raw of a.value as unknown[]) {
+      const e = raw as Partial<JevUsageEntry> | null;
+      if (
+        e !== null &&
+        typeof e === "object" &&
+        typeof e.stepId === "string" &&
+        typeof e.tokens === "number" &&
+        Number.isFinite(e.tokens) &&
+        e.tokens >= 0 &&
+        typeof e.atUtc === "string"
+      ) {
+        out.push({ stepId: e.stepId, tokens: e.tokens, atUtc: e.atUtc });
+      }
+    }
+  }
+  return out.sort((p, q) => p.atUtc.localeCompare(q.atUtc));
 }

@@ -33,6 +33,7 @@ import {
   type EnvelopeEvent,
   type EnvelopeRole,
   type Finding,
+  type JevUsageEntry,
   type KillEvent,
   type KillEventsFile,
   type QueueBurnDownEvent,
@@ -61,6 +62,12 @@ export interface MetricsRenderInput {
    */
   tombstones?: ReadonlyArray<VerdictTombstone & { file: string; round: number }>;
   burnDown: readonly QueueBurnDownEvent[];
+  /**
+   * Live TypeSafe Jev usage from the flows' `pp-jev-usage` attribute (parent +
+   * children). Reported separately: these steps keep non-model roles, so their
+   * spend never reaches the model-calling token/cost totals.
+   */
+  jevUsage?: readonly JevUsageEntry[];
   /** Merged kill-events.json sidecar; null/undefined when the run had no kill. */
   killEvents?: KillEventsFile | null;
   /**
@@ -166,6 +173,20 @@ export interface ReportJson {
   cost_estimated: boolean;
   costed_calls: number;
   uncosted_calls: number;
+  /**
+   * Live Jev (judgment-model) spend from `pp-jev-usage`, kept OUT of
+   * `tokens_model_roles` and `cost_total_usd` (verdict-check / prioritize /
+   * vitest-triage are non-model roles). Tokens only: the usage record carries
+   * no cost, so none is claimed. null = none recorded (naive path / no spend).
+   * Counts only step attempts whose write committed (0(g)): a retried attempt's
+   * spend is not durable and is not included.
+   */
+  jev_usage: {
+    calls: number;
+    total_tokens: number;
+    cost_usd: null;
+    by_step: Array<{ step: string; calls: number; tokens: number }>;
+  } | null;
   /** Retries = fixer (stepId pp-fixer) envelope events with attempt > 1, per file. */
   fixer_retries: Array<{ file: string; retries: number }>;
   queue_burn_down: Array<{
@@ -287,6 +308,37 @@ function envelopeTarget(env: EnvelopeEvent): { file: string; round: number | nul
 
 function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Group key for a Jev usage entry: `<step>:<file>#<round>` collapses to the
+ * step; other ids (`pp-queue-verify:vitest-triage`) stay whole.
+ */
+function jevStepOf(stepId: string): string {
+  const colon = stepId.indexOf(":");
+  return colon > 0 && stepId.slice(colon + 1).includes("#") ? stepId.slice(0, colon) : stepId;
+}
+
+function summarizeJevUsage(entries: readonly JevUsageEntry[]): ReportJson["jev_usage"] {
+  if (entries.length === 0) return null;
+  const byStep = new Map<string, { calls: number; tokens: number }>();
+  let total = 0;
+  for (const e of entries) {
+    const step = jevStepOf(e.stepId);
+    const agg = byStep.get(step) ?? { calls: 0, tokens: 0 };
+    agg.calls += 1;
+    agg.tokens += e.tokens;
+    byStep.set(step, agg);
+    total += e.tokens;
+  }
+  return {
+    calls: entries.length,
+    total_tokens: total,
+    cost_usd: null,
+    by_step: [...byStep.entries()]
+      .map(([step, agg]) => ({ step, calls: agg.calls, tokens: agg.tokens }))
+      .sort((p, q) => compareStrings(p.step, q.step)),
+  };
 }
 
 function summarizeAnchor(anchor: DispatchAnchorResult): DispatchAnchorSummary {
@@ -639,6 +691,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     cost_estimated: costEstimated,
     costed_calls: costedCalls,
     uncosted_calls: uncostedCalls,
+    jev_usage: summarizeJevUsage(input.jevUsage ?? []),
     fixer_retries: fixerRetries,
     queue_burn_down: burnDownJson,
     kill_events: input.killEvents ?? null,
@@ -715,6 +768,11 @@ function renderMarkdown(report: ReportJson): string {
       ? "- tokens (model-calling roles): n/a"
       : `- tokens (model-calling roles): ${tokens}`,
   );
+  lines.push(
+    report.jev_usage === null
+      ? "- judgment (Jev) tokens: none recorded (naive judgment path or no live Jev spend)"
+      : `- judgment (Jev) tokens: ${report.jev_usage.total_tokens} (separate from model-calling roles; see Judgment (Jev) section)`,
+  );
   lines.push(`- total wall clock: ${report.summary.wall_clock_ms_total} ms`);
   lines.push("");
 
@@ -790,6 +848,25 @@ function renderMarkdown(report: ReportJson): string {
       lines.push(
         `- \`~\` = estimated: ${report.uncosted_calls} of ${report.costed_calls + report.uncosted_calls} model call(s) carried tokens with no provider-reported cost (plan-authed lane or bare token total); the USD total is a lower bound, not exact.`,
       );
+    }
+  }
+  lines.push("");
+
+  lines.push("## Judgment (Jev) tokens and cost");
+  if (report.jev_usage === null) {
+    lines.push("_none recorded (naive judgment path or no live Jev spend)_");
+  } else {
+    lines.push(
+      `- total: ${report.jev_usage.total_tokens} tokens over ${report.jev_usage.calls} call(s) — NOT included in the model-calling token total or the USD total above`,
+    );
+    lines.push(
+      "- cost: not reported (the pp-jev-usage record carries tokens only); no USD figure is claimed. Only committed step attempts are recorded, so retried attempts under-count.",
+    );
+    lines.push("");
+    lines.push("| step | calls | tokens |");
+    lines.push("| --- | --- | --- |");
+    for (const s of report.jev_usage.by_step) {
+      lines.push(`| ${mdCell(s.step)} | ${s.calls} | ${s.tokens} |`);
     }
   }
   lines.push("");

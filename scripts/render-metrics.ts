@@ -9,7 +9,9 @@
  * - `dexcli flow state <flowId>` attribute store: `envelope-event/*` (the
  *   envelope stream), `pp-verdict/*` + `pp-prep-verdict/*` (ReviewTuple — the
  *   `metrics` member is the AC2 VerdictRecord — plus the US-006 tombstone
- *   variant `{reviewer, discarded, reason, attempt, tokens}`), `queue-burndown/*`;
+ *   variant `{reviewer, discarded, reason, attempt, tokens}`), `queue-burndown/*`,
+ *   `pp-jev-usage/*` (live TypeSafe Jev spend — reported as its own
+ *   "judgment (Jev)" line, never folded into the model-calling totals);
  * - `dexcli flow history <flowId>` (typed dispatch anchoring);
  * - optional chaos sidecar (JSON lines, intent/completed records) merged into
  *   the renderer's KillEventsFile shape (`resumed` is supplied by this driver
@@ -27,6 +29,7 @@ import { join } from "node:path";
 import {
   collectBurnDown,
   collectEnvelopes,
+  collectJevUsage,
   collectTombstones,
   collectVerdicts,
   type StateAttribute,
@@ -34,6 +37,7 @@ import {
 import { renderReport } from "../src/metrics/render.js";
 import type {
   EnvelopeEvent,
+  JevUsageEntry,
   KillEvent,
   KillEventsFile,
   QueueBurnDownEvent,
@@ -191,12 +195,14 @@ async function main(): Promise<number> {
   const verdicts: VerdictRecord[] = [];
   const tombstones: Array<VerdictTombstone & { file: string; round: number }> = [];
   const burnDown: QueueBurnDownEvent[] = [];
+  const jevUsage: JevUsageEntry[] = [];
   for (const id of [flowId, ...childIds]) {
     const s = id === flowId ? state : (runDexcli(["flow", "state", id]) as FlowState);
     envelopes.push(...collectEnvelopes(s.attributes ?? []));
     verdicts.push(...collectVerdicts(s.attributes ?? []));
     tombstones.push(...collectTombstones(s.attributes ?? []));
     burnDown.push(...collectBurnDown(s.attributes ?? []));
+    jevUsage.push(...collectJevUsage(s.attributes ?? []));
   }
 
   const history = mergedHistory(flowId);
@@ -211,6 +217,7 @@ async function main(): Promise<number> {
     verdicts,
     tombstones,
     burnDown,
+    jevUsage,
     ...(killEvents !== null ? { killEvents } : {}),
     history,
     generatedAt,
@@ -223,7 +230,7 @@ async function main(): Promise<number> {
   writeFileSync(jsonPath, `${JSON.stringify(report.json, null, 2)}\n`, "utf8");
 
   console.log(
-    `[render-metrics] flow=${flowId} run=${runId} envelopes=${envelopes.length} verdicts=${verdicts.length} tombstones=${tombstones.length} degradedRounds=${report.json.summary.degraded_round_count} burnDown=${burnDown.length} killEvents=${killEvents?.events.length ?? 0} provenance_ok=${report.json.provenance_ok}`,
+    `[render-metrics] flow=${flowId} run=${runId} envelopes=${envelopes.length} verdicts=${verdicts.length} tombstones=${tombstones.length} degradedRounds=${report.json.summary.degraded_round_count} burnDown=${burnDown.length} jevTokens=${report.json.jev_usage?.total_tokens ?? 0} killEvents=${killEvents?.events.length ?? 0} provenance_ok=${report.json.provenance_ok}`,
   );
   console.log(`[render-metrics] wrote ${mdPath} + ${jsonPath}`);
   return report.json.provenance_ok ? 0 : 1;

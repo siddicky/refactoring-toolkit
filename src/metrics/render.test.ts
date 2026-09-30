@@ -622,3 +622,61 @@ describe("renderReport cost_estimated (mixed lanes, C40)", () => {
     expect(rendered.markdown).toContain("- total cost: n/a");
   });
 });
+
+// ---------------------------------------------------------------------------
+// C38: live Jev spend (pp-jev-usage) is reported separately, never folded into
+// the model-calling token/cost totals and never silently dropped.
+// ---------------------------------------------------------------------------
+
+describe("renderReport judgment (Jev) usage", () => {
+  const reviewEnv: EnvelopeEvent = {
+    stepId: "pp-review-a",
+    role: "review",
+    file: null,
+    round: 1,
+    attempt: 1,
+    started_at: "2026-09-26T10:00:00Z",
+    ended_at: "2026-09-26T10:01:00Z",
+    outcome: "completed",
+    tokens: { input_tokens: 100, output_tokens: 20, cost_usd: 0.5 },
+    wall_clock_ms: 1000,
+    identity: "src__a.php#1",
+  };
+  const jevUsage = [
+    { stepId: "pp-verdict-check:src/a.php#1", tokens: 300, atUtc: "2026-09-26T10:02:00Z" },
+    { stepId: "pp-verdict-check:src/b.php#1", tokens: 200, atUtc: "2026-09-26T10:03:00Z" },
+    { stepId: "pp-prioritize:src/a.php#1", tokens: 50, atUtc: "2026-09-26T10:04:00Z" },
+    { stepId: "pp-queue-verify:vitest-triage", tokens: 1000, atUtc: "2026-09-26T10:05:00Z" },
+  ];
+
+  test("Jev tokens are totalled per step in their own line and stay out of the model-role totals", () => {
+    const withJev = renderReport({ envelopes: [reviewEnv], verdicts: [], burnDown: [], jevUsage });
+    const without = renderReport({ envelopes: [reviewEnv], verdicts: [], burnDown: [] });
+    expect(withJev.json.jev_usage).toEqual({
+      calls: 4,
+      total_tokens: 1550,
+      cost_usd: null,
+      by_step: [
+        { step: "pp-prioritize", calls: 1, tokens: 50 },
+        { step: "pp-queue-verify:vitest-triage", calls: 1, tokens: 1000 },
+        { step: "pp-verdict-check", calls: 2, tokens: 500 },
+      ],
+    });
+    // The AC2 provenance rule is untouched: model-role totals and cost are identical.
+    expect(withJev.json.summary.tokens_model_roles).toBe(without.json.summary.tokens_model_roles);
+    expect(withJev.json.cost_total_usd).toBe(without.json.cost_total_usd);
+    expect(withJev.json.provenance_ok).toBe(without.json.provenance_ok);
+    expect(withJev.markdown).toContain("## Judgment (Jev) tokens and cost");
+    expect(withJev.markdown).toContain("- judgment (Jev) tokens: 1550");
+    expect(withJev.markdown).toContain("- total: 1550 tokens over 4 call(s)");
+    expect(withJev.markdown).toContain("| pp-verdict-check | 2 | 500 |");
+    expect(withJev.markdown).toContain("cost: not reported");
+  });
+
+  test("no usage entries reads as none recorded, not as zero tokens", () => {
+    const rendered = renderReport({ envelopes: [reviewEnv], verdicts: [], burnDown: [] });
+    expect(rendered.json.jev_usage).toBeNull();
+    expect(rendered.markdown).toContain("- judgment (Jev) tokens: none recorded");
+    expect(rendered.markdown).toContain("_none recorded (naive judgment path or no live Jev spend)_");
+  });
+});

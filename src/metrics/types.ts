@@ -26,8 +26,11 @@ export type EnvelopeOutcome = "skipped" | "redone" | "interrupted" | "completed"
  * Role of the step inside the envelope. Mirror of the LIVE envelope factory
  * (flows/steps/envelope.ts): `agent`, `review`, and `judgment` are
  * model-calling; `verdict-check`/`prioritize` sit at TypeSafe integration
- * points but are code-only (naive) in Phase 2 and move to `judgment` at the
- * Phase 3 Jev swap-in; the rest are non-model.
+ * points and stay NON-model roles with `tokens: null` even when the live Jev
+ * path is wired — their Jev spend (and the vitest-triage spend) is recorded in
+ * the flow's `pp-jev-usage` attribute and reported SEPARATELY by the renderer
+ * ({@link JevUsageEntry}, report `jev_usage`), never folded into the
+ * model-calling role totals; the rest are non-model.
  */
 export type EnvelopeRole =
   | "agent"
@@ -48,6 +51,19 @@ export const MODEL_CALLING_ROLES: readonly ModelCallingRole[] = ["agent", "revie
 
 export function isModelCallingRole(role: EnvelopeRole): role is ModelCallingRole {
   return (MODEL_CALLING_ROLES as readonly string[]).includes(role);
+}
+
+/**
+ * One live TypeSafe Jev usage entry from the flow's `pp-jev-usage` attribute
+ * (the evidence stream written by recordJevUsage). `stepId` is
+ * `<step>:<file>#<round>` (verdict-check, prioritize) or
+ * `pp-queue-verify:vitest-triage`; `tokens` is input + output. The entry
+ * carries NO cost: Jev spend is reported as tokens only.
+ */
+export interface JevUsageEntry {
+  stepId: string;
+  tokens: number;
+  atUtc: string;
 }
 
 /**
