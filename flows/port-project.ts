@@ -199,6 +199,18 @@ export interface FileRoundInput {
   queueFixErrors?: ReadonlyArray<QueueVerifyError>;
   /** v1.1: vitest failures triaged to this file (fix rounds in child flows). */
   queueFixVitest?: ReadonlyArray<ClassifiedVitestFailure>;
+  /**
+   * Run-level fields of the PortRunInput this file-round was leased from.
+   * LeaseStep spreads the run input into the FileRoundInput, so they ride the
+   * sequential per-file pipeline; ReleaseStep rebuilds the run input from
+   * them (baseInput) — dropping them silently turned `--dispatch sequential`
+   * into parallel after the first file. Absent in per-file SubFlow children,
+   * which end at ChildReleaseStep and never rebuild a run input.
+   */
+  prepPath?: string;
+  files?: readonly string[];
+  maxRounds?: number;
+  dispatchMode?: "sequential" | "parallel";
 }
 
 export interface PortRunConfig {
@@ -412,6 +424,15 @@ export const ppWave = new AttributeMap<WaveDispatchRecord>("pp-wave", jsonCodec<
 export const ppWaveChildren = new AttributeMap<WaveChildrenRecord>("pp-wave-children", jsonCodec<WaveChildrenRecord>());
 
 const PP_LEASE_INSTANCE = "pool";
+
+/**
+ * WorktreePool lease cap handed to every pool the flow builds (sequential
+ * Lease/Release here; each per-file child builds its own). The pool enforces
+ * the cap per LEASE STORE, and every parallel child owns its own pp-lease
+ * store, so in parallel mode the effective concurrency bound is the wave
+ * planner's slice width (CHILD_SLOT_CAP), not this pool cap.
+ */
+export const LEASE_SLOT_CAP = 2;
 
 /** Persistence schema fragment for getPersistenceSchema(). */
 export function portPersistenceSchema(): {
@@ -1429,7 +1450,7 @@ const LeaseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInpu
       input.repoRoot,
       input.worktreeRoot,
       bindLeaseStore(ctx, ppLease),
-      2,
+      LEASE_SLOT_CAP,
     );
     // Idempotent per (file, epoch): a lease surviving a kill is reused.
     const existing = pool.store().get(current.file);
@@ -1951,12 +1972,24 @@ const ReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
   stepId: "pp-release",
   role: "record",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
-  stepOptions: { executeLoadAttributeMaps: [ppQueue, ppMarker] },
+  // ppLease: the lease is READ and removed through bindLeaseStore below.
+  stepOptions: { executeLoadAttributeMaps: [ppQueue, ppMarker, ppLease] },
   inner: async (ctx, fri) => {
     const queue = ppQueue.get(ctx, "queue");
     if (queue.current === null) {
       throw new Error("release inconsistency: no current file-round");
     }
+    // Give the lease slot back (mirrors ChildReleaseStep). Without this the
+    // sequential loop accumulated one pp-lease record per file at the same
+    // epoch and the third file failed "worktree cap (2) reached". The merge
+    // into integration happened in IntegrateStep, so dropping the worktree
+    // here is safe; the lease branch stays for keyed-commit reachability.
+    await new WorktreePool(
+      fri.repoRoot,
+      fri.worktreeRoot,
+      bindLeaseStore(ctx, ppLease),
+      LEASE_SLOT_CAP,
+    ).release(fri.file);
     const marker = ppMarker.get(ctx, markerKeyOf(fri.file, fri.round));
     ppQueue.set(ctx, "queue", {
       ...queue,
@@ -2007,6 +2040,12 @@ const FinalStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInpu
   },
 });
 
+/**
+ * Rebuilds the run input after a sequential file-round. The run-level fields
+ * (dispatchMode, maxRounds, prepPath, files) are carried on the FileRoundInput
+ * by LeaseStep's spread; the stub values below apply only to a FileRoundInput
+ * that never came from a run input.
+ */
 function baseInput(fri: FileRoundInput): PortRunInput {
   return {
     repoRoot: fri.repoRoot,
@@ -2014,9 +2053,10 @@ function baseInput(fri: FileRoundInput): PortRunInput {
     integrationWorktreePath: fri.integrationWorktreePath,
     epoch: fri.epoch,
     sourceRoot: fri.sourceRoot,
-    prepPath: "",
-    files: [],
-    maxRounds: 1,
+    prepPath: fri.prepPath ?? "",
+    files: fri.files ?? [],
+    maxRounds: fri.maxRounds ?? 1,
+    ...(fri.dispatchMode !== undefined ? { dispatchMode: fri.dispatchMode } : {}),
   };
 }
 
