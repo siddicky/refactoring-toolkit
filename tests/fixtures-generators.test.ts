@@ -234,7 +234,7 @@ describe("fixture documentation claims about PHP behaviour (audit C74)", () => {
 });
 
 describe("php-sample PHP tests agree with their sources (audit C67)", () => {
-  /** Short names a PHP file may use without an import: itself, plus the TestCase it extends is imported. */
+  /** Class names a PHP test instantiates or calls statically without importing them (its own class excepted). */
   function unimportedClassReferences(source: string): string[] {
     const imported = new Set([...source.matchAll(/^use ([\w\\]+);$/gm)].map((m) => m[1]?.split("\\").pop() ?? ""));
     const own = /^final class (\w+)/m.exec(source)?.[1];

@@ -39,10 +39,4 @@ describe("tsconfig coverage (audit C85)", () => {
     const missing = tracked.filter((rel) => !files.has(resolve(repoRoot, rel)));
     expect(missing, `tracked .ts files tsc never checks: ${missing.join(", ")}`).toEqual([]);
   });
-
-  test("the fixture generators are explicitly covered", () => {
-    const files = resolvedProjectFiles();
-    expect(files.has(resolve(repoRoot, "fixtures/generate.ts"))).toBe(true);
-    expect(files.has(resolve(repoRoot, "fixtures/generate-creatorex.ts"))).toBe(true);
-  });
 });
