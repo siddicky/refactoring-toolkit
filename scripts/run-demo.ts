@@ -23,7 +23,7 @@
  * Requires a running dex server: `dexcli dev -open=false` (see BUILD_NOTES.md).
  */
 
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -55,8 +55,8 @@ import {
   type LeaseRecord,
 } from "../src/git/worktree.js";
 import { git } from "../src/git/exec.js";
+import { makeFixtureRepo } from "../src/git/fixture.js";
 import {
-  PortRoundFlow,
   configureProbe,
   probeFlows,
   type RoundInput,
@@ -130,15 +130,9 @@ async function pickHarness(name: string | undefined): Promise<AgentSessionClient
 // Fixture repo helper (used by `round` and `git-selftest`)
 // ---------------------------------------------------------------------------
 
-export async function makeFixtureRepo(dir: string): Promise<void> {
-  await rm(dir, { recursive: true, force: true });
-  await mkdir(dir, { recursive: true });
-  const runner = git(dir);
-  await runner.run(["init", "-b", "main"]);
-  await writeFile(join(dir, "README.md"), "fixture repo\n");
-  await runner.run(["add", "-A"]);
-  await runner.run(["commit", "-m", "fixture init"]);
-}
+// The helper lives in src/git/fixture.ts so tests share one copy; re-exported
+// here for callers that import it from the script.
+export { makeFixtureRepo };
 
 // ---------------------------------------------------------------------------
 // git-selftest — exits 0(d)/0(d2)/0(d3) at the git-seam level (no dex server)

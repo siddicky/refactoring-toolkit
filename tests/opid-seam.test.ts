@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git } from "../src/git/exec.js";
+import { makeFixtureRepo } from "../src/git/fixture.js";
 import {
   InMemoryLeaseStore,
   WorktreePool,
@@ -17,16 +18,6 @@ import {
 } from "../src/git/worktree.js";
 
 let root: string | undefined;
-
-async function makeFixtureRepo(dir: string): Promise<void> {
-  await rm(dir, { recursive: true, force: true });
-  await mkdir(dir, { recursive: true });
-  const runner = git(dir);
-  await runner.run(["init", "-b", "main"]);
-  await writeFile(join(dir, "README.md"), "fixture repo\n");
-  await runner.run(["add", "-A"]);
-  await runner.run(["commit", "-m", "fixture init"]);
-}
 
 afterEach(async () => {
   if (root !== undefined) await rm(root, { recursive: true, force: true });
