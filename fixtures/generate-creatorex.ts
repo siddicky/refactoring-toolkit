@@ -19,21 +19,95 @@
  *   - fixed file order, LF endings, one trailing newline per file;
  *   - two consecutive runs are byte-identical (compare the printed DIGEST).
  *
- * Run:  bun run fixtures/generate-creatorex.ts
- * (or:  npx tsx fixtures/generate-creatorex.ts)
+ * Run:  bun run fixtures/generate-creatorex.ts [--out <dir>]
+ * (or:  npx tsx fixtures/generate-creatorex.ts [--out <dir>])
  *
  * Standalone by design: zero imports beyond node: builtins, and no shared
  * code with fixtures/generate.ts so each fixture regenerates independently.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const outRoot = join(here, "creatorex-middleware");
+
+/** Marker file every generated tree carries; `main()` only wipes trees that have it. */
+const MARKER = "GENERATED.txt";
+
+/**
+ * Output directory: `--out <dir>` (used by tests to regenerate into a temp
+ * dir) or the committed fixtures/creatorex-middleware.
+ */
+function resolveOutRoot(): string {
+  const i = process.argv.indexOf("--out");
+  if (i < 0) return join(here, "creatorex-middleware");
+  const value = process.argv[i + 1];
+  if (value === undefined || value === "" || value.startsWith("--")) {
+    throw new Error("--out requires a directory argument");
+  }
+  return resolve(value);
+}
+
+/**
+ * Clears the output directory before regeneration. A missing or empty
+ * directory is fine; a non-empty one must carry GENERATED.txt, so a stray
+ * `--out <dir>` can never wipe a directory this generator does not own.
+ */
+function clearOutRoot(dir: string): void {
+  if (existsSync(dir)) {
+    const entries = readdirSync(dir);
+    if (entries.length > 0 && !entries.includes(MARKER)) {
+      throw new Error(`refusing to wipe ${dir}: it is not empty and has no ${MARKER} marker`);
+    }
+  }
+  rmSync(dir, { recursive: true, force: true });
+}
+
+const outRoot = resolveOutRoot();
 
 type FixtureFile = { readonly path: string; readonly content: string };
+
+/**
+ * Hand-written stub prep artifact: the source map that
+ * `run-demo.ts demo --files creatorex --prep fixtures/creatorex-middleware/prep-stub.md`
+ * consumes. It lives inside the wiped output directory, so the generator has to
+ * emit it or regeneration deletes it. One string per line because the markdown
+ * is full of backticks and backslashes that a String.raw template cannot hold.
+ */
+const PREP_STUB_LINES: readonly string[] = [
+  "# PORTING PREP — `CreatorEx` PHP → TypeScript",
+  "",
+  "> **STATUS: STUB — DEMO BASELINE ARTIFACT.**",
+  "> Hand-written stand-in consumed by the porting loop as the artifact-diff",
+  "> baseline. The flow's prep-analysis phase (implementer-generated spec map +",
+  "> per-symbol table, adversarially reviewed) replaces it before any file is",
+  "> ported. Do not treat these contents as reviewed.",
+  "",
+  "Module root: `fixtures/creatorex-middleware/` — namespace `CreatorEx`",
+  "(PSR-4: `src/`), tests in `tests/` (PHPUnit style; the port targets vitest).",
+  "The PHP side is read-only input; no PHP toolchain runs anywhere in the",
+  "pipeline.",
+  "",
+  "## 1. Source map",
+  "",
+  "| PHP file | Proposed port target | Notes |",
+  "|---|---|---|",
+  "| `src/Access/EntitlementChecker.php` | `src/access/entitlement-checker.ts` | feature-flag + plan-tier checks; string-typed tiers → discriminated union |",
+  "| `src/Billing/SubscriptionService.php` | `src/billing/subscription-service.ts` | state machine over assoc-array rows → named states |",
+  "| `src/Moderation/ChatSentinel.php` | `src/moderation/chat-sentinel.ts` | regex rules + strike counters; PHP `preg_*` semantics |",
+  "| `src/Payouts/EarningsLedger.php` | `src/payouts/earnings-ledger.ts` | float money math in cents/major units — decide representation |",
+  "| `src/Support/legacy_helpers.php` | `src/support/legacy-helpers.ts` | scalar-coercion helpers; document PHP/TS divergence |",
+  "| `tests/Access/EntitlementCheckerTest.php` | `test/access/entitlement-checker.test.ts` | US-010 TEST PORT: PHPUnit asserts → vitest `expect` (scope: ported output) |",
+  "| `tests/Billing/SubscriptionServiceTest.php` | `test/billing/subscription-service.test.ts` | US-010 TEST PORT: state-machine coverage → vitest suites |",
+  "| `tests/Moderation/ChatSentinelTest.php` | `test/moderation/chat-sentinel.test.ts` | US-010 TEST PORT: regex-rule cases → vitest suites |",
+  "| `tests/Payouts/EarningsLedgerTest.php` | `test/payouts/earnings-ledger.test.ts` | US-010 TEST PORT: money-math cases → vitest suites |",
+  "| `tests/Support/LegacyHelpersTest.php` | `test/support/legacy-helpers.test.ts` | US-010 TEST PORT: coercion cases → vitest suites |",
+  "",
+  "> The `tests/*.php` glob convention ( PHPUnit asserts → vitest `expect` ) is",
+  "> materialized above as one explicit row per test file — exact rows are what",
+  "> the port loop's seed lookup consumes (glob rows are documentation only).",
+];
 
 const FILES: FixtureFile[] = [
   {
@@ -47,6 +121,10 @@ Do not edit files under creatorex-middleware/ by hand. Edit the generator and re
 
 Two consecutive runs produce byte-identical output (no randomness, no clock).
 `,
+  },
+  {
+    path: "prep-stub.md",
+    content: PREP_STUB_LINES.join("\n"),
   },
   {
     path: "src/Billing/SubscriptionService.php",
@@ -1080,7 +1158,7 @@ function countLines(content: string): { physical: number; nonBlank: number; code
 }
 
 function main(): void {
-  rmSync(outRoot, { recursive: true, force: true });
+  clearOutRoot(outRoot);
 
   const digest = createHash("sha256");
   const width = Math.max(...FILES.map((f) => f.path.length));

@@ -11,7 +11,11 @@ Two generated demo inputs, both deterministic:
    is one implement → review → fix cycle.
 
 **Everything under `php-sample/` and `creatorex-middleware/` is generated
-output — do not edit it by hand.** Edit the generator and re-run.
+output — do not edit it by hand.** Edit the generator and re-run. That
+includes `creatorex-middleware/prep-stub.md`: the generator emits it, so
+regenerating reproduces it byte for byte instead of deleting it.
+`tests/fixtures-generators.test.ts` enforces this by regenerating both
+fixtures into a temp dir and comparing file set, bytes, and the digests below.
 
 ## Regenerate
 
@@ -19,6 +23,11 @@ output — do not edit it by hand.** Edit the generator and re-run.
 bun run fixtures/generate.ts              # or: npx tsx fixtures/generate.ts
 bun run fixtures/generate-creatorex.ts    # or: npx tsx fixtures/generate-creatorex.ts
 ```
+
+Each run wipes its output directory first and rewrites every file. Pass
+`--out <dir>` to write somewhere else (the tests use a temp dir); the wipe is
+refused for a non-empty directory that lacks the `GENERATED.txt` marker, so a
+wrong `--out` cannot delete a directory the generator does not own.
 
 Both scripts are standalone (imports only `node:` builtins — no package.json,
 tsconfig, or node_modules dependency, and no shared code between them) and
@@ -30,7 +39,7 @@ Current digests:
 
 ```
 php-sample:            76728d34a578a21d0b364ba5a5de1c603e61cff903750a055f22b050900196f9
-creatorex-middleware:  b692f358cd5bdd42856bfdcde1ed126fa0690d2010a5bb24b50b297e35270752
+creatorex-middleware:  42df6fd634a57b5b9630609c2b794972e7499c0746c5c210ca99c69ab72b015c
 ```
 
 Verified on 2026-09-25: for each fixture, two consecutive runs produced
@@ -162,7 +171,24 @@ state-machine map (dunning), fluent APIs via `__call`.
 
 ### What consumes fixture 2
 
-Optional live-demo input for the same porting flow (swap the fixture root and
-prep artifact); not wired into Phase 2/Phase 7 defaults. If a prep artifact is
-wanted for it, generate one the same way `stub-prep.md` was — but treat it as
-a stub until Phase 3 prep-analysis produces the real thing.
+Optional live-demo input for the same porting flow; not wired into the
+Phase 2/Phase 7 defaults, which point at `php-sample/` and `stub-prep.md`.
+`run-demo.ts demo --files creatorex` expands to the 10 port units (5 source
+files + 5 PHPUnit test files), so it needs this fixture's prep stub and source
+root:
+
+```sh
+bun run scripts/run-demo.ts demo --dir <targetRepoDir> \
+  --files creatorex \
+  --prep fixtures/creatorex-middleware/prep-stub.md \
+  --source-root fixtures/creatorex-middleware
+```
+
+Without `--prep` and `--source-root` the run falls back to the php-sample
+defaults and the prep step finds no source-map rows for the creatorex files.
+
+`creatorex-middleware/prep-stub.md` is the stub prep artifact: a hand-written
+source map (the test files are explicit rows, because `parsePrepSourceMap`
+skips glob rows such as `tests/*.php`). The generator emits it like every other
+file in the directory, and `tests/us010-vitest-honesty.test.ts` reads it. Treat
+it as a stub until Phase 3 prep-analysis produces the real thing.

@@ -15,18 +15,52 @@
  *   - fixed file order, LF endings, exactly one trailing newline per file;
  *   - two consecutive runs are byte-identical (compare the printed DIGEST).
  *
- * Run:  bun run fixtures/generate.ts     (or: npx tsx fixtures/generate.ts)
+ * Run:  bun run fixtures/generate.ts [--out <dir>]
+ *       (or: npx tsx fixtures/generate.ts [--out <dir>])
  *
  * Standalone by design: zero imports beyond node: builtins, so this script
  * does not depend on the repo's package.json, tsconfig, or node_modules.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const outRoot = join(here, "php-sample");
+
+/** Marker file every generated tree carries; `main()` only wipes trees that have it. */
+const MARKER = "GENERATED.txt";
+
+/**
+ * Output directory: `--out <dir>` (used by tests to regenerate into a temp
+ * dir) or the committed fixtures/php-sample.
+ */
+function resolveOutRoot(): string {
+  const i = process.argv.indexOf("--out");
+  if (i < 0) return join(here, "php-sample");
+  const value = process.argv[i + 1];
+  if (value === undefined || value === "" || value.startsWith("--")) {
+    throw new Error("--out requires a directory argument");
+  }
+  return resolve(value);
+}
+
+/**
+ * Clears the output directory before regeneration. A missing or empty
+ * directory is fine; a non-empty one must carry GENERATED.txt, so a stray
+ * `--out <dir>` can never wipe a directory this generator does not own.
+ */
+function clearOutRoot(dir: string): void {
+  if (existsSync(dir)) {
+    const entries = readdirSync(dir);
+    if (entries.length > 0 && !entries.includes(MARKER)) {
+      throw new Error(`refusing to wipe ${dir}: it is not empty and has no ${MARKER} marker`);
+    }
+  }
+  rmSync(dir, { recursive: true, force: true });
+}
+
+const outRoot = resolveOutRoot();
 
 type FixtureFile = { readonly path: string; readonly content: string };
 
@@ -1204,7 +1238,7 @@ function countLines(content: string): { physical: number; nonBlank: number; code
 }
 
 function main(): void {
-  rmSync(outRoot, { recursive: true, force: true });
+  clearOutRoot(outRoot);
 
   const digest = createHash("sha256");
   const width = Math.max(...FILES.map((f) => f.path.length));
