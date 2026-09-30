@@ -103,3 +103,20 @@ describe("C81: .omc and .playwright-mcp are local tool state, not repo content",
     expect(gi).not.toMatch(/^\.omo\/?$/m);
   });
 });
+
+describe("C83: no orphan media is committed", () => {
+  const MEDIA = new Set([".webm", ".mp4", ".mov"]);
+
+  test("nothing is tracked under demo/", () => {
+    expect(trackedFiles("demo")).toEqual([]);
+  });
+
+  test("every tracked video is referenced by name from another tracked text file", () => {
+    const tracked = trackedFiles();
+    const videos = tracked.filter((p) => MEDIA.has(extname(p).toLowerCase()));
+    const textFiles = tracked.filter((p) => /\.(md|html|ts|json|txt|ya?ml)$/i.test(p));
+    const corpus = textFiles.map((p) => readFileSync(join(ROOT, p), "utf8")).join("\n");
+    const orphans = videos.filter((v) => !corpus.includes(v.split("/").pop() as string));
+    expect(orphans).toEqual([]);
+  });
+});
