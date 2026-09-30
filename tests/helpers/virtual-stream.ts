@@ -43,6 +43,8 @@ export interface VirtualWorldOptions {
   flowStatus?: () => Promise<WatcherFlowStatus>;
   /** Poll probe (default: never hits). May throw. */
   poll?: () => Promise<boolean>;
+  /** Server-side cap on one long-poll, in ms (a read waits at most this long). */
+  longPollCapMs?: number;
 }
 
 export function virtualWorld(schedule: ScheduledEvent[]) {
@@ -68,8 +70,9 @@ export function virtualWorld(schedule: ScheduledEvent[]) {
       ...(config.catchUpTimeoutMs !== undefined
         ? { catchUpTimeoutMs: config.catchUpTimeoutMs }
         : {}),
-      nextStreamEvent: async (timeoutMs: number) => {
-        reads.push({ at: clock, timeoutMs });
+      nextStreamEvent: async (requestedMs: number) => {
+        const timeoutMs = Math.min(requestedMs, config.longPollCapMs ?? Number.POSITIVE_INFINITY);
+        reads.push({ at: clock, timeoutMs: requestedMs });
         const next = schedule[cursor];
         if (next !== undefined && next.at <= clock) {
           cursor++; // retained: resolves immediately

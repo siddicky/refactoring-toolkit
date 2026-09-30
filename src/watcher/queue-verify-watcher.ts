@@ -381,11 +381,16 @@ export async function runQueueVerifyWatcher(
       }
     }
 
-    // Probe cadence. A quiet cycle (nothing read) is ~pollInterval long, so it
-    // probes every cycle; a busy cycle loops straight back to the stream, so
-    // the dexcli probes are time-gated to once per pollInterval.
+    // How long the stream lane itself blocked this cycle (before any probe).
+    const streamBlockedMs = now() - cycleStart;
+
+    // Probe cadence: the dexcli probes run once per pollInterval however fast
+    // the cycles turn over (a busy stream must not spawn dexcli per event). The
+    // tolerance absorbs a long-poll that wakes marginally early, which would
+    // otherwise skip a probe and double the cadence.
+    const probeTolerance = Math.min(DEFAULT_CATCH_UP_TIMEOUT_MS, options.pollIntervalMs / 2);
     const probeDue =
-      streamEventsRead === 0 || lastProbeAt === null || now() - lastProbeAt >= options.pollIntervalMs;
+      lastProbeAt === null || now() - lastProbeAt >= options.pollIntervalMs - probeTolerance;
     if (probeDue) {
       lastProbeAt = now();
 
@@ -412,14 +417,17 @@ export async function runQueueVerifyWatcher(
 
     if (now() - start >= options.deadlineMs) break;
 
-    // Pacing. After a busy cycle go straight back to the stream: its long-poll
-    // wakes the moment a message is published, whereas a sleep here leaves the
-    // watcher deaf for up to pollInterval — any START published meanwhile
-    // would be read only after its ~1.5 s window closed. After a quiet cycle
-    // sleep only the REMAINDER of pollInterval: the stream long-poll already
-    // used most of it (the old unconditional sleep(pollInterval) doubled the
-    // cadence to 2x the documented 60 s — audit C34).
+    // Pacing. The stream long-poll is the pacing mechanism and it wakes the
+    // moment a message is published, whereas a sleep leaves the watcher deaf —
+    // a START published meanwhile would be read only after its ~1.5 s window
+    // closed. So never sleep after a busy cycle, nor after a read that really
+    // blocked (it already paced the cycle; the old unconditional
+    // sleep(pollInterval) doubled the cadence to 2x the documented 60 s —
+    // audit C34). Sleep only when the stream lane did not pace the cycle
+    // (unusable, or a read that returned at once): just the REMAINDER of
+    // pollInterval.
     if (streamEventsRead > 0) continue;
+    if (streamUsable && streamBlockedMs >= DEFAULT_CATCH_UP_TIMEOUT_MS) continue;
     const remainingMs = options.pollIntervalMs - (now() - cycleStart);
     if (remainingMs > 0) await sleep(remainingMs);
   }

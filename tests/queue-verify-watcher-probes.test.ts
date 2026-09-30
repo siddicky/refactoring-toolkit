@@ -146,6 +146,33 @@ describe("C34(3): the poll probe really runs once per poll interval", () => {
   });
 });
 
+describe("C34(3): pacing never leaves the watcher deaf while a real long-poll is available", () => {
+  test("a server that caps the long-poll below pollInterval: no sleeps, probes still ~once per pollInterval", async () => {
+    // The long-poll wakes after 20 s although 60 s was requested. A sleep for
+    // the remaining 40 s would leave the watcher deaf; probes must not double up.
+    const world = virtualWorld([]);
+    const result = await runQueueVerifyWatcher(
+      world.options({ ...SILENT_30_MIN, longPollCapMs: 20_000 }),
+    );
+    expect(result.outcome).toBe("timeout");
+    expect(world.sleeps).toEqual([]);
+    expect(world.polls.length).toBeGreaterThanOrEqual(29);
+    expect(world.polls.length).toBeLessThanOrEqual(31);
+  });
+
+  test("...and a START published mid-cycle under that cap still fires inside its window", async () => {
+    const world = virtualWorld([
+      { at: 70_000, event: START },
+      { at: 71_500, event: DONE },
+    ]);
+    const result = await runQueueVerifyWatcher(
+      world.options({ ...SILENT_30_MIN, longPollCapMs: 20_000 }),
+    );
+    expect(result.outcome).toBe("fired");
+    expect(world.firings[0]!.at).toBeLessThan(71_500);
+  });
+});
+
 describe("C34(3): no deaf window after a busy cycle", () => {
   test("a START published while the watcher would have been sleeping still fires inside its window", async () => {
     // t=10 s a non-trigger event; the cycle that reads it used to end with

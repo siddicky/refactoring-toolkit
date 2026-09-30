@@ -206,11 +206,10 @@ async function main(): Promise<number> {
       throw new Error(`dexcli flow summary failed: ${oneLine(err)}`);
     }
   };
-  try {
-    await fetchFlowSummary();
-  } catch (err) {
+  // Not awaited: a slow/unreachable dexcli must not delay arming the watcher.
+  void fetchFlowSummary().catch((err: unknown) => {
     log(`${(err as Error).message} (at arm) — flow_run_id stays unknown until a probe succeeds`);
-  }
+  });
 
   try {
     // Resume token for the subscription (empty = retained head on first read).
