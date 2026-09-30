@@ -1,10 +1,14 @@
 /**
  * Regression tests for the agent/prompt/schema contract audit clusters owned
- * by team T4b (C11-C16, C18, C21, C23, C75). One describe block per cluster;
- * every block fails on the pre-fix code and passes on the fixed code.
+ * by team T4b: C11-C16, C23 and C75 here; C18 and C21 (symbol table, harvest,
+ * spot-check) in tests/symbol-contracts.test.ts. One describe block per
+ * cluster; every block fails on the pre-fix code and passes on the fixed code.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { Context } from "@superdurable/dex";
 
 import { FIXER } from "../harness/agents/fixer.js";
 import { IMPLEMENTER } from "../harness/agents/implementer.js";
@@ -13,14 +17,26 @@ import { TOOL_CATEGORIES } from "../harness/agents/types.js";
 import { PHP_TO_TS_TYPE_MAP } from "../harness/skills/php-ts-type-map.js";
 import { PORTING_CONVENTIONS } from "../harness/skills/porting-conventions.js";
 import { phpTypeToTsType } from "../src/typesafe/symbol-types.js";
-import { composeAgentTurn, configurePortHarness, runAgentTurn } from "../flows/port-project.js";
+import {
+  composeAgentTurn,
+  configurePortHarness,
+  PortProjectFlow,
+  ppPrep,
+  ppPrepDraft,
+  ppPrepSeed,
+  ppSymtab,
+  runAgentTurn,
+  type PrepArtifact,
+} from "../flows/port-project.js";
 import type { AgentSessionClient, PromptOptions } from "../src/harness/opencode.js";
 import { evaluateSuspicion } from "../src/metrics/suspicion.js";
 import type { Finding, VerdictRecord } from "../src/metrics/types.js";
 import {
   composeFixerTurn,
+  composeImplementerTurn,
   composePrepGenerateTurn,
   composePrepReviseTurn,
+  composeQueueFixTurn,
   composeReviewerTurn,
   DIFF_HEADER_LINES,
   extractCodeFence,
@@ -543,5 +559,115 @@ describe("C23: conventions and per-symbol recall agree on PHP type hints", () =>
     expect(phpTypeToTsType("Constructor")).toBe("Constructor");
     expect(phpTypeToTsType("App\\Constructor")).toBe("Constructor");
     expect(phpTypeToTsType("__proto__")).toBe("__proto__");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C75 — the user's PORTING.md reaches implement/fix turns as the authoritative
+// contract; the generated prep artifact is no longer mislabelled a "stub"
+// ---------------------------------------------------------------------------
+
+const USER_CONTRACT = [
+  "# PORTING.md",
+  "## Behavior requirements",
+  "- Money::percentage rounds half away from zero (PHP round()).",
+  "## Known traps",
+  "```php",
+  "$x == $y // loose compare is intentional",
+  "```",
+].join("\n");
+
+describe("C75: user contract by value in implement/fix turns", () => {
+  const base = {
+    phpFileName: "src/Money.php",
+    phpSource: "<?php class Money {}",
+    prepExcerpt: "GENERATED SPEC",
+    outputPath: "src/money.ts",
+  };
+
+  test("the implementer turn carries the user's PORTING.md as AUTHORITATIVE, before the generated prep", () => {
+    const turn = composeImplementerTurn({ ...base, userContract: USER_CONTRACT });
+    expect(turn).toContain("## User contract — PORTING.md (AUTHORITATIVE; by value)");
+    expect(turn).toContain("Money::percentage rounds half away from zero");
+    expect(turn).toContain("follow the contract");
+    expect(turn.indexOf("## User contract")).toBeLessThan(turn.indexOf("## Prep artifact"));
+    // the contract itself has a ``` fence: it is wrapped in a longer one
+    expect(turn).toContain("````markdown\n" + USER_CONTRACT + "\n````");
+  });
+
+  test("the stale '(stub, by value)' label is gone: the prep artifact is the generated, reviewed spec map", () => {
+    const turn = composeImplementerTurn({ ...base, userContract: USER_CONTRACT });
+    expect(turn).not.toContain("(stub, by value)");
+    expect(turn).toContain("## Prep artifact (generated spec map, reviewed in the prep loop; by value)");
+    expect(turn).toContain("GENERATED SPEC");
+  });
+
+  test("without a contract (legacy artifacts) the turn has no contract section and still no stub label", () => {
+    const turn = composeImplementerTurn(base);
+    expect(turn).not.toContain("## User contract");
+    expect(turn).not.toContain("(stub, by value)");
+    expect(composeImplementerTurn({ ...base, userContract: "   " })).not.toContain("## User contract");
+  });
+
+  test("fixer and queue-fix turns carry the same authoritative contract", () => {
+    const fixer = composeFixerTurn({ currentContent: "export {}", findings: [], outputPath: "src/money.ts", userContract: USER_CONTRACT });
+    expect(fixer).toContain("## User contract — PORTING.md (AUTHORITATIVE; by value)");
+    expect(fixer).toContain("Known traps");
+    const queueFix = composeQueueFixTurn({
+      currentContent: "export {}",
+      outputPath: "src/money.ts",
+      errors: [{ code: "TS2322", message: "bad", line: 1 }],
+      userContract: USER_CONTRACT,
+    });
+    expect(queueFix).toContain("## User contract — PORTING.md (AUTHORITATIVE; by value)");
+    expect(queueFix.indexOf("## User contract")).toBeLessThan(queueFix.indexOf("## Reply format"));
+    expect(composeFixerTurn({ currentContent: "x", findings: [], outputPath: "o" })).not.toContain("## User contract");
+    expect(composeQueueFixTurn({ currentContent: "x", outputPath: "o", errors: [] })).not.toContain("## User contract");
+  });
+
+  test("every implement/fix call site in the port flow passes the stored contract", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "flows", "port-project.ts"), "utf8");
+    for (const fn of ["composeImplementerTurn", "composeFixerTurn", "composeQueueFixTurn"]) {
+      const calls = [...src.matchAll(new RegExp(`${fn}\\(\\{[\\s\\S]*?\\n\\s*\\}\\);`, "g"))];
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) expect(call[0]).toContain("userContract");
+    }
+  });
+
+  test("PrepFinalizeStep stores the user's PORTING.md text by value next to the generated spec", async () => {
+    const stub = "# PORTING.md\n| `src/Money.php` | `src/money.ts` | value object |\n";
+    const stores = new Map<unknown, Map<string, unknown>>([
+      [ppPrepDraft as unknown, new Map<string, unknown>([["draft", { specText: "GENERATED", iteration: 1 }]])],
+      [ppPrepSeed as unknown, new Map<string, unknown>([["seed", { stubRaw: stub, symbols: [] }]])],
+      [ppSymtab as unknown, new Map<string, unknown>([["symtab", { rows: [] }]])],
+    ]);
+    const ctx = {
+      attempt: 1,
+      flowId: "c75-flow",
+      getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
+      setAttribute: (attr: unknown, value: unknown, instance: string) => {
+        let store = stores.get(attr);
+        if (store === undefined) {
+          store = new Map();
+          stores.set(attr, store);
+        }
+        store.set(instance, value);
+      },
+    } as unknown as Context;
+    const input = {
+      repoRoot: "/tmp/c75",
+      worktreeRoot: "/tmp/c75/.wt",
+      integrationWorktreePath: "/tmp/c75/.wt/integration",
+      epoch: 1,
+      sourceRoot: "/tmp/c75/src",
+      prepPath: "/tmp/c75/PORTING.md",
+      files: ["src/Money.php"],
+      maxRounds: 2,
+    };
+    await new PortProjectFlow().prepFinalize.execute(ctx as never, input);
+    const prep = stores.get(ppPrep as unknown)?.get("prep") as PrepArtifact | undefined;
+    expect(prep?.raw).toBe("GENERATED");
+    expect(prep?.userContract).toBe(stub);
+    expect(prep?.sourceMap["src/Money.php"]?.outPath).toBe("src/money.ts");
   });
 });

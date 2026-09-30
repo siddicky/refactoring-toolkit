@@ -300,6 +300,13 @@ export interface PrepArtifact {
   sourceMap: Record<string, { outPath: string; notes: string }>;
   /** Phase 3: per-symbol table rows backing the generated spec. */
   symbolTable: SymbolTableRow[];
+  /**
+   * The user's PORTING.md text (the prep seed's stub baseline), kept by value:
+   * the planner rewrites it into `raw`, so implement/fix turns also receive the
+   * original as the authoritative user contract. Absent on artifacts persisted
+   * before this field existed.
+   */
+  userContract?: string;
 }
 
 export interface PortQueueState {
@@ -1551,6 +1558,7 @@ const ImplementStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileR
       prepExcerpt: prep.raw,
       outputPath: outPath,
       ...(scopeNote !== null ? { scopeNote } : {}),
+      ...(prep.userContract !== undefined ? { userContract: prep.userContract } : {}),
     });
     const result = await runAgentTurn({
       def: IMPLEMENTER,
@@ -1835,10 +1843,12 @@ const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
       persistedAtUtc: new Date().toISOString(),
     });
 
+    const userContract = ppPrep.get(ctx, "prep")?.userContract;
     const turn = composeFixerTurn({
       currentContent: current,
       findings: kept.findings,
       outputPath: outPath,
+      ...(userContract !== undefined ? { userContract } : {}),
     });
     const result = await runAgentTurn({
       def: FIXER,
@@ -2446,6 +2456,7 @@ const PrepFinalizeStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
       raw: draft.specText,
       sourceMap: parsePrepSourceMap(seed.stubRaw),
       symbolTable: symtab.rows,
+      userContract: seed.stubRaw,
     });
     return { output: input, tokens: null };
   },
@@ -3070,6 +3081,7 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
       outputPath: outPath,
       errors: errs.map((e) => ({ code: e.code, message: e.message, line: e.line })),
       testFailures: feed.testFailures,
+      ...(prep?.userContract !== undefined ? { userContract: prep.userContract } : {}),
     });
     const result = await runAgentTurn({
       def: FIXER,
@@ -3486,6 +3498,7 @@ const ChildQueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<F
       outputPath: outPath,
       errors: errs.map((e) => ({ code: e.code, message: e.message, line: e.line })),
       testFailures: feed.testFailures,
+      ...(prep?.userContract !== undefined ? { userContract: prep.userContract } : {}),
     });
     const result = await runAgentTurn({
       def: FIXER,

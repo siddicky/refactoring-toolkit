@@ -662,6 +662,27 @@ export function mapVerdictToMetrics(input: {
 // Turn composition (per-agent user messages)
 // ---------------------------------------------------------------------------
 
+/**
+ * The user's PORTING.md by value, labelled AUTHORITATIVE (audit C75). The
+ * planner rewrites PORTING.md into the generated prep artifact, which can drop
+ * or reword its behavior requirements and known traps; only the php → ts
+ * source-map rows stay deterministic. Delivering the user's text next to the
+ * generated artifact lets the implementer/fixer honor it. Empty when absent
+ * (runs persisted before the contract was stored).
+ */
+function userContractSection(userContract: string | undefined): string[] {
+  if (userContract === undefined || userContract.trim().length === 0) return [];
+  const fence = fenceFor(userContract);
+  return [
+    "## User contract — PORTING.md (AUTHORITATIVE; by value)",
+    "This is the user's own contract: its source-map rows (exact php → ts targets), behavior requirements and known traps are binding. The generated prep artifact is a planner rewrite of this text; where it drops or contradicts the contract, follow the contract and say so in your summary.",
+    `${fence}markdown`,
+    userContract,
+    fence,
+    "",
+  ];
+}
+
 export function composeImplementerTurn(input: {
   phpFileName: string;
   phpSource: string;
@@ -669,6 +690,8 @@ export function composeImplementerTurn(input: {
   outputPath: string;
   /** US-010: appended scope context for TEST ports (tests/* -> vitest). */
   scopeNote?: string;
+  /** The user's PORTING.md text (PrepArtifact.userContract); authoritative. */
+  userContract?: string;
 }): string {
   return [
     `Port the PHP file \`${input.phpFileName}\` to TypeScript.`,
@@ -682,7 +705,8 @@ export function composeImplementerTurn(input: {
     input.phpSource,
     "```",
     "",
-    "## Prep artifact (stub, by value)",
+    ...userContractSection(input.userContract),
+    "## Prep artifact (generated spec map, reviewed in the prep loop; by value)",
     input.prepExcerpt,
     "",
     "## Reply format (the ONLY thing you emit)",
@@ -753,6 +777,8 @@ export function composeFixerTurn(input: {
   currentContent: string;
   findings: readonly MetricsFinding[];
   outputPath: string;
+  /** The user's PORTING.md text (PrepArtifact.userContract); authoritative. */
+  userContract?: string;
 }): string {
   const findingsText =
     input.findings.length === 0
@@ -779,6 +805,7 @@ export function composeFixerTurn(input: {
     "## Validated findings (apply in this order; skip wontfix)",
     findingsText,
     "",
+    ...userContractSection(input.userContract),
     "## Reply format (the ONLY thing you emit)",
     "One fenced ```typescript block containing the COMPLETE fixed file, then one short line:",
     "SUMMARY: <what you changed per finding>.",
@@ -1108,6 +1135,8 @@ export function composeQueueFixTurn(input: {
   outputPath: string;
   errors: ReadonlyArray<{ code: string; message: string; line?: number }>;
   testFailures?: ReadonlyArray<{ name: string; message: string }>;
+  /** The user's PORTING.md text (PrepArtifact.userContract); authoritative. */
+  userContract?: string;
 }): string {
   const errors = input.errors
     .map((e, i) => `${i + 1}. [${e.code}]${e.line !== undefined ? ` line ${e.line}:` : ""} ${e.message}`)
@@ -1132,6 +1161,7 @@ export function composeQueueFixTurn(input: {
       ? `\n## Failing tests\n${tests}`
       : "",
     "",
+    ...userContractSection(input.userContract),
     "## Reply format (the ONLY thing you emit)",
     "One fenced ```typescript block containing the COMPLETE fixed file, then one line:",
     "SUMMARY: <what you changed>.",

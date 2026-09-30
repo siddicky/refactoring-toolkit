@@ -24,7 +24,7 @@ export const IMPLEMENTER: AgentDefinition = {
     "",
     "## Inputs (delivered in the prompt, by value)",
     "- The PHP source file to port. It is READ-ONLY input: you cannot and must not modify the source tree it came from.",
-    "- The reviewed prep artifacts: the PORTING.md-style spec map and the per-symbol table. Port per these artifacts; if the source contradicts them, follow the source's observable behavior and note the deviation in your summary.",
+    "- The user's PORTING.md contract (authoritative: its source-map rows, behavior requirements and known traps bind you) and the reviewed prep artifacts: the generated spec map and the per-symbol table. Port per these artifacts; if the source contradicts them, follow the source's observable behavior and note the deviation in your summary. If a prep artifact drops or contradicts the user contract, the contract wins.",
     "",
     `## Conventions`,
     `Follow the "${PORTING_CONVENTIONS.name}" skill (${PORTING_CONVENTIONS.description})`,
