@@ -129,7 +129,7 @@ export const DEFAULT_PROMPT_WAIT_MS = 900_000;
 /** Default hard ceiling on ONE SDK prompt call: 20 min. */
 export const DEFAULT_PROMPT_CALL_TIMEOUT_MS = 1_200_000;
 /** Gap between polls of a usage-less prompt. */
-export const DEFAULT_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
 /**
  * m4: invalid values (NaN, <=0, above 24h) fall back to `fallbackMs`. A valid
@@ -160,17 +160,26 @@ export function promptCallTimeoutMs(): number {
   return parseWaitMs(readEnvVar("OPENCODE_PROMPT_CALL_TIMEOUT_MS"), DEFAULT_PROMPT_CALL_TIMEOUT_MS);
 }
 
-/** Races one promise against the prompt-call deadline (retryable timeout). */
-function withCallTimeout<T>(promise: Promise<T>, what: string, timeoutMs: number): Promise<T> {
+/**
+ * Races `work` against a deadline that rejects with `onDeadline()`. The timer
+ * is unref'd and cleared as soon as either side settles.
+ */
+function withDeadline<T>(work: Promise<T>, timeoutMs: number, onDeadline: () => Error): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new OpencodePromptError(`SDK call timed out after ${timeoutMs}ms (${what})`, true)),
-      timeoutMs,
-    );
+    timer = setTimeout(() => reject(onDeadline()), timeoutMs);
     void (timer as unknown as { unref?: () => void }).unref?.();
   });
-  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
+
+/** Races one promise against the prompt-call deadline (retryable timeout). */
+function withCallTimeout<T>(promise: Promise<T>, what: string, timeoutMs: number): Promise<T> {
+  return withDeadline(
+    promise,
+    timeoutMs,
+    () => new OpencodePromptError(`SDK call timed out after ${timeoutMs}ms (${what})`, true),
+  );
 }
 
 /**
@@ -264,7 +273,7 @@ export interface SessionRef {
 export const DEFAULT_OPENCODE_BASE_URL = "http://127.0.0.1:4096";
 
 /** How long probe() waits for the server to answer `session.list`. */
-export const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
+const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 
 /** Outcome of {@link OpencodeHarness.probe}: reachable, or why not. */
 export type ProbeResult = { ok: true } | { ok: false; reason: string };
@@ -324,35 +333,22 @@ export class OpencodeHarness {
    * all reported as `{ ok: false, reason }`.
    */
   async probe(timeoutMs: number = DEFAULT_PROBE_TIMEOUT_MS): Promise<ProbeResult> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<ProbeResult>((resolve) => {
-      timer = setTimeout(
-        () => resolve({ ok: false, reason: `no response to session.list within ${timeoutMs}ms` }),
-        timeoutMs,
-      );
-      void (timer as unknown as { unref?: () => void }).unref?.();
-    });
-    const answered = (async (): Promise<ProbeResult> => {
-      try {
-        const res = (await this.#client.session.list()) as
-          | { data?: unknown; error?: unknown; response?: { status?: number } }
-          | undefined;
-        if (res?.error !== undefined) {
-          const status = res.response?.status;
-          return { ok: false, reason: `server answered ${status === undefined ? "with an error" : `HTTP ${status}`}` };
-        }
-        if (!Array.isArray(unwrap(res))) {
-          return { ok: false, reason: "session.list did not return a session array (not an opencode server?)" };
-        }
-        return { ok: true };
-      } catch (err) {
-        return { ok: false, reason: err instanceof Error ? err.message : String(err) };
-      }
-    })();
     try {
-      return await Promise.race([answered, timedOut]);
-    } finally {
-      clearTimeout(timer);
+      const res = (await withDeadline(
+        this.#client.session.list(),
+        timeoutMs,
+        () => new Error(`no response to session.list within ${timeoutMs}ms`),
+      )) as { error?: unknown; response?: { status?: number } } | undefined;
+      if (res?.error !== undefined) {
+        const status = res.response?.status;
+        return { ok: false, reason: `server answered ${status === undefined ? "with an error" : `HTTP ${status}`}` };
+      }
+      if (!Array.isArray(unwrap(res))) {
+        return { ok: false, reason: "session.list did not return a session array (not an opencode server?)" };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
   }
 

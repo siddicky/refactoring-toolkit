@@ -25,7 +25,7 @@ import {
   type ProbeResult,
 } from "./opencode.js";
 
-export const HARNESS_CHOICES = ["stub", "opencode", "auto"] as const;
+const HARNESS_CHOICES = ["stub", "opencode", "auto"] as const;
 export type HarnessChoice = (typeof HARNESS_CHOICES)[number];
 
 /** `--harness` value -> mode. Absent / blank = auto; unknown values throw. */
