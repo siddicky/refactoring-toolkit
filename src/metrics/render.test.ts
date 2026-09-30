@@ -399,7 +399,14 @@ describe("renderReport usage_by_role (cost honesty)", () => {
     const agent = rendered.json.usage_by_role.find((u) => u.role === "agent");
     expect(agent?.input_tokens).toBeNull(); // bare-total envelope: no split
     expect(agent?.calls).toBe(1);
-    expect(rendered.json.cost_estimated).toBe(false);
+    // Mixed lane: one review call reported cost_usd 0 and one agent call is a
+    // bare 123-token total, so the USD total understates and MUST carry `~`.
+    expect(rendered.json.cost_estimated).toBe(true);
+    expect(rendered.json.costed_calls).toBe(1);
+    expect(rendered.json.uncosted_calls).toBe(2);
+    expect(review?.uncosted_calls).toBe(1);
+    expect(agent?.uncosted_calls).toBe(1);
+    expect(rendered.markdown).toContain("- total cost: ~$0.0300");
     // token totals normalize the object form across ALL split fields.
     expect(rendered.json.summary.tokens_model_roles).toBe(4000 + 100 + 32 + 3500 + 8 + 6000 + 200 + 5000 + 123);
     expect(rendered.markdown).toContain("## Cost per role (provider-reported split)");
@@ -556,5 +563,62 @@ describe("renderReport tsc accounting (Contract A)", () => {
     expect(rendered.json.summary.verification.tsc_verified).toBe(true);
     expect(rendered.markdown).toContain("typecheck (tsc): PASS at final iteration (0 remaining errors)");
     expect(rendered.markdown).toContain("| 1 | 0 |");
+  });
+});
+
+describe("renderReport cost_estimated (mixed lanes, C40)", () => {
+  const review = (tokens: EnvelopeEvent["tokens"], identity = "src__a.php#1"): EnvelopeEvent => ({
+    stepId: "pp-review-a",
+    role: "review",
+    file: null,
+    round: 1,
+    attempt: 1,
+    started_at: "2026-09-26T10:00:00Z",
+    ended_at: "2026-09-26T10:01:00Z",
+    outcome: "completed",
+    tokens,
+    wall_clock_ms: 1000,
+    identity,
+  });
+  const render = (envelopes: EnvelopeEvent[]) =>
+    renderReport({ envelopes, verdicts: [], burnDown: [] });
+
+  test("1M uncosted tokens next to a $0.01 call is estimated, not an exact-looking $0.0100", () => {
+    const rendered = render([
+      review({ input_tokens: 1_000_000, output_tokens: 0, cost_usd: 0 }),
+      review({ input_tokens: 10, output_tokens: 0, cost_usd: 0.01 }, "src__b.php#1"),
+    ]);
+    expect(rendered.json.cost_total_usd).toBeCloseTo(0.01);
+    expect(rendered.json.cost_estimated).toBe(true);
+    expect(rendered.json.costed_calls).toBe(1);
+    expect(rendered.json.uncosted_calls).toBe(1);
+    expect(rendered.markdown).toContain("- total cost: ~$0.0100");
+    expect(rendered.markdown).toContain("| review | 2 |");
+    expect(rendered.markdown).toMatch(/\| ~\$0\.0100 \|/);
+    expect(rendered.markdown).toContain("1 of 2 model call(s)");
+  });
+
+  test("a bare-number-token call next to a fully costed call marks the total estimated", () => {
+    const rendered = render([review({ input_tokens: 10, output_tokens: 5, cost_usd: 0.02 }), review(500, "src__b.php#1")]);
+    expect(rendered.json.cost_estimated).toBe(true);
+    expect(rendered.json.uncosted_calls).toBe(1);
+  });
+
+  test("every call costed stays exact (no ~)", () => {
+    const rendered = render([
+      review({ input_tokens: 10, output_tokens: 5, cost_usd: 0.02 }),
+      review({ input_tokens: 20, output_tokens: 5, cost_usd: 0.03 }, "src__b.php#1"),
+    ]);
+    expect(rendered.json.cost_estimated).toBe(false);
+    expect(rendered.json.uncosted_calls).toBe(0);
+    expect(rendered.markdown).toContain("- total cost: $0.0500");
+    expect(rendered.markdown).not.toContain("~");
+  });
+
+  test("bare totals only: no USD total at all (n/a), not a fake exact zero", () => {
+    const rendered = render([review(500)]);
+    expect(rendered.json.cost_total_usd).toBeNull();
+    expect(rendered.json.cost_estimated).toBe(false);
+    expect(rendered.markdown).toContain("- total cost: n/a");
   });
 });

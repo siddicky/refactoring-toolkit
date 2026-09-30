@@ -144,8 +144,9 @@ export interface ReportJson {
    * envelopes that carry the full TokenUsage object. Roles whose envelopes
    * only carry bare totals appear with calls counted but split fields null.
    * `cost_estimated` is true when at least one model call reported tokens
-   * without a provider-reported cost (plan-authed lane) — renderers prefix
-   * such totals with `~`.
+   * without a provider-reported cost (plan-authed lane, or a bare token total
+   * with no split) — the USD total is then a lower bound and renderers prefix
+   * it with `~`. `costed_calls` / `uncosted_calls` make the basis explicit.
    */
   usage_by_role: Array<{
     role: EnvelopeRole;
@@ -156,9 +157,15 @@ export interface ReportJson {
     reasoning_tokens: number | null;
     output_tokens: number | null;
     cost_usd: number | null;
+    /** Calls with a provider-reported cost (cost_usd > 0). */
+    costed_calls: number;
+    /** Calls with tokens but no provider-reported cost (cost_usd absent/0, or a bare total). */
+    uncosted_calls: number;
   }>;
   cost_total_usd: number | null;
   cost_estimated: boolean;
+  costed_calls: number;
+  uncosted_calls: number;
   /** Retries = fixer (stepId pp-fixer) envelope events with attempt > 1, per file. */
   fixer_retries: Array<{ file: string; retries: number }>;
   queue_burn_down: Array<{
@@ -421,7 +428,8 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     reasoning: number;
     output: number;
     cost: number;
-    costReported: boolean;
+    costedCalls: number;
+    uncostedCalls: number;
   }
   const usageAggs = new Map<EnvelopeRole, UsageAgg>();
   for (const env of envelopes) {
@@ -438,12 +446,18 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
         reasoning: 0,
         output: 0,
         cost: 0,
-        costReported: false,
+        costedCalls: 0,
+        uncostedCalls: 0,
       };
       usageAggs.set(env.role, agg);
     }
     agg.calls += 1;
-    if (env.tokens === null || typeof env.tokens === "number") continue;
+    if (env.tokens === null) continue;
+    if (typeof env.tokens === "number") {
+      // Bare token total: tokens flowed but no provider cost can be attached.
+      agg.uncostedCalls += 1;
+      continue;
+    }
     agg.splitCalls += 1;
     agg.input += env.tokens.input_tokens;
     agg.output += env.tokens.output_tokens;
@@ -452,7 +466,9 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     agg.cacheWrite += env.tokens.cache_write_tokens ?? 0;
     if (typeof env.tokens.cost_usd === "number" && env.tokens.cost_usd > 0) {
       agg.cost += env.tokens.cost_usd;
-      agg.costReported = true;
+      agg.costedCalls += 1;
+    } else {
+      agg.uncostedCalls += 1;
     }
   }
   const usageByRole = [...usageAggs.values()]
@@ -464,16 +480,20 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
       cache_write_tokens: agg.splitCalls > 0 ? agg.cacheWrite : null,
       reasoning_tokens: agg.splitCalls > 0 ? agg.reasoning : null,
       output_tokens: agg.splitCalls > 0 ? agg.output : null,
-      cost_usd: agg.costReported ? agg.cost : agg.splitCalls > 0 ? 0 : null,
+      cost_usd: agg.costedCalls > 0 ? agg.cost : agg.splitCalls > 0 ? 0 : null,
+      costed_calls: agg.costedCalls,
+      uncosted_calls: agg.uncostedCalls,
     }))
     .sort((p, q) => compareStrings(p.role, q.role));
   const anySplit = [...usageAggs.values()].some((agg) => agg.splitCalls > 0);
-  const anyReportedCost = [...usageAggs.values()].some((agg) => agg.costReported);
+  const costedCalls = [...usageAggs.values()].reduce((sum, agg) => sum + agg.costedCalls, 0);
+  const uncostedCalls = [...usageAggs.values()].reduce((sum, agg) => sum + agg.uncostedCalls, 0);
   const costTotalUsd = [...usageAggs.values()].reduce((sum, agg) => sum + agg.cost, 0);
-  // Estimated when tokens flowed on a lane the provider did not bill per-call
-  // (plan-authed): the honest total is "~$0", never a silent null.
-  const costEstimated = anySplit && !anyReportedCost;
   const costTotal = anySplit ? costTotalUsd : null;
+  // Estimated (a lower bound) whenever ANY call carried tokens without a
+  // provider-reported cost — a mixed lane must not read as an exact total.
+  // A plan-authed lane is the all-uncosted case: the honest total is "~$0".
+  const costEstimated = costTotal !== null && uncostedCalls > 0;
 
   // ---- totals over eligible (model-calling, real-attempt) steps ----------
   let modelTokens: number | null = null;
@@ -617,6 +637,8 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     usage_by_role: usageByRole,
     cost_total_usd: costTotal,
     cost_estimated: costEstimated,
+    costed_calls: costedCalls,
+    uncosted_calls: uncostedCalls,
     fixer_retries: fixerRetries,
     queue_burn_down: burnDownJson,
     kill_events: input.killEvents ?? null,
@@ -634,10 +656,14 @@ function pFmt(p: number): string {
   return p.toFixed(2);
 }
 
-/** Cost cell: `~$0.0000` marks a plan-authed lane (tokens, no per-call cost). */
-function costCell(costUsd: number | null): string {
+/**
+ * Cost cell: `~` marks an estimate — the role has at least one call whose
+ * tokens carry no provider-reported cost (plan-authed lane or bare total), so
+ * the USD figure is a lower bound; `~$0` is the all-uncosted case.
+ */
+function costCell(costUsd: number | null, estimated: boolean): string {
   if (costUsd === null) return "n/a";
-  return costUsd > 0 ? `$${costUsd.toFixed(4)}` : "~$0";
+  return costUsd > 0 ? `${estimated ? "~" : ""}$${costUsd.toFixed(4)}` : "~$0";
 }
 
 function killEventLine(e: KillEvent): string {
@@ -751,7 +777,7 @@ function renderMarkdown(report: ReportJson): string {
     for (const u of report.usage_by_role) {
       const cell = (v: number | null): string => (v === null ? "n/a" : String(v));
       lines.push(
-        `| ${u.role} | ${u.calls} | ${cell(u.input_tokens)} | ${cell(u.cache_read_tokens)} | ${cell(u.cache_write_tokens)} | ${cell(u.reasoning_tokens)} | ${cell(u.output_tokens)} | ${costCell(u.cost_usd)} |`,
+        `| ${u.role} | ${u.calls} | ${cell(u.input_tokens)} | ${cell(u.cache_read_tokens)} | ${cell(u.cache_write_tokens)} | ${cell(u.reasoning_tokens)} | ${cell(u.output_tokens)} | ${costCell(u.cost_usd, u.uncosted_calls > 0)} |`,
       );
     }
     const total =
@@ -762,7 +788,7 @@ function renderMarkdown(report: ReportJson): string {
     lines.push(`- total cost: ${total}`);
     if (report.cost_estimated) {
       lines.push(
-        "- `~` = estimated: tokens flowed on a lane whose provider reports no per-call cost (plan-authed); the USD total is not exact.",
+        `- \`~\` = estimated: ${report.uncosted_calls} of ${report.costed_calls + report.uncosted_calls} model call(s) carried tokens with no provider-reported cost (plan-authed lane or bare token total); the USD total is a lower bound, not exact.`,
       );
     }
   }
