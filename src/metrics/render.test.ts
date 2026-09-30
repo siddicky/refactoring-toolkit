@@ -847,3 +847,32 @@ describe("renderReport metric labels (C47)", () => {
     expect(rendered.markdown).toContain("- files: 1 (src/a.php)");
   });
 });
+
+// ---------------------------------------------------------------------------
+// C48: an empty evidence stream verifies nothing and must not read as a pass.
+// ---------------------------------------------------------------------------
+
+describe("renderReport empty evidence stream (C48)", () => {
+  test("no envelopes => NO EVIDENCE: provenance_ok false, flagged, never a vacuous OK", () => {
+    const rendered = renderReport({ envelopes: [], verdicts: [], burnDown: [] });
+    expect(rendered.json.no_evidence).toBe(true);
+    expect(rendered.json.provenance_ok).toBe(false);
+    expect(rendered.json.provenance_failures.length).toBe(1);
+    expect(rendered.json.provenance_failures[0]).toContain("NO EVIDENCE");
+    expect(rendered.markdown).toContain("- status: NO EVIDENCE (the envelope stream is empty — nothing was verified)");
+    expect(rendered.markdown).not.toContain("- status: OK");
+  });
+
+  test("still NO EVIDENCE when a history is supplied but no envelope exists", () => {
+    const rendered = renderReport({ envelopes: [], verdicts: [], burnDown: [], history: { events: [] } });
+    expect(rendered.json.provenance_ok).toBe(false);
+    expect(rendered.json.no_evidence).toBe(true);
+  });
+
+  test("a non-empty clean stream is unaffected (recorded run-a stays OK)", () => {
+    const rendered = renderReport({ envelopes: runA.envelopes, verdicts: runA.verdicts, burnDown: runA.burn_down });
+    expect(rendered.json.no_evidence).toBe(false);
+    expect(rendered.json.provenance_ok).toBe(true);
+    expect(rendered.markdown).toContain("- status: OK");
+  });
+});

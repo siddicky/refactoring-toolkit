@@ -208,6 +208,11 @@ async function main(argv: readonly string[]): Promise<number> {
     `[render-metrics] flow=${flowId} run=${runId} envelopes=${envelopes.length} verdicts=${verdicts.length} tombstones=${tombstones.length} degradedRounds=${report.json.summary.degraded_round_count} burnDown=${burnDown.length} jevTokens=${report.json.jev_usage?.total_tokens ?? 0} killEvents=${killEvents?.events.length ?? 0} provenance_ok=${report.json.provenance_ok}`,
   );
   console.log(`[render-metrics] wrote ${mdPath} + ${jsonPath}`);
+  if (report.json.no_evidence) {
+    console.error(
+      `[render-metrics] NO EVIDENCE: flow ${flowId} has no envelope events (wrong flow id, attributes not read, or no steps yet) — the report verifies nothing`,
+    );
+  }
   return report.json.provenance_ok ? 0 : 1;
 }
 

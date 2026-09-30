@@ -244,6 +244,10 @@ describe("render-metrics end to end against a stub dexcli (C36 C39 C42 C45 C38)"
         ],
       },
       "history:child-1:c-run-1": { events: [] },
+      // A flow whose attributes carry no envelopes at all (C48).
+      "summary:flow-empty": { flowId: "flow-empty", runId: "run-e", firstRunId: "run-e", flowStatus: "FLOW_STATUS_RUNNING" },
+      "state:flow-empty": { attributes: [] },
+      "history:flow-empty:run-e": { events: [] },
     }),
   );
   writeFileSync(
@@ -309,6 +313,25 @@ process.stdout.write(JSON.stringify(table[key]));
     });
     // Child flow's Jev usage joined the report.
     expect(report.jev_usage?.total_tokens).toBe(321);
+  });
+
+  test("a flow with no envelope evidence exits non-zero with NO EVIDENCE instead of a vacuous pass (C48)", async () => {
+    const emptyOut = join(tmp, "out-empty");
+    const r = await runDriver(["--flow-id", "flow-empty", "--out-dir", emptyOut], {
+      DEXCLI_BIN: stub,
+      DEX_SERVER_ADDRESS: "dex.test:1234",
+      STUB_LOG: log,
+      STUB_TABLE: table,
+    });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("NO EVIDENCE");
+    const report = JSON.parse(readFileSync(join(emptyOut, "report.json"), "utf8")) as {
+      provenance_ok: boolean;
+      no_evidence: boolean;
+    };
+    expect(report.no_evidence).toBe(true);
+    expect(report.provenance_ok).toBe(false);
+    expect(readFileSync(join(emptyOut, "report.md"), "utf8")).toContain("status: NO EVIDENCE");
   });
 
   test("every dexcli call goes through DEXCLI_BIN with -server from DEX_SERVER_ADDRESS; summary fetched once", () => {

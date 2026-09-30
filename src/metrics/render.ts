@@ -60,6 +60,10 @@ const FIXER_STEP_ID = "pp-fixer";
  */
 const PREP_SPEC_FILE = "PORTING.spec.md";
 
+/** The single provenance failure an empty evidence stream produces. */
+const NO_EVIDENCE_FAILURE =
+  "NO EVIDENCE: the envelope stream is empty, so nothing was verified (wrong flow id, attributes not read, or a flow with no steps yet)";
+
 /** Legacy driver pseudo-file marking an aggregate burn-down row (now `file: null`). */
 const TOTAL_PSEUDO_FILE = "(total)";
 
@@ -107,8 +111,11 @@ export interface DispatchAnchorSummary {
 
 export interface ReportJson {
   generated_at: string | null;
+  /** false when any provenance failure exists, including NO EVIDENCE (empty stream). */
   provenance_ok: boolean;
   provenance_failures: string[];
+  /** True when the envelope stream was empty: the report verifies nothing. */
+  no_evidence: boolean;
   summary: {
     files: string[];
     envelope_count: number;
@@ -406,7 +413,13 @@ function summarizeAnchor(anchor: DispatchAnchorResult): DispatchAnchorSummary {
 
 function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck | null): ReportJson {
   const { envelopes, verdicts, burnDown } = input;
-  const provenanceFailures = cross === null ? validateProvenance(envelopes) : cross.failures;
+  const noEvidence = envelopes.length === 0;
+  // An empty envelope stream verifies NOTHING (wrong flow id, attributes not
+  // read, a flow with no steps yet): it must never read as a vacuous pass.
+  const provenanceFailures = [
+    ...(cross === null ? validateProvenance(envelopes) : cross.failures),
+    ...(noEvidence ? [NO_EVIDENCE_FAILURE] : []),
+  ];
   const canonicalFile = canonicalFileResolver(verdicts);
 
   // ---- universe of file+round pairs (envelopes + verdicts) ---------------
@@ -731,6 +744,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     generated_at: input.generatedAt ?? null,
     provenance_ok: provenanceFailures.length === 0,
     provenance_failures: provenanceFailures,
+    no_evidence: noEvidence,
     summary: {
       files: [...files].filter((f) => f !== PREP_SPEC_FILE).sort(compareStrings),
       envelope_count: envelopes.length,
@@ -804,9 +818,11 @@ function renderMarkdown(report: ReportJson): string {
 
   lines.push("## Provenance");
   lines.push(
-    report.provenance_ok
-      ? "- status: OK"
-      : `- status: FAILED (${report.provenance_failures.length} failure(s))`,
+    report.no_evidence
+      ? "- status: NO EVIDENCE (the envelope stream is empty — nothing was verified)"
+      : report.provenance_ok
+        ? "- status: OK"
+        : `- status: FAILED (${report.provenance_failures.length} failure(s))`,
   );
   for (const failure of report.provenance_failures) lines.push(`- ${mdCell(failure)}`);
   lines.push("");

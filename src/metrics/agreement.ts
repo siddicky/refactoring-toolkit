@@ -85,8 +85,9 @@ export function classifyAgreement(
 
 /**
  * Agreement for one file+round group of completed verdict records.
- * A healthy v1 run has exactly 2 reviewers; any other count (0, 1, 3+) is
- * "unreviewed" with the observed count surfaced in the reason.
+ * A healthy v1 run has exactly 2 DISTINCT reviewers; any other count (0, 1,
+ * 3+) or a duplicated reviewer id is "unreviewed" with the observed shape
+ * surfaced in the reason.
  */
 export function agreementForGroup(
   records: readonly VerdictRecord[],
@@ -109,6 +110,16 @@ export function agreementForGroup(
       round,
       outcome: "unreviewed",
       reason: `expected exactly 2 completed verdict records, found ${records.length}`,
+    };
+  }
+  if (x.reviewer === y.reviewer) {
+    // Two records from ONE reviewer are not a pair: the other reviewer never
+    // reviewed, so neither agreement nor disagreement can be claimed.
+    return {
+      file,
+      round,
+      outcome: "unreviewed",
+      reason: `expected two distinct reviewers, found ${x.reviewer} twice (duplicate reviewer)`,
     };
   }
   if (x.findings.length === 0 && y.findings.length === 0) {
