@@ -694,8 +694,9 @@ function failureReason(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, 300);
 }
 
-export interface CitationGateOutcome {
-  citations: CitationCheckResult[];
+/** A Lane-B gate's result plus how it was produced. */
+export interface JevGateResult<T> {
+  value: T;
   checker: JudgmentChecker;
   fallbackReason: string | null;
   /** Live Jev tokens spent, including before a failure (0 on the naive path). */
@@ -703,70 +704,54 @@ export interface CitationGateOutcome {
 }
 
 /**
- * Citation scores for one reviewer's verdict: live Jev when a client is
- * configured, the naive code-only checker otherwise. A Jev failure (client
- * error, or no answer for a finding) FAILS OPEN to the naive checker — never
- * a step failure (a thrown step is retried by dex and re-bills the batch) —
- * and the degradation is returned for the caller to record.
+ * Runs `live` against the Jev client when one is configured, else (or when it
+ * FAILS — client error, no answer for a finding) the deterministic `naive`
+ * default. Failing open is deliberate: a thrown step is retried by dex and
+ * re-bills the batch. The degradation is returned for the caller to record.
  */
-export async function runCitationGate(
+async function withJevFallback<T>(
+  jev: JudgmentClient | undefined,
+  live: (client: JudgmentClient) => Promise<T>,
+  naive: () => T,
+): Promise<JevGateResult<T>> {
+  if (jev === undefined) return { value: naive(), checker: "naive", fallbackReason: null, jevTokens: 0 };
+  const counting = countingJevClient(jev);
+  try {
+    const value = await live(counting.client);
+    return { value, checker: "jev", fallbackReason: null, jevTokens: counting.tokens() };
+  } catch (err) {
+    return {
+      value: naive(),
+      checker: "naive-fallback",
+      fallbackReason: failureReason(err),
+      jevTokens: counting.tokens(),
+    };
+  }
+}
+
+/** Citation scores for one reviewer's verdict (registry "citation-check"). */
+export function runCitationGate(
   verdict: MetricsVerdictRecord,
   diff: DiffDocument,
   jev: JudgmentClient | undefined,
-): Promise<CitationGateOutcome> {
-  if (jev === undefined) {
-    return {
-      citations: naiveCitationCheck(verdict, diff),
-      checker: "naive",
-      fallbackReason: null,
-      jevTokens: 0,
-    };
-  }
-  const counting = countingJevClient(jev);
-  try {
-    const citations = await createCitationChecker(counting.client).check(verdict, diff);
-    return { citations, checker: "jev", fallbackReason: null, jevTokens: counting.tokens() };
-  } catch (err) {
-    return {
-      citations: naiveCitationCheck(verdict, diff),
-      checker: "naive-fallback",
-      fallbackReason: failureReason(err),
-      jevTokens: counting.tokens(),
-    };
-  }
+): Promise<JevGateResult<CitationCheckResult[]>> {
+  return withJevFallback(
+    jev,
+    (client) => createCitationChecker(client).check(verdict, diff),
+    () => naiveCitationCheck(verdict, diff),
+  );
 }
 
-export interface PrioritizeGateOutcome {
-  ordered: MetricsFinding[];
-  checker: JudgmentChecker;
-  fallbackReason: string | null;
-  jevTokens: number;
-}
-
-/**
- * Fixer-queue ordering: live Jev rerank when configured, naive severity order
- * otherwise; a Jev failure fails open to the naive order (same policy and
- * recording as {@link runCitationGate}).
- */
-export async function runPrioritizeGate(
+/** Fixer-queue ordering (registry "prioritize"); nothing to rank stays naive. */
+export function runPrioritizeGate(
   findings: readonly MetricsFinding[],
   jev: JudgmentClient | undefined,
-): Promise<PrioritizeGateOutcome> {
-  if (jev === undefined || findings.length === 0) {
-    return { ordered: naivePrioritize(findings), checker: "naive", fallbackReason: null, jevTokens: 0 };
-  }
-  const counting = countingJevClient(jev);
-  try {
-    const ordered = await createJevPrioritizer(counting.client).prioritize(findings);
-    return { ordered, checker: "jev", fallbackReason: null, jevTokens: counting.tokens() };
-  } catch (err) {
-    return {
-      ordered: naivePrioritize(findings),
-      checker: "naive-fallback",
-      fallbackReason: failureReason(err),
-      jevTokens: counting.tokens(),
-    };
-  }
+): Promise<JevGateResult<MetricsFinding[]>> {
+  return withJevFallback(
+    findings.length === 0 ? undefined : jev,
+    (client) => createJevPrioritizer(client).prioritize(findings),
+    () => naivePrioritize(findings),
+  );
 }
 
 // Vitest triage (Lane-B "vitest-triage", declared in src/judgment-registry.ts)
@@ -1467,8 +1452,8 @@ function emptyRecordWith(
  * the same longer SCHEDULE — the exhaustion semantics are unchanged (the
  * final attempt still fails the step/flow), and policies outside the
  * marker/model/review scope keep their existing bounds (PpPrep stays at 1 —
- * a bad run input is permanent; the in-step REVIEW_STEP_MAX_ATTEMPTS repair
- * bound is untouched).
+ * a bad run input is permanent). The in-step REVIEW_STEP_MAX_ATTEMPTS
+ * tombstone bound is independent of this retry budget and untouched.
  */
 const RESTART_WINDOW_RETRY = {
   maximumAttempts: 8,
@@ -1879,9 +1864,9 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
         reviewer: reviewerId,
         checker: outcome.checker,
         fallbackReason: outcome.fallbackReason,
-        scores: outcome.citations.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
+        scores: outcome.value.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
       });
-      for (const check of outcome.citations) {
+      for (const check of outcome.value) {
         const agentFinding = verdict.agent.findings.find((f) => f.finding_id === check.finding_id);
         const metricsFinding = verdict.metrics.findings.find((f) => f.finding_id === check.finding_id);
         if (agentFinding === undefined || metricsFinding === undefined) continue;
@@ -1935,7 +1920,7 @@ const PrioritizeStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<File
     }
     ppKept.set(ctx, keptKeyOf(fri.file, fri.round), {
       ...kept,
-      findings: outcome.ordered,
+      findings: outcome.value,
       prioritize: { checker: outcome.checker, fallbackReason: outcome.fallbackReason },
     });
     return { output: fri, tokens: null };

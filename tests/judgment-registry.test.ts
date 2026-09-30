@@ -110,34 +110,48 @@ describe("AC-R: seam modules exist", () => {
   });
 });
 
+/** Files (by repo-relative path) whose code calls `seam(` — comments and declarations excluded. */
+function seamCallers(seam: string, sources: Readonly<Record<string, string>>): string[] {
+  const callPattern = new RegExp(`(?<!function\\s)\\b${seam}\\(`);
+  return Object.entries(sources)
+    .filter(([, source]) => callPattern.test(stripComments(source)))
+    .map(([path]) => path);
+}
+
+/** Callers of `seam` that the registry entry does not list (diagnostic scripts excepted). */
+function unregisteredCallers(seam: string, entryName: string, sources: Readonly<Record<string, string>>): string[] {
+  const listed = new Set(seamModulePaths(judgmentRegistryEntry(entryName).seamModule));
+  return seamCallers(seam, sources).filter((path) => !DIAGNOSTIC_CALLERS.has(path) && !listed.has(path));
+}
+
 describe("AC-R: Lane-B seam construction only in registry-listed modules", () => {
-  const productionFiles = ["flows", "src", "scripts"].flatMap((d) => listTs(join(ROOT, d)));
+  const productionSources: Record<string, string> = Object.fromEntries(
+    ["flows", "src", "scripts"]
+      .flatMap((d) => listTs(join(ROOT, d)))
+      .map((abs) => [relative(ROOT, abs), readFileSync(abs, "utf8")]),
+  );
 
   for (const [seam, entryName] of Object.entries(LANE_B_SEAMS)) {
     test(`${seam}( is called only from modules listed by "${entryName}"`, () => {
-      const listed = new Set(seamModulePaths(judgmentRegistryEntry(entryName).seamModule));
-      const callPattern = new RegExp(`(?<!function\\s)\\b${seam}\\(`);
-      const callers: string[] = [];
-      for (const abs of productionFiles) {
-        const rel = relative(ROOT, abs);
-        if (callPattern.test(stripComments(readFileSync(abs, "utf8")))) callers.push(rel);
-      }
       // The flow really consumes every seam (an entry for an unused seam would be stale).
-      expect(callers).toContain("flows/port-project.ts");
-      for (const caller of callers) {
-        if (DIAGNOSTIC_CALLERS.has(caller)) continue;
-        expect(listed.has(caller)).toBe(true);
-      }
+      expect(seamCallers(seam, productionSources)).toContain("flows/port-project.ts");
+      expect(unregisteredCallers(seam, entryName, productionSources)).toEqual([]);
     });
   }
 
-  test("an unregistered seam call would be caught (the scan sees real call sites, not prose)", () => {
-    const flowSource = stripComments(readFileSync(join(ROOT, "flows/port-project.ts"), "utf8"));
-    expect(/(?<!function\s)\bcreateCitationChecker\(/.test(flowSource)).toBe(true);
-    // The header comment of the verdict gate names the seam in prose only.
-    const raw = readFileSync(join(ROOT, "flows/port-project.ts"), "utf8");
-    expect(/createCitationChecker seam/.test(raw)).toBe(true);
-    expect(/createCitationChecker seam/.test(flowSource)).toBe(false);
+  test("the scan itself can fail: an unregistered consumer module is reported", () => {
+    const withRogue = {
+      ...productionSources,
+      "src/rogue-consumer.ts": "export const x = createJevPrioritizer(client);\n",
+    };
+    expect(unregisteredCallers("createJevPrioritizer", "prioritize", withRogue)).toEqual(["src/rogue-consumer.ts"]);
+    // Prose and declarations are not call sites.
+    const prose = {
+      "src/notes.ts": "// createJevPrioritizer(client) is described here\n/* selectSymbolType( also */\n",
+      "src/decl.ts": "export function selectSymbolType(client: unknown): void {}\n",
+    };
+    expect(seamCallers("createJevPrioritizer", prose)).toEqual([]);
+    expect(seamCallers("selectSymbolType", prose)).toEqual([]);
   });
 });
 

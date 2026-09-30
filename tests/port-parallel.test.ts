@@ -8,8 +8,8 @@
  * production flow (production: parallel is the DEFAULT, the attribute is
  * `pp-wave-children`, the wave width is CHILD_SLOT_CAP, conditionIds are
  * `wave-<mode>-<round>-<i>`). The module is deleted; these tests cover code the
- * flow actually runs. The wave planner / join / child-lease steps are
- * exercised by the queue-verify tests (flows/port-project.ts queue region).
+ * flow actually runs. WaveDispatch/WaveJoin/ChildLease execution is covered by
+ * the queue-verify team's step tests, not here.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";

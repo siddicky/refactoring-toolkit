@@ -86,7 +86,9 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
   });
 
   /** Runs the REAL verdict-check and prioritize steps against `client`; returns the client's call counts. */
-  async function exerciseLaneBSteps(client: JudgmentClient): Promise<{ verdictCheckCalls: number; prioritizeCalls: number }> {
+  async function exerciseLaneBSteps(
+    client: JudgmentClient & { calls: number },
+  ): Promise<{ verdictCheckCalls: number; prioritizeCalls: number }> {
     configurePortJudgment(client);
     const file = "src/Money.php";
     const key = markerKeyOf(file, 1);
@@ -148,12 +150,11 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
     } as unknown as Context;
 
     const flow = new PortFileFlow();
-    const before = (client as { calls?: number }).calls ?? 0;
+    const before = client.calls;
     await flow.verdictCheck.execute(ctx as never, fri);
-    const afterVerdictCheck = (client as { calls?: number }).calls ?? 0;
+    const afterVerdictCheck = client.calls;
     await flow.prioritize.execute(ctx as never, fri);
-    const afterPrioritize = (client as { calls?: number }).calls ?? 0;
-    return { verdictCheckCalls: afterVerdictCheck - before, prioritizeCalls: afterPrioritize - afterVerdictCheck };
+    return { verdictCheckCalls: afterVerdictCheck - before, prioritizeCalls: client.calls - afterVerdictCheck };
   }
 
   function countingClient(kind: "real" | "in-memory"): JudgmentClient & { calls: number } {
