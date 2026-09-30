@@ -14,9 +14,14 @@
  * against STATUS_REPO_ROOT. Every source failure degrades that section to an
  * "unavailable" state; the server itself never crashes on missing data.
  *
- * Snapshot assembly, flow selection and env parsing live in src/dashboard/
- * (snapshot.ts, flow-select.ts, config.ts) so they are testable; this script
- * is the HTTP shell plus the stream-subscriber composition.
+ * Only GET/HEAD are served and the Host header must be allow-listed
+ * (DNS-rebinding guard, see src/dashboard/server.ts). There is no
+ * authentication: keep the default loopback bind.
+ *
+ * Snapshot assembly, flow selection, env parsing, the HTTP guard and the
+ * stream-feed composition live in src/dashboard/ (snapshot.ts,
+ * flow-select.ts, config.ts, server.ts, stream-feed.ts) so they are testable;
+ * this script only wires the real dexcli/git/SDK seams to them.
  *
  * Launch:
  *   bun run scripts/serve-status.ts
@@ -24,7 +29,10 @@
  * default with a startup warning):
  *   STATUS_PORT          (default 4646; the generic PORT is a deprecated
  *                         fallback used only when STATUS_PORT is unset)
- *   STATUS_HOST          (default 127.0.0.1)
+ *   STATUS_HOST          (default 127.0.0.1; a non-loopback value warns — no
+ *                         authentication)
+ *   STATUS_ALLOWED_HOSTS (csv of extra hostnames accepted in the Host header;
+ *                         loopback names and the bind address always are)
  *   STATUS_REPO_ROOT     (default: the working directory — set it to the
  *                         porting TARGET repo whose commits/worktrees to show)
  *   DEXCLI_BIN           (default "dexcli")
@@ -46,55 +54,20 @@
  *   BURN_DOWN_FILES      (default metrics/burn-down.json,metrics/burn-down.jsonl)
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { dexCliQueries, gitQueries } from "../src/dashboard/queries.js";
-import { configFromEnv } from "../src/dashboard/config.js";
-import { createSnapshotter, type Snapshotter } from "../src/dashboard/snapshot.js";
+import { CLIENT_POLL_MS, configFromEnv } from "../src/dashboard/config.js";
+import { allowedHostsFor, createDashboardServer } from "../src/dashboard/server.js";
+import { createSnapshotter } from "../src/dashboard/snapshot.js";
 import { startStreamFeed } from "../src/dashboard/stream-feed.js";
 import { openDexClient, dexConfigFromEnv } from "../src/dex/client.js";
 import { envelopeStream } from "../flows/steps/envelope.js";
 import { PortProjectFlow } from "../flows/port-project.js";
 
-// ---------------------------------------------------------------------------
-// HTTP server
-// ---------------------------------------------------------------------------
-
 const STATIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "../src/dashboard/static");
-let lastGoodHtml: Buffer | null = null;
-
-async function handleIndex(res: ServerResponse): Promise<void> {
-  try {
-    const html = await readFile(join(STATIC_DIR, "index.html"));
-    lastGoodHtml = html;
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    res.end(html);
-  } catch {
-    if (lastGoodHtml !== null) {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-      res.end(lastGoodHtml);
-      return;
-    }
-    res.writeHead(500, { "content-type": "text/plain" });
-    res.end("dashboard page missing: src/dashboard/static/index.html");
-  }
-}
-
-async function handleState(res: ServerResponse, snapshot: Snapshotter): Promise<void> {
-  try {
-    const state = await snapshot();
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-    res.end(JSON.stringify(state));
-  } catch (e) {
-    // Aggregation itself must never take the server down.
-    const message = e instanceof Error ? e.message : String(e);
-    res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ error: `snapshot failed: ${message}` }));
-  }
-}
 
 export function main(): void {
   const cfg = configFromEnv();
@@ -122,19 +95,10 @@ export function main(): void {
   });
 
   const snapshot = createSnapshotter({ cfg, dex, git, getStream: feed.subscriber });
-
-  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    const url = (req.url ?? "/").split("?")[0] ?? "/";
-    if (url === "/" || url === "/index.html") {
-      void handleIndex(res);
-      return;
-    }
-    if (url === "/api/state") {
-      void handleState(res, snapshot);
-      return;
-    }
-    res.writeHead(404, { "content-type": "text/plain" });
-    res.end("not found (routes: GET /, GET /api/state)");
+  const server = createDashboardServer({
+    snapshot,
+    staticDir: STATIC_DIR,
+    allowedHosts: allowedHostsFor(cfg.host, cfg.allowedHosts),
   });
 
   server.on("error", (e: Error) => {
@@ -142,8 +106,9 @@ export function main(): void {
     process.exit(1);
   });
   server.listen(cfg.port, cfg.host, () => {
+    const { port } = server.address() as AddressInfo;
     console.log(
-      `[serve-status] http://${cfg.host}:${cfg.port}/  (repo=${cfg.repoRoot} dex=${cfg.dexServer} poll=2s; Ctrl-C stops)`,
+      `[serve-status] http://${cfg.host}:${port}/  (repo=${cfg.repoRoot} dex=${cfg.dexServer} poll=${CLIENT_POLL_MS / 1000}s; Ctrl-C stops)`,
     );
   });
   const shutdown = () => {

@@ -41,6 +41,11 @@ export const DEFAULT_BURN_DOWN_FILES: readonly string[] = ["metrics/burn-down.js
 export interface StatusConfig {
   port: number;
   host: string;
+  /**
+   * Extra hostnames accepted in the Host header (DNS-rebinding guard). The
+   * loopback names and the bind address are always accepted.
+   */
+  allowedHosts: string[];
   repoRoot: string;
   dexcliBin: string;
   dexServer: string;
@@ -60,6 +65,12 @@ export interface StatusConfig {
   blobCacheDir: string;
   /** Problems found while reading the environment (invalid values, deprecated names). */
   warnings: string[];
+}
+
+/** True for bind addresses that only local processes can reach. */
+export function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  return h === "localhost" || h === "::1" || h === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(h);
 }
 
 export function csv(value: string | undefined, fallback: readonly string[]): string[] {
@@ -105,9 +116,19 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env, cwd: string 
     warnings.push("PORT is deprecated for serve-status; use STATUS_PORT");
   }
 
+  const host = env.STATUS_HOST?.trim() || "127.0.0.1";
+  if (!isLoopbackHost(host)) {
+    warnings.push(
+      `STATUS_HOST=${host} is not a loopback address: the dashboard has NO authentication and exposes run metadata ` +
+        "(repo paths, commit subjects, the activity feed) to anything that can reach it; requests must carry an " +
+        "allow-listed Host header (the bind address, plus STATUS_ALLOWED_HOSTS)",
+    );
+  }
+
   return {
     port: intEnv(portRaw, portName, DEFAULT_PORT, 0, 65_535, warnings),
-    host: env.STATUS_HOST?.trim() || "127.0.0.1",
+    host,
+    allowedHosts: csv(env.STATUS_ALLOWED_HOSTS, []),
     repoRoot: env.STATUS_REPO_ROOT?.trim() || cwd,
     dexcliBin: env.DEXCLI_BIN?.trim() || "dexcli",
     dexServer: env.DEX_SERVER_ADDRESS?.trim() || "127.0.0.1:8801",
