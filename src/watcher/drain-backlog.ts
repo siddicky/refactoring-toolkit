@@ -62,10 +62,15 @@ export function toWatcherEvent(message: { value: unknown }): WatcherStreamEvent 
     eventKey?: unknown;
     event?: { stepId?: unknown; ended_at?: unknown } | null;
   };
+  const endedAt = envelope.event?.ended_at;
   return {
     eventKey: String(envelope.eventKey ?? ""),
     stepId: typeof envelope.event?.stepId === "string" ? envelope.event.stepId : "",
-    endedAt: typeof envelope.event?.ended_at === "string" ? envelope.event.ended_at : null,
+    // Only an absent/null ended_at is a START. Any other value (even one that
+    // is not the expected ISO string, e.g. an epoch number) marks a completion:
+    // misreading a finished attempt as a START fails OPEN in the stale-start
+    // guard and would fire the kill on an idle system.
+    endedAt: endedAt === undefined || endedAt === null ? null : String(endedAt),
   };
 }
 

@@ -174,6 +174,14 @@ export interface QueueVerifyWatcherOptions {
    * back to the default.
    */
   catchUpTimeoutMs?: number;
+  /**
+   * Wall-clock budget (ms) for the flow-status probe that GATES a kill (the
+   * "is the flow already terminal?" check right before firing). It runs inside
+   * the ~1.1-1.6 s kill window, so a slow or hung dexcli must not eat the
+   * window: past the budget the status reads "unknown", which never
+   * suppresses a live attempt. Default 500 ms. Real timer, not `sleep`.
+   */
+  statusGateTimeoutMs?: number;
   /** Monotonic-ish clock injection (tests advance it manually). */
   now?: () => number;
   /** Sleep injection (tests resolve immediately / pump the fake clock). */
@@ -212,6 +220,12 @@ const DEFAULT_SLEEP = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)
 /** Log the first failure of a probe and then every Nth consecutive one. */
 const PROBE_FAILURE_LOG_EVERY = 10;
 
+/** Default wall-clock budget of the kill-gating flow-status probe. */
+export const DEFAULT_STATUS_GATE_TIMEOUT_MS = 500;
+
+/** Distinguishes "the probe ran out of budget" from every real status. */
+const GATE_TIMED_OUT = Symbol("status gate timed out");
+
 export async function runQueueVerifyWatcher(
   options: QueueVerifyWatcherOptions,
 ): Promise<WatcherResult> {
@@ -244,17 +258,41 @@ export async function runQueueVerifyWatcher(
     if (count > 0) log(`${probe} probe recovered after ${count} consecutive failure(s)`);
     consecutiveFailures.delete(probe);
   };
-  /** Flow status with failures logged and mapped to "unknown" (never terminal). */
-  const probeStatus = async (): Promise<WatcherFlowStatus> => {
+  /**
+   * Flow status with failures logged and mapped to "unknown" (never terminal).
+   * With `budgetMs` (the kill gate) a probe that overruns also reads "unknown"
+   * instead of delaying the kill.
+   */
+  const probeStatus = async (budgetMs?: number): Promise<WatcherFlowStatus> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const status = await options.flowStatus();
+      const probe = options.flowStatus();
+      probe.catch(() => undefined); // a late rejection after the budget must not go unhandled
+      const status =
+        budgetMs === undefined
+          ? await probe
+          : await Promise.race([
+              probe,
+              new Promise<typeof GATE_TIMED_OUT>((resolve) => {
+                timer = setTimeout(() => resolve(GATE_TIMED_OUT), budgetMs);
+              }),
+            ]);
+      if (status === GATE_TIMED_OUT) {
+        log(
+          `flow-status probe exceeded the ${budgetMs}ms kill-gate budget — treating the flow as running (never delay a live kill)`,
+        );
+        return "unknown";
+      }
       probeSucceeded("flow-status");
       return status;
     } catch (err) {
       probeFailed("flow-status", err);
       return "unknown"; // query failure never suppresses a live attempt
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   };
+  const statusGateMs = options.statusGateTimeoutMs ?? DEFAULT_STATUS_GATE_TIMEOUT_MS;
 
   const fireOnce = async (via: "stream" | "poll"): Promise<WatcherResult> => {
     if (fired) {
@@ -291,7 +329,7 @@ export async function runQueueVerifyWatcher(
       const startsInBacklog = backlog.filter((e) => isQueueVerifyStart(e)).length;
       const active = activeAttemptStarts(backlog);
       if (active.length > 0) {
-        const status = await probeStatus();
+        const status = await probeStatus(statusGateMs);
         if (isTerminalFlowStatus(status)) {
           log(
             `backlog start is stale — flow ${status} before the trigger; exiting cleanly (no kill)`,
@@ -328,21 +366,32 @@ export async function runQueueVerifyWatcher(
     // and the deadline still bounds the whole loop.
     if (streamUsable) {
       try {
-        let event = await options.nextStreamEvent(options.pollIntervalMs);
+        // Never long-poll past the hard bound (whole seconds, >= 1 s: SDK).
+        const untilDeadlineMs = options.deadlineMs - (now() - start);
+        const firstReadMs = Math.min(
+          options.pollIntervalMs,
+          Math.max(DEFAULT_CATCH_UP_TIMEOUT_MS, Math.ceil(untilDeadlineMs / 1000) * 1000),
+        );
+        let event = await options.nextStreamEvent(firstReadMs);
         if (event !== null) {
+          const batchStartedAt = now();
           const batch: WatcherStreamEvent[] = [];
           // Lookahead budget (C27): once a START is in the batch, the rest of
           // the retained events are read for at most catchUpTimeoutMs — enough
           // to see a same-key DONE that is ALREADY retained, short enough that
           // a DONE published ~1.5 s later cannot land in this batch and cancel
           // the kill. Quiet stream: the empty catch-up read times out after
-          // catchUpTimeoutMs. Busy stream: the budget check below ends it.
+          // catchUpTimeoutMs. Busy stream: the budget check ends it once a
+          // START is in the batch, and a batch that has been draining for a
+          // whole pollInterval ends regardless, so a constantly busy stream
+          // cannot starve the poll/terminal probes until the deadline.
           let startSeenAt: number | null = null;
           while (event !== null) {
             batch.push(event);
             if (startSeenAt === null && isQueueVerifyStart(event)) startSeenAt = now();
             if (now() - start >= options.deadlineMs) break; // bounded drain
             if (startSeenAt !== null && now() - startSeenAt >= catchUpTimeoutMs) break;
+            if (now() - batchStartedAt >= options.pollIntervalMs) break;
             event = await options.nextStreamEvent(catchUpTimeoutMs);
           }
           streamEventsRead = batch.length;
@@ -355,7 +404,7 @@ export async function runQueueVerifyWatcher(
           const startsInBatch = batch.filter((e) => isQueueVerifyStart(e)).length;
           const active = activeAttemptStarts(batch);
           if (active.length > 0) {
-            const status = await probeStatus();
+            const status = await probeStatus(statusGateMs);
             if (isTerminalFlowStatus(status)) {
               log(
                 `follow start is stale — flow ${status} before the trigger; exiting cleanly (no kill)`,
@@ -428,8 +477,11 @@ export async function runQueueVerifyWatcher(
     // pollInterval.
     if (streamEventsRead > 0) continue;
     if (streamUsable && streamBlockedMs >= DEFAULT_CATCH_UP_TIMEOUT_MS) continue;
-    const remainingMs = options.pollIntervalMs - (now() - cycleStart);
-    if (remainingMs > 0) await sleep(remainingMs);
+    const sleepMs = Math.min(
+      options.pollIntervalMs - (now() - cycleStart),
+      options.deadlineMs - (now() - start), // never sleep past the hard bound
+    );
+    if (sleepMs > 0) await sleep(sleepMs);
   }
 
   log(`deadline reached without trigger — bounded exit`);

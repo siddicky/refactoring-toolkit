@@ -14,6 +14,7 @@ import { join } from "node:path";
 import {
   WATCHER_EXIT,
   WATCHER_USAGE,
+  parseFlagValues,
   parseWatcherArgs,
 } from "../src/watcher/cli-args.js";
 
@@ -101,7 +102,15 @@ describe("C34(4): every outcome has its own exit code", () => {
   test("usage (64) and fatal (70) no longer collide with bound-elapsed (2) or terminal (1)", () => {
     const codes = Object.values(WATCHER_EXIT);
     expect(new Set(codes).size).toBe(codes.length); // all distinct
-    expect(WATCHER_EXIT).toEqual({ fired: 0, terminal: 1, timeout: 2, noop: 3, usage: 64, fatal: 70 });
+    expect(WATCHER_EXIT).toEqual({
+      fired: 0,
+      terminal: 1,
+      timeout: 2,
+      noop: 3,
+      survivor: 4,
+      usage: 64,
+      fatal: 70,
+    });
   });
 
   test("the usage string names the new flags", () => {
@@ -137,5 +146,24 @@ describe("C34(4,5): the script itself exits 64 on a usage error, before arming a
     const r = await runScript("--poll-seconds", "5");
     expect(r.code).toBe(64);
     expect(r.stderr).toContain("--flow-id is required");
+  });
+});
+
+describe("shared flag scanner: --flag=value escape hatch", () => {
+  test("a value that starts with -- is accepted in --flag=value form (and only there)", () => {
+    const eq = parse("--flow-id", "f", "--run-id=--smoke");
+    expect(eq.ok && eq.options.runId).toBe("--smoke");
+    expect(parse("--flow-id", "f", "--run-id", "--smoke").ok).toBe(false);
+  });
+
+  test("parseFlagValues handles both spellings, empty =values, and rejects unknown flags", () => {
+    const known = ["--a", "--b"];
+    const ok = parseFlagValues(["--a=1", "--b", "2"], known);
+    expect(ok.ok && Object.fromEntries(ok.values)).toEqual({ "--a": "1", "--b": "2" });
+    const empty = parseFlagValues(["--a="], known);
+    expect(empty.ok && empty.values.get("--a")).toBe("");
+    const eqInValue = parseFlagValues(["--a=x=y"], known);
+    expect(eqInValue.ok && eqInValue.values.get("--a")).toBe("x=y");
+    expect(parseFlagValues(["--c=1"], known).ok).toBe(false);
   });
 });

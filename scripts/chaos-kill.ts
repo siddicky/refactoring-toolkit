@@ -16,11 +16,13 @@
  *     [--flow-run-id <dexRunId>] [--wait-ms 5000]
  *
  * Every --pids entry must be a PID > 1 and --wait-ms a whole number of
- * milliseconds: an unparsable value is a usage error (exit 2), never silently
+ * milliseconds: an unparsable value is a usage error (exit 64), never silently
  * dropped (a dropped PID would shrink the kill set without a trace).
  *
- * Exit codes: 0 every target exited after SIGKILL; 1 a target survived;
- * 2 usage error; 3 NO-OP (no target was alive, nothing was killed).
+ * Exit codes ({@link CHAOS_KILL_EXIT}, aligned with watch-queue-verify's
+ * usage/fatal codes): 0 every target exited after SIGKILL; 1 a target survived;
+ * 3 NO-OP (no target was alive, nothing was killed); 64 usage error;
+ * 70 fatal internal error.
  *
  * Sidecar path: `--events`, default {@link DEFAULT_KILL_EVENTS_PATH}
  * (`metrics/kill-events.jsonl`, relative to the cwd; /metrics/ is the repo's
@@ -38,12 +40,27 @@
 import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { parseFlagValues } from "../src/watcher/cli-args.js";
+
 /**
  * Default kill-event sidecar path (Contract B): JSON Lines, relative to the
  * cwd, inside the gitignored /metrics/ run-output directory. Explicit
  * `--events` flags still win.
  */
 export const DEFAULT_KILL_EVENTS_PATH = "metrics/kill-events.jsonl";
+
+/** Exit codes of the chaos-kill CLI. */
+export const CHAOS_KILL_EXIT = {
+  ok: 0,
+  /** A target survived SIGKILL. */
+  survivors: 1,
+  /** No target was alive: nothing was killed. */
+  noop: 3,
+  /** Usage error (sysexits EX_USAGE). */
+  usage: 64,
+  /** Fatal internal error (sysexits EX_SOFTWARE). */
+  fatal: 70,
+} as const;
 
 export interface KillEventIntent {
   kind: "intent";
@@ -201,19 +218,9 @@ export type ParsedChaosKillArgs =
  * process group), and `--wait-ms` must be a non-negative whole number.
  */
 export function parseChaosKillArgs(argv: readonly string[]): ParsedChaosKillArgs {
-  const values = new Map<string, string>();
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i] as string;
-    if (!(KNOWN_FLAGS as readonly string[]).includes(flag)) {
-      return { ok: false, error: `unknown argument: ${flag}` };
-    }
-    const value = argv[i + 1];
-    if (value === undefined || value.startsWith("--")) {
-      return { ok: false, error: `${flag} requires a value` };
-    }
-    values.set(flag, value);
-    i++;
-  }
+  const scanned = parseFlagValues(argv, KNOWN_FLAGS);
+  if (!scanned.ok) return scanned;
+  const values = scanned.values;
 
   const pidsArg = values.get("--pids");
   if (pidsArg === undefined || pidsArg.trim() === "") {
@@ -254,7 +261,7 @@ async function main(): Promise<number> {
   const parsed = parseChaosKillArgs(process.argv.slice(2));
   if (!parsed.ok) {
     console.error(`[chaos-kill] ${parsed.error}\n${USAGE}`);
-    return 2;
+    return CHAOS_KILL_EXIT.usage;
   }
   const options = parsed.options;
   const result = await chaosKill(options);
@@ -263,9 +270,9 @@ async function main(): Promise<number> {
   );
   if (!result.fired) {
     console.error("[chaos-kill] NO-OP: no target was alive — nothing was killed");
-    return 3;
+    return CHAOS_KILL_EXIT.noop;
   }
-  return result.stillAlive.length === 0 ? 0 : 1;
+  return result.stillAlive.length === 0 ? CHAOS_KILL_EXIT.ok : CHAOS_KILL_EXIT.survivors;
 }
 
 const isDirectRun =
@@ -277,6 +284,6 @@ if (isDirectRun) {
     .then((code) => process.exit(code))
     .catch((err: unknown) => {
       console.error("[chaos-kill] fatal:", err);
-      process.exit(1);
+      process.exit(CHAOS_KILL_EXIT.fatal);
     });
 }

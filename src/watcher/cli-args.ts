@@ -20,11 +20,50 @@ export const WATCHER_EXIT = {
   timeout: 2,
   /** A trigger was seen but the kill was a NO-OP (no live target PIDs). */
   noop: 3,
+  /** The kill fired but a target survived SIGKILL (the experiment is not valid). */
+  survivor: 4,
   /** Usage error (sysexits EX_USAGE). */
   usage: 64,
   /** Fatal internal error (sysexits EX_SOFTWARE). */
   fatal: 70,
 } as const;
+
+export type ParsedFlagValues =
+  | { ok: true; values: Map<string, string> }
+  | { ok: false; error: string };
+
+/**
+ * Strict `--flag value` / `--flag=value` scan shared by the watcher and
+ * chaos-kill CLIs. Unknown flags, stray positionals and a flag without a value
+ * are errors; a SPACE-separated value may not itself start with `--` (so a
+ * forgotten value cannot swallow the next flag) — write `--flag=--value` for a
+ * value that legitimately starts with `--`.
+ */
+export function parseFlagValues(
+  argv: readonly string[],
+  knownFlags: readonly string[],
+): ParsedFlagValues {
+  const values = new Map<string, string>();
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i] as string;
+    const eq = token.startsWith("--") ? token.indexOf("=") : -1;
+    const flag = eq > 0 ? token.slice(0, eq) : token;
+    if (!knownFlags.includes(flag)) {
+      return { ok: false, error: `unknown argument: ${flag}` };
+    }
+    if (eq > 0) {
+      values.set(flag, token.slice(eq + 1));
+      continue;
+    }
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("--")) {
+      return { ok: false, error: `${flag} requires a value` };
+    }
+    values.set(flag, value);
+    i++;
+  }
+  return { ok: true, values };
+}
 
 export interface WatcherCliOptions {
   flowId: string;
@@ -78,19 +117,9 @@ export function parseWatcherArgs(
   argv: readonly string[],
   defaults: WatcherArgDefaults,
 ): ParsedWatcherArgs {
-  const values = new Map<string, string>();
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i] as string;
-    if (!(KNOWN_FLAGS as readonly string[]).includes(flag)) {
-      return { ok: false, error: `unknown argument: ${flag}` };
-    }
-    const value = argv[i + 1];
-    if (value === undefined || value.startsWith("--")) {
-      return { ok: false, error: `${flag} requires a value` };
-    }
-    values.set(flag, value);
-    i++;
-  }
+  const scanned = parseFlagValues(argv, KNOWN_FLAGS);
+  if (!scanned.ok) return scanned;
+  const values = scanned.values;
 
   const flowId = values.get("--flow-id");
   if (flowId === undefined || flowId.trim() === "") {

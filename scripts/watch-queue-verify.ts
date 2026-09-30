@@ -14,6 +14,8 @@
  *   exit 2   30-minute bound elapsed without trigger
  *   exit 3   trigger seen but the kill was a NO-OP (no live target PIDs; the
  *            sidecar's completed record says fired:false)
+ *   exit 4   the kill fired but a target SURVIVED SIGKILL (the sidecar notes
+ *            say WARNING) — the kill-and-resume experiment is not valid
  *   exit 64  usage error (bad/missing/unknown argument; nothing was started)
  *   exit 70  fatal internal error
  * Each outcome has its own code (audit C34: usage used to share 2 with "bound
@@ -130,23 +132,26 @@ function log(line: string): void {
 /** Live PIDs for the dex server and the port worker (pgrep, may be empty). */
 async function targetPids(): Promise<number[]> {
   const patterns = ["dexcli dev", "run-demo.ts worker"];
-  const pids: number[] = [];
-  for (const pattern of patterns) {
-    try {
-      const { stdout } = await execFileP("pgrep", ["-f", pattern], { timeout: 5_000 });
-      for (const line of stdout.split("\n")) {
-        const pid = Number.parseInt(line.trim(), 10);
-        if (Number.isInteger(pid) && pid > 0 && !pids.includes(pid)) pids.push(pid);
+  // One pgrep per pattern, concurrently: this runs inside the kill window.
+  const found = await Promise.all(
+    patterns.map(async (pattern): Promise<number[]> => {
+      try {
+        const { stdout } = await execFileP("pgrep", ["-f", pattern], { timeout: 5_000 });
+        return stdout
+          .split("\n")
+          .map((line) => Number.parseInt(line.trim(), 10))
+          .filter((pid) => Number.isInteger(pid) && pid > 0);
+      } catch (err) {
+        // pgrep exits 1 on no match — no PIDs for this pattern. Anything else
+        // (missing binary, timeout) would make a live target look absent, so say so.
+        if ((err as { code?: unknown }).code !== 1) {
+          log(`pgrep for ${JSON.stringify(pattern)} failed: ${(err as Error).message}`);
+        }
+        return [];
       }
-    } catch (err) {
-      // pgrep exits 1 on no match — no PIDs for this pattern. Anything else
-      // (missing binary, timeout) would make a live target look absent, so say so.
-      if ((err as { code?: unknown }).code !== 1) {
-        log(`pgrep for ${JSON.stringify(pattern)} failed: ${(err as Error).message}`);
-      }
-    }
-  }
-  return pids;
+    }),
+  );
+  return [...new Set(found.flat())];
 }
 
 async function main(): Promise<number> {
@@ -192,6 +197,9 @@ async function main(): Promise<number> {
   // `dexcli flow summary` at arm and refreshed by every status probe — never
   // fetched inside the kill window.
   let observedRunId: string | null = null;
+  // The last kill's survivors, for the exit code: a target that survived SIGKILL
+  // invalidates the experiment even though the trigger fired.
+  let survivors: number[] = [];
   const fetchFlowSummary = async () => {
     try {
       const out = await execFileP(
@@ -286,6 +294,7 @@ async function main(): Promise<number> {
           ...(flowRunId !== undefined ? { flowRunId } : {}),
           waitMs: 5_000,
         });
+        survivors = kill.stillAlive;
         return {
           killed: kill.fired,
           detail:
@@ -299,6 +308,12 @@ async function main(): Promise<number> {
     });
 
     if (result.outcome === "fired") {
+      if (survivors.length > 0) {
+        log(
+          `done: kill fired via ${result.via} but ${survivors.length} target(s) SURVIVED SIGKILL (${survivors.join(",")}) — the kill-and-resume experiment is not valid`,
+        );
+        return WATCHER_EXIT.survivor;
+      }
       log(`done: kill fired once via ${result.via}`);
       return WATCHER_EXIT.fired;
     }

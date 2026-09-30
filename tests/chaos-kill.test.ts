@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  CHAOS_KILL_EXIT,
   DEFAULT_KILL_EVENTS_PATH,
   appendKillEvent,
   chaosKill,
@@ -139,7 +140,7 @@ describe("C71: the CLI rejects unparsable input instead of filtering it", () => 
     expect(parseChaosKillArgs(["--pids", "123", "stray"]).ok).toBe(false);
   });
 
-  test("CLI exits 2 on a bad PID WITHOUT writing any sidecar record", async () => {
+  test("CLI exits 64 (usage) on a bad PID WITHOUT writing any sidecar record", async () => {
     dir = await mkdtemp(join(tmpdir(), "chaos-kill-"));
     const eventsPath = join(dir, "events.jsonl");
     const proc = Bun.spawn(
@@ -148,7 +149,7 @@ describe("C71: the CLI rejects unparsable input instead of filtering it", () => 
     );
     const code = await proc.exited;
     const stderr = await new Response(proc.stderr).text();
-    expect(code).toBe(2);
+    expect(code).toBe(CHAOS_KILL_EXIT.usage);
     expect(stderr).toContain("invalid --pids");
     expect(stderr).toContain("--flow-run-id"); // usage string lists it
     expect(existsSync(eventsPath)).toBe(false);
@@ -167,7 +168,7 @@ describe("C71: the CLI rejects unparsable input instead of filtering it", () => 
       { stdout: "pipe", stderr: "pipe" },
     );
     const code = await proc.exited;
-    expect(code).toBe(3);
+    expect(code).toBe(CHAOS_KILL_EXIT.noop);
     const [, completed] = await readSidecar(eventsPath);
     expect(completed?.fired).toBe(false);
   });
@@ -234,5 +235,18 @@ describe("C42 (writer side, Contract B): default path, parent dir, run identity"
     for (const row of await readSidecar(without)) {
       expect("flow_run_id" in row).toBe(false);
     }
+  });
+});
+
+describe("chaos-kill exit codes and --flag=value", () => {
+  test("the codes are disjoint and aligned with watch-queue-verify's usage (64) / fatal (70) / no-op (3)", () => {
+    expect(CHAOS_KILL_EXIT).toEqual({ ok: 0, survivors: 1, noop: 3, usage: 64, fatal: 70 });
+  });
+
+  test("--flag=value lets a value start with -- (a space-separated one is still rejected)", () => {
+    const eq = parseChaosKillArgs(["--pids=123", "--reason=--manual kill"]);
+    expect(eq.ok && eq.options.reason).toBe("--manual kill");
+    expect(eq.ok && eq.options.pids).toEqual([123]);
+    expect(parseChaosKillArgs(["--pids", "123", "--reason", "--manual kill"]).ok).toBe(false);
   });
 });

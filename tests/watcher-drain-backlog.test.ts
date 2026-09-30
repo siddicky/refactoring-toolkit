@@ -171,6 +171,17 @@ describe("C28: drainRetainedBacklog returns stream order across page boundaries"
     expect(logs.some((l) => l.includes("3-page bound"))).toBe(true);
   });
 
+  test("toWatcherEvent: only an absent/null ended_at is a START; a non-string ended_at is a completion, not a START", () => {
+    const base = { eventKey: "pp-queue-verify#1", event: { stepId: "pp-queue-verify" } };
+    expect(toWatcherEvent({ value: base }).endedAt).toBeNull(); // ended_at absent
+    expect(toWatcherEvent({ value: { ...base, event: { ...base.event, ended_at: null } } }).endedAt).toBeNull();
+    const epoch = toWatcherEvent({ value: { ...base, event: { ...base.event, ended_at: 1_790_000_000_000 } } });
+    expect(epoch.endedAt).toBe("1790000000000");
+    // A finished attempt with an unexpected ended_at type must close its START.
+    const start = toWatcherEvent({ value: base });
+    expect(activeAttemptStarts([start, epoch])).toEqual([]);
+  });
+
   test("toWatcherEvent tolerates null / non-object / partial envelope values", () => {
     const empty = { eventKey: "", stepId: "", endedAt: null };
     expect(toWatcherEvent({ value: null })).toEqual(empty);

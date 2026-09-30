@@ -173,6 +173,73 @@ describe("C34(3): pacing never leaves the watcher deaf while a real long-poll is
   });
 });
 
+describe("review: the kill gate, the hard bound, and batch draining are all bounded", () => {
+  test("a hung flow-status probe cannot eat the kill window: past the gate budget the START fires anyway", async () => {
+    const world = virtualWorld([{ at: 5_000, event: START }]);
+    const lateRejection = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("late")), 60));
+    const started = Date.now();
+    const result = await runQueueVerifyWatcher({
+      ...world.options(SILENT_30_MIN),
+      statusGateTimeoutMs: 25,
+      flowStatus: () => lateRejection, // never resolves inside the budget; rejects afterwards
+    });
+    expect(result.outcome).toBe("fired");
+    expect(Date.now() - started).toBeLessThan(500); // not the 10 s dexcli timeout
+    expect(world.logs.some((l) => l.includes("exceeded the 25ms kill-gate budget"))).toBe(true);
+    await new Promise((r) => setTimeout(r, 100)); // the late rejection must not surface as unhandled
+  });
+
+  test("a fast status probe inside the budget still gates: a terminal flow does not fire", async () => {
+    const world = virtualWorld([{ at: 5_000, event: START }]);
+    const result = await runQueueVerifyWatcher({
+      ...world.options(SILENT_30_MIN),
+      statusGateTimeoutMs: 500,
+      flowStatus: async () => "failed",
+    });
+    expect(result.outcome).toBe("terminal");
+    expect(world.firings).toHaveLength(0);
+  });
+
+  test("the watch never runs past its hard bound: the last long-poll is clamped and the last sleep too", async () => {
+    // deadline 90 s with a 60 s poll: the second read may only wait the 30 s that remain.
+    const silent = virtualWorld([]);
+    const r1 = await runQueueVerifyWatcher(silent.options({ pollIntervalMs: 60_000, deadlineMs: 90_000 }));
+    expect(r1.outcome).toBe("timeout");
+    expect(silent.reads.map((r) => r.timeoutMs)).toEqual([60_000, 30_000]);
+    expect(silent.clock()).toBeLessThanOrEqual(90_000);
+
+    // Stream unusable: pacing is sleep(); the last sleep is clamped to the bound.
+    const failing = virtualWorld([]);
+    const r2 = await runQueueVerifyWatcher({
+      ...failing.options({ pollIntervalMs: 60_000, deadlineMs: 90_000 }),
+      nextStreamEvent: async () => {
+        throw new Error("stream token invalidated");
+      },
+    });
+    expect(r2.outcome).toBe("timeout");
+    expect(failing.sleeps).toEqual([60_000, 30_000]);
+    expect(failing.clock()).toBe(90_000);
+  });
+
+  test("a constantly busy stream cannot starve the poll/terminal probes until the deadline", async () => {
+    // A non-trigger event every 500 ms: every catch-up read is satisfied, so no
+    // read ever times out. The batch must still close every pollInterval.
+    const schedule = Array.from({ length: 600 }, (_, i) => ({ at: 500 * (i + 1), event: noise(i) }));
+    const world = virtualWorld(schedule);
+    const result = await runQueueVerifyWatcher({
+      ...world.options({ pollIntervalMs: 60_000, deadlineMs: 5 * 60_000 }),
+      flowStatus: async () => {
+        world.statusProbes.push(world.clock());
+        return world.clock() >= 130_000 ? "completed" : "running";
+      },
+    });
+    // The terminal probe got to run while events were still flowing, and ended the watch.
+    expect(result.outcome).toBe("terminal");
+    expect(world.clock()).toBeLessThan(200_000);
+    expect(world.polls.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe("C34(3): no deaf window after a busy cycle", () => {
   test("a START published while the watcher would have been sleeping still fires inside its window", async () => {
     // t=10 s a non-trigger event; the cycle that reads it used to end with
