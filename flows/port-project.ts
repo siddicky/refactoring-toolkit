@@ -63,6 +63,7 @@ import {
   OpencodePromptError,
   type AgentSessionClient,
 } from "../src/harness/opencode.js";
+import { git } from "../src/git/exec.js";
 import {
   commitLeaseChanges,
   findCommitByOpId,
@@ -909,11 +910,15 @@ function composeAgentTurn(def: AgentDefinition, turn: string): string {
   return [def.prompt, "", toolPolicyBlock(def), "", turn].join("\n\n");
 }
 
+/**
+ * Stages everything in the lease worktree and returns the staged diff. Goes
+ * through src/git/exec.ts so the 30s timeout and 64 MiB buffer apply (a bare
+ * promisified execFile has Node's 1 MiB default buffer and no timeout).
+ */
 async function gitDiffStaged(worktreePath: string): Promise<string> {
-  const { stdout } = await execFileP("git", ["add", "-A"], { cwd: worktreePath });
-  void stdout;
-  const res = await execFileP("git", ["diff", "--cached"], { cwd: worktreePath });
-  return res.stdout;
+  const runner = git(worktreePath);
+  await runner.run(["add", "-A"]);
+  return runner.run(["diff", "--cached"]);
 }
 
 async function writeOutFile(worktreePath: string, outPath: string, content: string): Promise<void> {
@@ -2331,17 +2336,14 @@ const PrepDiffCaptureStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
       const specPath = join(tmp, "spec.md");
       await writeFile(baselinePath, seed.stubRaw);
       await writeFile(specPath, draft.specText);
-      let raw = "";
-      try {
-        const { stdout } = await execFileP(
-          "git",
-          ["diff", "--no-index", "--", baselinePath, specPath],
-          { maxBuffer: 32 * 1024 * 1024 },
-        );
-        raw = stdout;
-      } catch (err) {
-        raw = (err as { stdout?: string }).stdout ?? "";
+      // Exit 1 (files differ) carries the diff on stdout; a real failure
+      // exits >= 2 with NOTHING on stdout. The old catch-all swallowed every
+      // failure into an empty diff, which reviewers then "reviewed".
+      const res = await git(tmp).tryRun(["diff", "--no-index", "--", baselinePath, specPath]);
+      if (!res.ok && res.stdout.length === 0) {
+        throw new Error(`prep diff failed: git diff --no-index: ${res.stderr.trim()}`);
       }
+      const raw = res.stdout;
       const doc: DiffDocument = {
         diff_id: `prep-diff-${state.prepIteration}`,
         file: PREP_SPEC_FILE,

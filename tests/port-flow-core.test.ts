@@ -12,7 +12,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,9 +23,15 @@ import {
   PortProjectFlow,
   ppConfig,
   ppLease,
+  ppDiff,
   ppOut,
   ppPrep,
+  ppPrepDiff,
+  ppPrepDraft,
+  ppPrepSeed,
+  ppPrepState,
   ppQueue,
+  type CapturedDiff,
   type FileRoundInput,
   type PortQueueState,
   type PortRunInput,
@@ -335,5 +341,96 @@ describe("C02: sequential loop releases leases (3 files through a cap of 2)", ()
   test("ReleaseStep declares ppLease (an undeclared read would throw in dex)", () => {
     const flow = new PortProjectFlow();
     expect(declaredLoads(flow.release)).toContain(ppLease);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C88: flow git calls go through the src/git/exec.ts hardening
+// ---------------------------------------------------------------------------
+
+describe("C88: diff capture uses the hardened git runner", () => {
+  test("CaptureDiffStep captures a diff larger than Node's 1 MiB default maxBuffer", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "porting-kit-c88-"));
+    roots.push(repo);
+    const runner = git(repo);
+    await runner.run(["init", "-b", "main"]);
+    await writeFile(join(repo, "README.md"), "fixture\n");
+    await runner.run(["add", "-A"]);
+    await runner.run(["commit", "-m", "init"]);
+    // ~2.4 MB of added lines: far above the 1 MiB execFile default buffer.
+    const big = "export const row = 'x'.repeat(80);\n".repeat(75_000);
+    await mkdir(join(repo, "src"), { recursive: true });
+    await writeFile(join(repo, "src", "big.ts"), big);
+
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    const fx = { repo, worktreeRoot: join(repo, ".wt"), integration: join(repo, ".wt", "i") };
+    const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", repo, "main");
+    const decision = await run(stores, flow.captureDiff, fri);
+    expect(nextOf(decision).step).toBe(flow.reviewAStart.constructor);
+
+    const captured = peek<CapturedDiff>(stores, ppDiff, "src__A.php#1");
+    expect(captured).toBeDefined();
+    expect(captured?.raw.length).toBeGreaterThan(1024 * 1024);
+    expect(captured?.raw).toContain("+++ b/src/big.ts");
+  }, 60_000);
+});
+
+describe("C88: PrepDiffCapture no longer swallows failures of its diff command", () => {
+  const prepInput = (): PortRunInput => ({
+    repoRoot: "/r",
+    worktreeRoot: "/r/.wt",
+    integrationWorktreePath: "/r/.wt/integration",
+    epoch: 1,
+    sourceRoot: "/r/php",
+    prepPath: "/r/stub-prep.md",
+    files: ["src/A.php"],
+    maxRounds: 2,
+  });
+
+  function prepStores(stubRaw: string, specText: string): Stores {
+    const stores: Stores = new Map();
+    seed(stores, ppPrepDraft, "draft", { specText, iteration: 0 });
+    seed(stores, ppPrepSeed, "seed", { stubRaw, symbols: [] });
+    seed(stores, ppPrepState, "state", { prepIteration: 0 });
+    return stores;
+  }
+
+  test("differing baseline and spec (exit 1) yield the real unified diff", async () => {
+    const flow = new PortProjectFlow();
+    const stores = prepStores("# baseline\nold line\n", "# baseline\nnew line\n");
+    const decision = await run(stores, flow.prepDiffCapture, prepInput());
+    expect(nextOf(decision).step).toBe(flow.prepReviewAStart.constructor);
+    const diff = peek<{ raw: string; doc: { hunks: unknown[] } }>(stores, ppPrepDiff, "diff");
+    expect(diff?.raw).toContain("-old line");
+    expect(diff?.raw).toContain("+new line");
+    expect(diff?.doc.hunks.length).toBe(1);
+  });
+
+  test("identical baseline and spec (exit 0) yield an empty diff, not an error", async () => {
+    const flow = new PortProjectFlow();
+    const stores = prepStores("same\n", "same\n");
+    await run(stores, flow.prepDiffCapture, prepInput());
+    const diff = peek<{ raw: string; doc: { hunks: unknown[] } }>(stores, ppPrepDiff, "diff");
+    expect(diff?.raw).toBe("");
+    expect(diff?.doc.hunks).toEqual([]);
+  });
+
+  test("a hard failure (exit >= 2, nothing on stdout) fails the step instead of becoming an empty diff", async () => {
+    const binDir = await mkdtemp(join(tmpdir(), "porting-kit-fakebin-"));
+    roots.push(binDir);
+    await writeFile(join(binDir, "git"), "#!/bin/sh\necho 'fatal: simulated failure' >&2\nexit 2\n");
+    await chmod(join(binDir, "git"), 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    try {
+      const flow = new PortProjectFlow();
+      const stores = prepStores("a\n", "b\n");
+      await expect(run(stores, flow.prepDiffCapture, prepInput())).rejects.toThrow(/prep diff failed.*simulated failure/);
+      expect(peek(stores, ppPrepDiff, "diff")).toBeUndefined();
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
   });
 });
