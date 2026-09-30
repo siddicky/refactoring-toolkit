@@ -16,6 +16,9 @@
  *   past a keyed commit.
  */
 
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
+
 import { GitError, git, gitPredicate, type GitRunner, type TryRunResult } from "./exec.js";
 
 // ---------------------------------------------------------------------------
@@ -294,10 +297,12 @@ export class WorktreePool {
     if (!branchExists) {
       await runner.run(["branch", branch, headSha]);
     }
-    const wtExists = (
-      await runner.tryRun(["-C", worktreePath, "rev-parse", "--is-inside-work-tree"])
-    ).ok;
-    if (!wtExists) {
+    // `rev-parse --is-inside-work-tree` is true for ANY directory under the main
+    // checkout (worktreeRoot is `<repo>/.worktrees`), so a leftover plain
+    // directory used to become the lease and commits landed on the main branch.
+    // Only a directory that IS a worktree root is reused; anything else goes to
+    // `worktree add` (an empty directory is adopted, a non-empty one fails loudly).
+    if (!(await isWorktreeRoot(runner, worktreePath))) {
       await runner.run(["worktree", "add", worktreePath, branch]);
     }
 
@@ -485,6 +490,27 @@ async function refExists(runner: GitRunner, ref: string): Promise<boolean> {
 }
 
 /**
+ * True only when `path` is the root of a worktree (linked or main): the
+ * realpath of `rev-parse --show-toplevel` run inside it must equal the
+ * realpath of the path itself. A plain directory nested in a checkout reports
+ * that checkout's root instead, and a missing directory fails the probe.
+ */
+async function isWorktreeRoot(runner: GitRunner, path: string): Promise<boolean> {
+  const args = ["-C", path, "rev-parse", "--show-toplevel"];
+  const top = await runner.tryRun(args);
+  if (!top.ok) {
+    throwIfInfraFailure(args, top);
+    return false;
+  }
+  try {
+    // `-C <path>` resolves against the runner's cwd, so do the same here.
+    return (await realpath(top.stdout.trim())) === (await realpath(resolve(runner.cwd, path)));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * For a tryRun whose plain non-zero exit is an expected outcome (e.g. a
  * non-fast-forwardable `merge --ff-only`): a timeout or spawn failure is not
  * that outcome and must surface instead of silently steering the caller down
@@ -601,10 +627,7 @@ export async function mergeLeaseIntoIntegration(
   }
 
   // Ensure the integration worktree exists.
-  const hasWt = (
-    await root.tryRun(["-C", integrationWorktreePath, "rev-parse", "--is-inside-work-tree"])
-  ).ok;
-  if (!hasWt) {
+  if (!(await isWorktreeRoot(root, integrationWorktreePath))) {
     await root.run(["worktree", "add", integrationWorktreePath, integrationBranch]);
   }
 
