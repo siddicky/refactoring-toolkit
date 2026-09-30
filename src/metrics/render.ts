@@ -28,16 +28,18 @@ import {
 } from "./dispatch-anchor.js";
 import {
   fileFromIdentity,
+  isFiredKill,
   isModelCallingRole,
   type CitationCheckResult,
   type EnvelopeEvent,
   type EnvelopeRole,
   type Finding,
   type JevUsageEntry,
-  type KillEvent,
+  type KillEventDiagnostics,
   type KillEventsFile,
   type QueueBurnDownEvent,
   type QueueKind,
+  type ReportKillEvent,
   type TokenUsage,
   type TscRunAccounting,
   type VerdictRecord,
@@ -70,6 +72,8 @@ export interface MetricsRenderInput {
   jevUsage?: readonly JevUsageEntry[];
   /** Merged kill-events.json sidecar; null/undefined when the run had no kill. */
   killEvents?: KillEventsFile | null;
+  /** Sidecar read diagnostics (malformed lines, other-run exclusions) from kill-events.ts. */
+  killEventDiagnostics?: KillEventDiagnostics | null;
   /**
    * dexcli history JSON (`flow history -output json`). When present the Phase 5
    * typed dispatch anchoring runs as part of the AC2 cross-check and its
@@ -207,6 +211,8 @@ export interface ReportJson {
     }>;
   }>;
   kill_events: KillEventsFile | null;
+  /** Malformed sidecar lines / events excluded as another run's; null = clean or no sidecar. */
+  kill_event_diagnostics: KillEventDiagnostics | null;
   /** Present only when `history` was supplied to the renderer. */
   dispatch_anchor: DispatchAnchorSummary | null;
 }
@@ -695,6 +701,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     fixer_retries: fixerRetries,
     queue_burn_down: burnDownJson,
     kill_events: input.killEvents ?? null,
+    kill_event_diagnostics: input.killEventDiagnostics ?? null,
     dispatch_anchor: cross === null ? null : summarizeAnchor(cross.anchor),
   };
 }
@@ -719,12 +726,14 @@ function costCell(costUsd: number | null, estimated: boolean): string {
   return costUsd > 0 ? `${estimated ? "~" : ""}$${costUsd.toFixed(4)}` : "~$0";
 }
 
-function killEventLine(e: KillEvent): string {
+function killEventLine(e: ReportKillEvent): string {
   if (e.kind === "kill-intent") {
     return `- kill-intent run=${e.run_id} utc=${e.utc} monotonic_ms=${e.monotonic_ms} target_pids=${e.target_pids.join(",")}`;
   }
   const note = e.note === null ? "" : ` note=${mdCell(e.note)}`;
-  return `- kill-completed run=${e.run_id} utc=${e.utc} monotonic_ms=${e.monotonic_ms} resumed=${e.resumed}${note}`;
+  const killed = e.killed_pids === undefined ? "" : ` killed_pids=${e.killed_pids.join(",")}`;
+  const noop = isFiredKill(e) ? "" : " NO-OP (nothing was killed; not a kill-and-resume)";
+  return `- kill-completed run=${e.run_id} utc=${e.utc} monotonic_ms=${e.monotonic_ms} resumed=${e.resumed}${killed}${noop}${note}`;
 }
 
 function renderMarkdown(report: ReportJson): string {
@@ -955,6 +964,24 @@ function renderMarkdown(report: ReportJson): string {
     lines.push("_none recorded_");
   } else {
     for (const event of report.kill_events.events) lines.push(killEventLine(event));
+    const completions = report.kill_events.events.filter((e) => e.kind === "kill-completed");
+    if (completions.length > 0) {
+      const fired = completions.filter(isFiredKill).length;
+      lines.push(`- kills fired: ${fired}; no-op completions: ${completions.length - fired}`);
+    }
+  }
+  const diag = report.kill_event_diagnostics;
+  if (diag !== null) {
+    if (diag.malformed_lines > 0) {
+      lines.push(
+        `- sidecar: ${diag.malformed_lines} malformed line(s) NOT counted as kill events (${diag.malformed_examples.map(mdCell).join("; ")})`,
+      );
+    }
+    if (diag.excluded_events > 0) {
+      lines.push(
+        `- sidecar: ${diag.excluded_events} event(s) excluded — anchored to a different run than this flow`,
+      );
+    }
   }
   lines.push("");
   lines.push(`- interrupted envelopes: ${report.summary.interrupted_envelope_count}`);

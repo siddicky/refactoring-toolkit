@@ -23,7 +23,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -34,12 +34,11 @@ import {
   collectVerdicts,
   type StateAttribute,
 } from "../src/metrics/collect.js";
+import { loadKillEvents, withResumed } from "../src/metrics/kill-events.js";
 import { renderReport } from "../src/metrics/render.js";
 import type {
   EnvelopeEvent,
   JevUsageEntry,
-  KillEvent,
-  KillEventsFile,
   QueueBurnDownEvent,
   VerdictRecord,
   VerdictTombstone,
@@ -51,16 +50,6 @@ interface FlowState {
   runId?: string;
   flowStatus?: string;
   attributes?: StateAttribute[];
-}
-
-interface SidecarLine {
-  kind: "intent" | "completed";
-  run_id: string;
-  utc: string;
-  monotonic_ms: number;
-  target_pids?: number[];
-  killed_pids?: number[];
-  notes?: string;
 }
 
 function argValue(flag: string): string | undefined {
@@ -106,46 +95,16 @@ function mergedHistory(flowId: string): DispatchHistory {
   };
 }
 
-/** Sidecar JSONL (kind "intent"/"completed") → renderer KillEventsFile. */
-function collectKillEvents(path: string | undefined, runId: string, flowCompleted: boolean): KillEventsFile | null {
-  if (path === undefined || !existsSync(path)) return null;
-  const events: KillEvent[] = [];
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    if (line.trim() === "") continue;
-    let raw: SidecarLine;
-    try {
-      raw = JSON.parse(line) as SidecarLine;
-    } catch {
-      continue;
-    }
-    if (raw.kind === "intent") {
-      events.push({
-        kind: "kill-intent",
-        run_id: raw.run_id,
-        utc: raw.utc,
-        monotonic_ms: raw.monotonic_ms,
-        target_pids: raw.target_pids ?? [],
-      });
-    } else if (raw.kind === "completed") {
-      events.push({
-        kind: "kill-completed",
-        run_id: raw.run_id,
-        utc: raw.utc,
-        monotonic_ms: raw.monotonic_ms,
-        // "resumed" is a post-kill fact this driver supplies from the flow's
-        // terminal status (kill + completed terminal path = resumed).
-        resumed: flowCompleted,
-        note: raw.notes ?? null,
-      });
-    }
-  }
-  return events.length > 0 ? { run_id: runId, events } : null;
-}
-
 async function main(): Promise<number> {
   const flowId = argValue("--flow-id");
   if (flowId === undefined) {
-    console.error("usage: render-metrics.ts --flow-id <id> [--kill-events <jsonl>] [--out-dir metrics] [--generated-at <iso>]");
+    console.error("usage: render-metrics.ts --flow-id <id> [--kill-events|--events <jsonl>] [--all-runs] [--out-dir metrics] [--generated-at <iso>]");
+    return 2;
+  }
+  // `--events` is the flag name chaos-kill / watch-queue-verify use.
+  const killEventsPath = argValue("--kill-events") ?? argValue("--events");
+  if (killEventsPath !== undefined && !existsSync(killEventsPath)) {
+    console.error(`[render-metrics] kill-events sidecar not found: ${killEventsPath}`);
     return 2;
   }
   const outDir = argValue("--out-dir") ?? "metrics";
@@ -210,7 +169,18 @@ async function main(): Promise<number> {
     const h = runDexcli(["flow", "history", id, "-all"]) as DispatchHistory;
     history.events.push(...(h.events ?? []));
   }
-  const killEvents = collectKillEvents(argValue("--kill-events"), runId, flowCompleted);
+  // Contract B: one sidecar parser; only this flow's kills (run id, flow id)
+  // are attributed to it; malformed lines are reported, not dropped.
+  const runIds = [...new Set([runId, flowId])];
+  const loaded = loadKillEvents({
+    explicitPath: killEventsPath,
+    matchIds: runIds,
+    allRuns: process.argv.includes("--all-runs"),
+    runId,
+  });
+  // "resumed" is a post-kill fact this driver supplies from the flow's
+  // terminal status (kill + completed terminal path = resumed).
+  const killEvents = withResumed(loaded.file, () => flowCompleted);
 
   const report = renderReport({
     envelopes,
@@ -219,6 +189,7 @@ async function main(): Promise<number> {
     burnDown,
     jevUsage,
     ...(killEvents !== null ? { killEvents } : {}),
+    killEventDiagnostics: loaded.diagnostics,
     history,
     generatedAt,
   });

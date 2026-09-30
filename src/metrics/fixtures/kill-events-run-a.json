@@ -14,7 +14,9 @@
       "utc": "2026-09-25T10:29:55.420Z",
       "monotonic_ms": 41620,
       "resumed": true,
-      "note": "all targets exited after SIGKILL (reason=mid-review-kill); run resumed and completed"
+      "note": "all targets exited after SIGKILL (reason=mid-review-kill); run resumed and completed",
+      "killed_pids": [41873],
+      "fired": true
     }
   ]
 }

@@ -14,9 +14,11 @@
  *   findings array is a completed clean review, distinct from a missing record.
  * - Severity classes are a single enum (this file is the Phase 1 verdict schema
  *   carrier for the toolkit's own code), shared by prompts and fixtures.
- * - Kill events mirror the chaos sidecar: an intent record (run id, UTC +
- *   monotonic, target PIDs) written BEFORE SIGKILL and a completion record
- *   appended AFTER. Cross-process ordering assertions use UTC only.
+ * - Kill events are the renderer's normalized view of the chaos sidecar
+ *   (`metrics/kill-events.jsonl`, parsed by ./kill-events.ts): an intent record
+ *   (run id, UTC + monotonic, target PIDs) written BEFORE SIGKILL and a
+ *   completion record appended AFTER. Cross-process ordering assertions use
+ *   UTC only.
  */
 
 /** Terminal/interim outcome of one envelope-wrapped step execution. */
@@ -513,11 +515,13 @@ export interface QueueBurnDownEvent {
 }
 
 /**
- * Chaos-sidecar event: kill intent written BEFORE SIGKILL (so the evidence
- * chain cannot be orphaned by a killer-side crash) and the completion record
- * appended AFTER. `monotonic_ms` is compared only within a single process.
+ * Normalized kill event as the renderer consumes it (distinct from the raw
+ * sidecar line type in scripts/chaos-kill.ts): kill intent written BEFORE
+ * the signal (so the evidence chain cannot be orphaned by a killer-side
+ * crash) and the completion record appended AFTER. `monotonic_ms` is compared
+ * only within a single process.
  */
-export type KillEvent =
+export type ReportKillEvent =
   | {
       kind: "kill-intent";
       run_id: string;
@@ -532,10 +536,45 @@ export type KillEvent =
       monotonic_ms: number;
       resumed: boolean;
       note: string | null;
+      /** PIDs the sidecar recorded as actually killed; absent on legacy records. */
+      killed_pids?: number[];
+      /**
+       * false = the completion killed nothing (`killed_pids` empty): a NO-OP,
+       * never a successful kill-and-resume. Absent = legacy record; derived
+       * from `killed_pids` when present (see kill-events.ts).
+       */
+      fired?: boolean;
     };
 
-/** Parsed shape of the run's kill-events.json sidecar file. */
+/** Normalized kill events of one run (what `MetricsRenderInput.killEvents` takes). */
 export interface KillEventsFile {
   run_id: string;
-  events: KillEvent[];
+  events: ReportKillEvent[];
+}
+
+/**
+ * Sidecar read diagnostics surfaced in the report: malformed lines are
+ * counted and shown (never silently dropped) and events anchored to another
+ * run are counted as excluded.
+ */
+export interface KillEventDiagnostics {
+  malformed_lines: number;
+  /** First few `line N: reason` strings. */
+  malformed_examples: string[];
+  /** Valid events dropped because they are anchored to a different run. */
+  excluded_events: number;
+}
+
+
+/**
+ * True when a normalized completion actually killed something. An explicit
+ * `fired` wins; otherwise it is derived from `killed_pids`; a legacy record
+ * with neither is treated as fired (nothing says it was a no-op). Intents are
+ * never "fired".
+ */
+export function isFiredKill(event: ReportKillEvent): boolean {
+  if (event.kind !== "kill-completed") return false;
+  if (typeof event.fired === "boolean") return event.fired;
+  if (event.killed_pids !== undefined) return event.killed_pids.length > 0;
+  return true;
 }
