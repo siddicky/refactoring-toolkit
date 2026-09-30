@@ -416,18 +416,33 @@ function render(st) {
   renderSources(st);
 }
 
+// One request in flight at a time (chained timeout, not setInterval), and a
+// snapshot older than the one already rendered is dropped, so a slow response
+// can never overlap or overwrite a newer one.
+let inFlight = false;
+let newestGeneratedMs = 0;
+
 async function poll() {
+  if (inFlight) return;
+  inFlight = true;
   try {
     const res = await fetch("/api/state", { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    render(await res.json());
+    const st = await res.json();
+    const generatedMs = Date.parse(st.generatedAt);
+    if (isNaN(generatedMs) || generatedMs >= newestGeneratedMs) {
+      if (!isNaN(generatedMs)) newestGeneratedMs = generatedMs;
+      render(st);
+    }
   } catch (e) {
     chip("chip-api", false, String(e));
     $("pollinfo").textContent = "";
+  } finally {
+    inFlight = false;
+    setTimeout(poll, POLL_MS);
   }
 }
 poll();
-setInterval(poll, POLL_MS);
 </script>
 </body>
 </html>

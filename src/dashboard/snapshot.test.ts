@@ -5,10 +5,10 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { configFromEnv, type StatusConfig } from "./config.js";
+import { CLIENT_POLL_MS, configFromEnv, type StatusConfig } from "./config.js";
 import { selectFlows } from "./flow-select.js";
 import { ok, type DexQueries, type GitQueries } from "./queries.js";
-import { createSnapshotter } from "./snapshot.js";
+import { HISTORY_TTL_MS, SEARCH_TTL_MS, STATE_TTL_MS, createSnapshotter } from "./snapshot.js";
 import { sortFlowsNewestFirst } from "./state.js";
 import type { DexFlowSummaryWire, DexHistoryWire, DexStateWire } from "./types.js";
 
@@ -232,6 +232,100 @@ describe("createSnapshotter (C51): parent headline/queue/leases survive a wave o
     const state = await createSnapshotter({ cfg: config(), dex, git: fakeGit })();
     expect(state.sources.dex).toMatchObject({ available: false, error: "connect ECONNREFUSED" });
     expect(state.flows).toEqual([]);
+  });
+
+  test("C58: concurrent snapshots share ONE in-flight query per source (no spawn storm)", async () => {
+    const flows = [parent("cx-5"), parent("cx-6", 100)];
+    const { dex, calls } = fakeDex(flows, { "cx-5": PARENT_STATE });
+    // Make every query slow enough that all three requests overlap.
+    const slow: DexQueries = {
+      async searchFlows() {
+        await Bun.sleep(15);
+        return dex.searchFlows();
+      },
+      async flowState(id) {
+        await Bun.sleep(15);
+        return dex.flowState(id);
+      },
+      async flowHistory(id) {
+        await Bun.sleep(15);
+        return dex.flowHistory(id);
+      },
+    };
+    const snapshot = createSnapshotter({ cfg: config(), dex: slow, git: fakeGit });
+    await Promise.all([snapshot(), snapshot(), snapshot()]);
+    expect(calls.search).toBe(1);
+    expect(calls.state.slice().sort()).toEqual(["cx-5", "cx-6"]); // 1 per flow, not 3
+    expect(calls.history.slice().sort()).toEqual(["cx-5", "cx-6"]);
+  });
+
+  test("C58: searchFlows, state and history are cached for a polling client (TTL >= poll interval)", async () => {
+    const { dex, calls } = fakeDex([parent("cx-5")], { "cx-5": PARENT_STATE });
+    let clock = T0;
+    const snapshot = createSnapshotter({ cfg: config(), dex, git: fakeGit, now: () => new Date(clock) });
+    await snapshot();
+    clock += CLIENT_POLL_MS; // the next poll of a single client, one interval later
+    await snapshot();
+    expect(calls.search).toBe(1);
+    expect(calls.state).toEqual(["cx-5"]);
+    expect(calls.history).toEqual(["cx-5"]);
+    clock += 10_000; // well past every TTL
+    await snapshot();
+    expect(calls.search).toBe(2);
+    expect(calls.state).toEqual(["cx-5", "cx-5"]);
+    expect(calls.history).toEqual(["cx-5", "cx-5"]);
+  });
+
+  test("C58: the cache TTLs are not shorter than the client poll interval", () => {
+    expect(STATE_TTL_MS).toBeGreaterThanOrEqual(CLIENT_POLL_MS);
+    expect(SEARCH_TTL_MS).toBeGreaterThanOrEqual(CLIENT_POLL_MS);
+    expect(HISTORY_TTL_MS).toBeGreaterThanOrEqual(CLIENT_POLL_MS);
+  });
+
+  test("C58: state and history are fetched in one round (history starts before state resolves)", async () => {
+    const { dex: base, calls } = fakeDex([parent("cx-5")], { "cx-5": PARENT_STATE });
+    let releaseState: () => void = () => {};
+    const stateGate = new Promise<void>((resolve) => {
+      releaseState = resolve;
+    });
+    const dex: DexQueries = {
+      searchFlows: () => base.searchFlows(),
+      async flowState(id) {
+        await stateGate;
+        return base.flowState(id);
+      },
+      flowHistory: (id) => base.flowHistory(id),
+    };
+    const pending = createSnapshotter({ cfg: config(), dex, git: fakeGit })();
+    await Bun.sleep(10);
+    // State is still blocked, yet history was already requested (no serial rounds).
+    expect(calls.history).toEqual(["cx-5"]);
+    releaseState();
+    await pending;
+  });
+
+  test("C58: cache entries of flows that left the selection are evicted", async () => {
+    const first = [parent("cx-5"), parent("cx-6", 100)];
+    let flows = first;
+    const dex: DexQueries = {
+      async searchFlows() {
+        return ok({ flows });
+      },
+      async flowState() {
+        return ok({ activeStepExecutions: [], attributes: [] });
+      },
+      async flowHistory(flowId) {
+        return ok({ flowId, runId: "r", events: [] });
+      },
+    };
+    let clock = T0;
+    const snapshot = createSnapshotter({ cfg: config(), dex, git: fakeGit, now: () => new Date(clock) });
+    await snapshot();
+    expect(snapshot.cacheSizes()).toEqual({ state: 2, history: 2 });
+    flows = [parent("cx-6", 100)]; // cx-5 is gone from dex
+    clock += 10_000; // search cache expired
+    await snapshot();
+    expect(snapshot.cacheSizes()).toEqual({ state: 1, history: 1 });
   });
 
   test("STATUS_MAX_FLOWS / STATUS_MAX_CHILD_FLOWS from the environment bound the drill-down", async () => {

@@ -6,6 +6,12 @@
 
 import { DEFAULT_MAX_CHILD_FLOWS, DEFAULT_MAX_FLOWS } from "./flow-select.js";
 
+/**
+ * The page's poll interval (POLL_MS in static/index.html; asserted equal by
+ * tests). Server-side cache TTLs must not be shorter than this.
+ */
+export const CLIENT_POLL_MS = 2_000;
+
 export interface StatusConfig {
   port: number;
   host: string;

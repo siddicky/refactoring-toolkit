@@ -208,6 +208,89 @@ describe("headline styling (C54)", () => {
   });
 });
 
+describe("polling discipline (C58)", () => {
+  const emptyState = (generatedAt: string) => ({
+    generatedAt,
+    headline: "",
+    headlineState: "none",
+    headlineDegraded: false,
+    sources: {
+      dex: { available: true, error: null, detail: "" },
+      git: { available: true, error: null, repoRoot: "/r" },
+      killEvents: { available: true, error: null, filesScanned: [] },
+    },
+    flows: [],
+    grid: [],
+    queueSummaries: [],
+    feed: [],
+    burnDown: [],
+    commits: [],
+    worktrees: [],
+    killTimeline: [],
+    agentUsage: [],
+    degradedRounds: [],
+  });
+
+  function pollingPage() {
+    const pending: Array<(state: unknown) => void> = [];
+    const fetchStub = () =>
+      new Promise((resolve) => {
+        pending.push((state) => resolve({ ok: true, json: async () => state }));
+      });
+    const page = loadPage({ fetch: fetchStub });
+    return { page, pending };
+  }
+  const flush = () => Bun.sleep(2);
+
+  test("never has two requests in flight (a slow response is not overlapped by the next poll)", async () => {
+    const { page, pending } = pollingPage();
+    expect(pending).toHaveLength(1); // the load-time poll
+    void page.api.poll(); // e.g. a manual call or a stray timer while the first is slow
+    await flush();
+    expect(pending).toHaveLength(1);
+    pending[0]?.(emptyState("2026-09-28T10:00:00.000Z"));
+    await flush();
+    expect(page.timers).toHaveLength(1); // exactly one follow-up scheduled
+  });
+
+  test("polls with a chained timeout at the poll interval, not setInterval", async () => {
+    const { page, pending } = pollingPage();
+    pending[0]?.(emptyState("2026-09-28T10:00:00.000Z"));
+    await flush();
+    expect(page.timers[0]?.ms).toBe(2000);
+    expect(/setInterval\s*\(/.test(page.script)).toBe(false);
+    // the timer fires the next poll, which starts a NEW request
+    page.timers[0]?.fn();
+    await flush();
+    expect(pending).toHaveLength(2);
+  });
+
+  test("a snapshot older than the one already rendered is dropped", async () => {
+    const { page, pending } = pollingPage();
+    pending[0]?.(emptyState("2026-09-28T10:00:10.000Z"));
+    await flush();
+    expect(page.el("generated").textContent).toContain("10:00:10");
+    page.timers[0]?.fn();
+    await flush();
+    pending[1]?.(emptyState("2026-09-28T10:00:04.000Z")); // a stale response arriving late
+    await flush();
+    expect(page.el("generated").textContent).toContain("10:00:10");
+    expect(page.el("generated").textContent).not.toContain("10:00:04");
+  });
+
+  test("the page poll interval matches the server cache contract", () => {
+    const page = loadPage();
+    expect(/const POLL_MS = (\d+);/.exec(page.script)?.[1]).toBe("2000");
+  });
+
+  test("a failed poll keeps polling (the next timeout is still scheduled)", async () => {
+    const page = loadPage({ fetch: () => Promise.reject(new Error("offline")) });
+    await flush();
+    expect(page.timers).toHaveLength(1);
+    expect(page.el("chip-api").classes()).toContain("down");
+  });
+});
+
 describe("flows table stream mode (C57)", () => {
   const flow = (over: Record<string, unknown>) => ({
     flowId: "cx-5",

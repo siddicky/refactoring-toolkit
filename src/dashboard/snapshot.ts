@@ -4,9 +4,18 @@
  * pure aggregator (state.ts). Extracted from scripts/serve-status.ts so the
  * selection and caching behaviour is testable with DexQueries/GitQueries
  * doubles, without starting a server or spawning dexcli.
+ *
+ * Fan-out discipline (each snapshot can otherwise spawn ~2 dexcli processes
+ * per selected flow plus a search and several git calls):
+ * - every source is cached by TTL AND by its in-flight promise, so concurrent
+ *   /api/state requests share one query instead of each spawning their own;
+ * - TTLs are not shorter than the client's poll interval, so a single polling
+ *   client actually hits the caches;
+ * - per-flow state and history are fetched in ONE parallel round;
+ * - cache entries for flows that left the selection are evicted.
  */
 
-import type { StatusConfig } from "./config.js";
+import { CLIENT_POLL_MS, type StatusConfig } from "./config.js";
 import { flowOfInterest, selectFlows } from "./flow-select.js";
 import {
   readBurnDownSources,
@@ -25,27 +34,51 @@ import type {
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
-// TTL caches (spawn cost + dex load; poll cadence is client-side 2s)
+// Caches (spawn cost + dex load)
 // ---------------------------------------------------------------------------
 
-class TtlCache<T> {
+/**
+ * TTL cache that also memoises the IN-FLIGHT load: concurrent callers that
+ * arrive while a load is running await the same promise instead of starting
+ * their own (a resolved-value-only cache lets every concurrent request miss).
+ */
+export class AsyncTtlCache<T> {
   readonly #ttlMs: number;
-  #value: T | null = null;
-  #at = 0;
-  constructor(ttlMs: number) {
+  readonly #clock: () => number;
+  #value: { value: T; at: number } | null = null;
+  #inflight: Promise<T> | null = null;
+
+  constructor(ttlMs: number, clock: () => number = Date.now) {
     this.#ttlMs = ttlMs;
+    this.#clock = clock;
   }
-  get(): T | null {
-    return this.#value !== null && Date.now() - this.#at <= this.#ttlMs ? this.#value : null;
-  }
-  set(value: T): void {
-    this.#value = value;
-    this.#at = Date.now();
+
+  get(load: () => Promise<T>): Promise<T> {
+    if (this.#value !== null && this.#clock() - this.#value.at <= this.#ttlMs) {
+      return Promise.resolve(this.#value.value);
+    }
+    if (this.#inflight !== null) return this.#inflight;
+    const started = this.#clock();
+    const promise = load().then(
+      (value) => {
+        this.#value = { value, at: started };
+        this.#inflight = null;
+        return value;
+      },
+      (error: unknown) => {
+        this.#inflight = null;
+        throw error;
+      },
+    );
+    this.#inflight = promise;
+    return promise;
   }
 }
 
-const STATE_TTL_MS = 1_500;
-const HISTORY_TTL_MS = 4_000;
+/** Not shorter than the client poll interval (a shorter TTL never hits for one client). */
+export const STATE_TTL_MS = CLIENT_POLL_MS + 500;
+export const SEARCH_TTL_MS = CLIENT_POLL_MS + 500;
+export const HISTORY_TTL_MS = 4_000;
 const GIT_TTL_MS = 3_000;
 const FILES_TTL_MS = 3_000;
 
@@ -55,55 +88,51 @@ export interface SnapshotOptions {
   git: GitQueries;
   /** Resolved per snapshot: the stream subscriber comes up asynchronously. */
   getStream?: () => EnvelopeStreamSubscriber | null;
-  /** Clock seam for tests. */
+  /** Clock seam for tests (generatedAt and every cache TTL). */
   now?: () => Date;
 }
 
-export type Snapshotter = () => Promise<DashboardStateView>;
+export interface Snapshotter {
+  (): Promise<DashboardStateView>;
+  /** Number of cached per-flow entries (eviction is observable in tests). */
+  cacheSizes(): { state: number; history: number };
+}
 
 export function createSnapshotter(options: SnapshotOptions): Snapshotter {
   const { cfg, dex, git } = options;
   const getStream = options.getStream ?? (() => null);
   const now = options.now ?? (() => new Date());
+  const clock = () => now().getTime();
 
-  const stateCacheByFlow = new Map<string, TtlCache<Awaited<ReturnType<DexQueries["flowState"]>>>>();
-  const historyCacheByFlow = new Map<string, TtlCache<Awaited<ReturnType<DexQueries["flowHistory"]>>>>();
-  const gitCache = new TtlCache<{
+  const searchCache = new AsyncTtlCache<Awaited<ReturnType<DexQueries["searchFlows"]>>>(SEARCH_TTL_MS, clock);
+  const stateCacheByFlow = new Map<string, AsyncTtlCache<Awaited<ReturnType<DexQueries["flowState"]>>>>();
+  const historyCacheByFlow = new Map<string, AsyncTtlCache<Awaited<ReturnType<DexQueries["flowHistory"]>>>>();
+  const gitCache = new AsyncTtlCache<{
     commits: Awaited<ReturnType<GitQueries["logAll"]>>;
     worktrees: Awaited<ReturnType<GitQueries["worktrees"]>>;
-  }>(GIT_TTL_MS);
-  const killCache = new TtlCache<Awaited<ReturnType<typeof readKillEventSources>>>(FILES_TTL_MS);
-  const burnCache = new TtlCache<Awaited<ReturnType<typeof readBurnDownSources>>>(FILES_TTL_MS);
+  }>(GIT_TTL_MS, clock);
+  const killCache = new AsyncTtlCache<Awaited<ReturnType<typeof readKillEventSources>>>(FILES_TTL_MS, clock);
+  const burnCache = new AsyncTtlCache<Awaited<ReturnType<typeof readBurnDownSources>>>(FILES_TTL_MS, clock);
 
-  function flowStateCached(flowId: string) {
-    let cache = stateCacheByFlow.get(flowId);
+  function cacheFor<V>(map: Map<string, AsyncTtlCache<V>>, flowId: string, ttlMs: number): AsyncTtlCache<V> {
+    let cache = map.get(flowId);
     if (cache === undefined) {
-      cache = new TtlCache(STATE_TTL_MS);
-      stateCacheByFlow.set(flowId, cache);
+      cache = new AsyncTtlCache<V>(ttlMs, clock);
+      map.set(flowId, cache);
     }
-    const fresh = cache.get();
-    if (fresh !== null) return fresh;
-    const promise = dex.flowState(flowId);
-    void promise.then((res) => cache?.set(res)).catch(() => {});
-    return promise;
+    return cache;
   }
 
-  function flowHistoryCached(flowId: string) {
-    let cache = historyCacheByFlow.get(flowId);
-    if (cache === undefined) {
-      cache = new TtlCache(HISTORY_TTL_MS);
-      historyCacheByFlow.set(flowId, cache);
+  /** Drops cache entries for flows that left the selection (no unbounded growth). */
+  function evictUnselected(selectedIds: ReadonlySet<string>): void {
+    for (const map of [stateCacheByFlow, historyCacheByFlow]) {
+      for (const flowId of [...map.keys()]) if (!selectedIds.has(flowId)) map.delete(flowId);
     }
-    const fresh = cache.get();
-    if (fresh !== null) return fresh;
-    const promise = dex.flowHistory(flowId);
-    void promise.then((res) => cache?.set(res)).catch(() => {});
-    return promise;
   }
 
-  return async function snapshot(): Promise<DashboardStateView> {
+  const snapshot = async function snapshot(): Promise<DashboardStateView> {
     const stream = getStream();
-    const search = await dex.searchFlows();
+    const search = await searchCache.get(() => dex.searchFlows());
     let flows: DexFlowSummaryWire[] = [];
     let dexError: string | null = null;
     if (search.ok) {
@@ -115,6 +144,7 @@ export function createSnapshotter(options: SnapshotOptions): Snapshotter {
     // Priority selection (parents first, children under their own cap); each
     // selected flow gets state + history queries.
     const selected = selectFlows(flows, { maxFlows: cfg.maxFlows, maxChildFlows: cfg.maxChildFlows });
+    evictUnselected(new Set(selected.map((f) => f.flowId)));
 
     // US-007: follow the selection with the stream subscriber; its buffered
     // events merge into the feed (projection-only; poll remains the fallback
@@ -124,12 +154,21 @@ export function createSnapshotter(options: SnapshotOptions): Snapshotter {
       ? selected.flatMap((f) => stream.recentEvents(f.flowId))
       : [];
 
-    const stateEntries = await Promise.all(
-      selected.map(async (f) => [f.flowId, await flowStateCached(f.flowId)] as const),
-    );
-    const historyEntries = await Promise.all(
-      selected.map(async (f) => [f.flowId, await flowHistoryCached(f.flowId)] as const),
-    );
+    // State and history for every selected flow in ONE parallel round.
+    const [stateEntries, historyEntries] = await Promise.all([
+      Promise.all(
+        selected.map(
+          async (f) =>
+            [f.flowId, await cacheFor(stateCacheByFlow, f.flowId, STATE_TTL_MS).get(() => dex.flowState(f.flowId))] as const,
+        ),
+      ),
+      Promise.all(
+        selected.map(
+          async (f) =>
+            [f.flowId, await cacheFor(historyCacheByFlow, f.flowId, HISTORY_TTL_MS).get(() => dex.flowHistory(f.flowId))] as const,
+        ),
+      ),
+    ]);
 
     // Records of unwrapped values (null when a query failed).
     const stateMap: Record<string, DexStateWire | null> = {};
@@ -141,24 +180,15 @@ export function createSnapshotter(options: SnapshotOptions): Snapshotter {
       historyMap[flowId] = res.ok ? res.value : null;
     }
 
-    let gitPair = gitCache.get();
-    if (gitPair === null) {
-      const commits = await git.logAll(cfg.repoRoot, 200);
-      const worktrees = await git.worktrees(cfg.repoRoot);
-      gitPair = { commits, worktrees };
-      gitCache.set(gitPair);
-    }
-
-    let killRes = killCache.get();
-    if (killRes === null) {
-      killRes = await readKillEventSources(cfg.killEventFiles);
-      killCache.set(killRes);
-    }
-    let burnRes = burnCache.get();
-    if (burnRes === null) {
-      burnRes = await readBurnDownSources(cfg.burnDownFiles);
-      burnCache.set(burnRes);
-    }
+    const [gitPair, killRes, burnRes] = await Promise.all([
+      gitCache.get(async () => {
+        const commits = await git.logAll(cfg.repoRoot, 200);
+        const worktrees = await git.worktrees(cfg.repoRoot);
+        return { commits, worktrees };
+      }),
+      killCache.get(() => readKillEventSources(cfg.killEventFiles)),
+      burnCache.get(() => readBurnDownSources(cfg.burnDownFiles)),
+    ]);
 
     const gitAvailable = gitPair.commits.ok || gitPair.worktrees.ok;
     const gitError = gitPair.commits.ok
@@ -201,4 +231,8 @@ export function createSnapshotter(options: SnapshotOptions): Snapshotter {
       commitLimit: cfg.commitLimit,
     });
   };
+
+  return Object.assign(snapshot, {
+    cacheSizes: () => ({ state: stateCacheByFlow.size, history: historyCacheByFlow.size }),
+  });
 }
