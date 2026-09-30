@@ -16,7 +16,7 @@
  *   past a keyed commit.
  */
 
-import { git, gitPredicate, type GitRunner } from "./exec.js";
+import { GitError, git, gitPredicate, type GitRunner, type TryRunResult } from "./exec.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -450,9 +450,11 @@ export async function makeCommitReachable(
   // Completed round: keyed commit authoritative; drop divergent replay state.
   await runner.run(["reset", "--hard"]);
   await runner.run(["clean", "-fd"]);
-  const ff = await runner.tryRun(["merge", "--ff-only", keyed.sha]);
+  const ffArgs = ["merge", "--ff-only", keyed.sha];
+  const ff = await runner.tryRun(ffArgs);
   if (ff.ok) return "fast-forward";
-  await runner.run(["merge", "--no-ff", "--no-edit", keyed.sha]);
+  throwIfInfraFailure(ffArgs, ff);
+  await mergeOrAbort(runner, ["--no-ff", "--no-edit", keyed.sha]);
   return "merge";
 }
 
@@ -480,6 +482,45 @@ export async function keyedCommitIntegrated(
  */
 async function refExists(runner: GitRunner, ref: string): Promise<boolean> {
   return gitPredicate(runner, ["rev-parse", "--verify", "--quiet", ref]);
+}
+
+/**
+ * For a tryRun whose plain non-zero exit is an expected outcome (e.g. a
+ * non-fast-forwardable `merge --ff-only`): a timeout or spawn failure is not
+ * that outcome and must surface instead of silently steering the caller down
+ * its fallback path.
+ */
+function throwIfInfraFailure(args: readonly string[], r: TryRunResult): void {
+  if ((r.timedOut || r.spawnError !== null) && r.failure !== null) {
+    throw new GitError(args, r.failure);
+  }
+}
+
+/**
+ * Runs `git merge <args>` and, when it fails (conflict, refusal, timeout),
+ * restores the worktree to a clean pre-merge state before rethrowing: `merge
+ * --abort`, falling back to `reset --merge` when git reports no merge to abort
+ * or the abort itself fails. Without this a conflict leaves MERGE_HEAD and
+ * unmerged paths behind, and every later merge in that worktree fails with
+ * "Merging is not possible because you have unmerged files".
+ */
+async function mergeOrAbort(runner: GitRunner, args: readonly string[]): Promise<void> {
+  try {
+    await runner.run(["merge", ...args]);
+  } catch (mergeErr) {
+    const abort = await runner.tryRun(["merge", "--abort"]);
+    if (!abort.ok) {
+      const reset = await runner.tryRun(["reset", "--merge"]);
+      if (!reset.ok) {
+        const base = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
+        throw new Error(
+          `${base}; additionally could not restore a clean worktree (merge --abort: ${abort.stderr.trim()}; reset --merge: ${reset.stderr.trim()})`,
+          { cause: mergeErr },
+        );
+      }
+    }
+    throw mergeErr;
+  }
 }
 
 /** `merge-base --is-ancestor`: exit 0 = yes, exit 1 = no; anything else throws. */
@@ -538,8 +579,10 @@ export interface IntegrationResult {
 /**
  * Durable integration step body: merges the lease branch into the single
  * `integration` branch — the one output project. One active file per lease
- * keeps merges conflict-free by construction (disjoint paths). Uses a
- * dedicated worktree so the main checkout is never disturbed.
+ * keeps merges conflict-free by construction (disjoint paths) - but nothing
+ * enforces disjointness, so a conflicting merge is aborted and rethrown,
+ * leaving the shared integration worktree clean. Uses a dedicated worktree so
+ * the main checkout is never disturbed.
  */
 export async function mergeLeaseIntoIntegration(
   repoRoot: string,
@@ -577,17 +620,18 @@ export async function mergeLeaseIntoIntegration(
   // re-round merges as a pure FAST-FORWARD; a genuinely divergent lease (its
   // branch has own commits while integration moved) falls back to --no-ff,
   // which is the only sanctioned merge-commit shape in the toolkit.
-  const headBefore = (await integ.run(["rev-parse", "HEAD"])).trim();
-  const ff = await integ.tryRun(["merge", "--ff-only", leaseBranch]);
+  const ffArgs = ["merge", "--ff-only", leaseBranch];
+  const ff = await integ.tryRun(ffArgs);
   if (ff.ok) {
     const sha = (await integ.run(["rev-parse", "HEAD"])).trim();
     return { alreadyIntegrated: false, fastForward: true, sha };
   }
-  await integ.run(["merge", "--no-ff", "--no-edit", leaseBranch]);
+  throwIfInfraFailure(ffArgs, ff);
+  // A conflicting merge is aborted (see mergeOrAbort) so the SHARED integration
+  // worktree is never left holding MERGE_HEAD / unmerged paths that would wedge
+  // the step retry and every later merge, including unrelated files.
+  await mergeOrAbort(integ, ["--no-ff", "--no-edit", leaseBranch]);
   const sha = (await integ.run(["rev-parse", "HEAD"])).trim();
-  if (sha === headBefore) {
-    throw new Error(`integration merge produced no change for ${leaseBranch}`);
-  }
   return { alreadyIntegrated: false, fastForward: false, sha };
 }
 
