@@ -183,7 +183,11 @@ export interface LeaseRecord {
   /** Lease branch name: `lease/<file>/<epoch>`. */
   branch: string;
   epoch: number;
-  /** SHA the lease branch was created from (used only when no keyed commit exists). */
+  /**
+   * SHA the lease worktree starts from: the lease branch tip at acquire, after
+   * an already-integrated branch was fast-forwarded to the integration tip
+   * (used only when no keyed commit exists).
+   */
   baseSha: string;
   /** Identity of the execution holding the lease (dex run ID). */
   holderExecutionId: string;
@@ -258,7 +262,6 @@ export class WorktreePool {
     epoch: number,
     holderExecutionId: string,
     now: () => Date = () => new Date(),
-    baseRef?: string | undefined,
   ): Promise<AcquireResult> {
     const existing = this.#store.get(file);
     if (existing !== undefined) {
@@ -284,12 +287,10 @@ export class WorktreePool {
     const branch = `lease/${safeFile}/${epoch}`;
     const worktreePath = `${this.#worktreeRoot}/${safeFile}-${epoch}`;
 
-    // M6: new lease branches base on the INTEGRATION tip when it exists (the
-    // one output project) so re-rounds of the same path fast-forward into
+    // M6: lease branches base on the INTEGRATION tip when it exists (the one
+    // output project) so re-rounds of the same path fast-forward into
     // integration; only a baseless first round falls back to HEAD.
-    const resolvedBase =
-      baseRef ??
-      ((await refExists(runner, "refs/heads/integration")) ? "integration" : "HEAD");
+    const resolvedBase = (await refExists(runner, "refs/heads/integration")) ? "integration" : "HEAD";
 
     const headSha = (await runner.run(["rev-parse", resolvedBase])).trim();
     // Create the lease branch at the resolved base if absent, then add the worktree.
@@ -302,7 +303,15 @@ export class WorktreePool {
     // directory used to become the lease and commits landed on the main branch.
     // Only a directory that IS a worktree root is reused; anything else goes to
     // `worktree add` (an empty directory is adopted, a non-empty one fails loudly).
-    if (!(await isWorktreeRoot(runner, worktreePath))) {
+    const registered = await isWorktreeRoot(runner, worktreePath);
+    if (branchExists) {
+      // The flow keeps ONE epoch across all rounds, so a re-round reuses the
+      // round-1 branch. When everything on it is already integrated, move it up
+      // to the integration tip so the round-2 merge is a fast-forward (M6); a
+      // branch holding unintegrated commits is never touched.
+      await fastForwardIntegratedBranch(runner, branch, headSha, registered ? worktreePath : undefined);
+    }
+    if (!registered) {
       await runner.run(["worktree", "add", worktreePath, branch]);
     }
 
@@ -311,7 +320,9 @@ export class WorktreePool {
       worktreePath,
       branch,
       epoch,
-      baseSha: headSha,
+      // The base the worktree really starts from (the branch tip), which is the
+      // integration tip only for a new or fast-forwarded branch.
+      baseSha: (await runner.run(["rev-parse", branch])).trim(),
       holderExecutionId,
       acquiredAtUtc: now().toISOString(),
     };
@@ -526,6 +537,30 @@ export async function keyedCommitIntegrated(
  */
 async function refExists(runner: GitRunner, ref: string): Promise<boolean> {
   return gitPredicate(runner, ["rev-parse", "--verify", "--quiet", ref]);
+}
+
+/**
+ * Moves an existing lease branch up to `base` when its tip is an ancestor of
+ * `base` (every commit on it is already integrated), so a same-epoch re-round
+ * starts on the integration tip. With a live worktree the branch is advanced
+ * inside it (`merge --ff-only`; refused, and so left alone, if local changes
+ * would be overwritten); without one via `branch -f`, which itself refuses a
+ * branch checked out elsewhere. A branch with commits not in `base` holds
+ * unintegrated work and is left exactly as it is.
+ */
+async function fastForwardIntegratedBranch(
+  runner: GitRunner,
+  branch: string,
+  base: string,
+  worktreePath: string | undefined,
+): Promise<void> {
+  const tip = (await runner.run(["rev-parse", branch])).trim();
+  if (tip === base) return;
+  if (!(await isAncestor(runner, tip, base))) return;
+  const args =
+    worktreePath !== undefined ? ["-C", worktreePath, "merge", "--ff-only", base] : ["branch", "-f", branch, base];
+  const moved = await runner.tryRun(args);
+  if (!moved.ok) throwIfInfraFailure(args, moved);
 }
 
 /**
