@@ -162,6 +162,49 @@ function phpMethod(source: string, name: string): string {
   return source.slice(start, next < 0 ? undefined : next);
 }
 
+describe("php-sample PHP tests agree with their sources (audit C67)", () => {
+  /** Short names a PHP file may use without an import: itself, plus the TestCase it extends is imported. */
+  function unimportedClassReferences(source: string): string[] {
+    const imported = new Set([...source.matchAll(/^use ([\w\\]+);$/gm)].map((m) => m[1]?.split("\\").pop() ?? ""));
+    const own = /^final class (\w+)/m.exec(source)?.[1];
+    if (own !== undefined) imported.add(own);
+    // `new Foo(` and `Foo::`; a leading backslash (\Foo) is a global class and needs no import.
+    const refs = [...source.matchAll(/(?<![\\\w$])(?:new )?([A-Z]\w*)(?:\(|::)/g)]
+      .map((m) => m[1] ?? "")
+      .filter((name) => !["self", "static", "parent"].includes(name.toLowerCase()));
+    return [...new Set(refs)].filter((name) => !imported.has(name)).sort();
+  }
+
+  for (const spec of SPECS) {
+    const testFiles = listFiles(join(spec.committed, "tests"));
+    for (const rel of testFiles) {
+      test(`${spec.name}/tests/${rel}: every class it instantiates or calls statically is imported`, () => {
+        const source = readFixture(spec, `tests/${rel}`);
+        expect(unimportedClassReferences(source)).toEqual([]);
+      });
+    }
+  }
+
+  test("PricingTest imports Money (three tests construct it)", () => {
+    const source = readFixture(PHP_SAMPLE, "tests/PricingTest.php");
+    expect(source).toContain("use Acme\\Billing\\Money;");
+    expect(source).toContain("new Money(");
+  });
+
+  test("InvoiceTest pins the invoice's own tags, not the product's", () => {
+    const body = phpMethod(readFixture(PHP_SAMPLE, "tests/InvoiceTest.php"), "testToArrayCarriesFormattedTotals");
+    expect(body).toContain("assertSame([], $row['tags'])");
+    expect(body).not.toContain("['hardware', 'sale']");
+  });
+
+  test("InvoiceTest has no PHP-version-dependent trailing-whitespace SKU assertion", () => {
+    const source = readFixture(PHP_SAMPLE, "tests/InvoiceTest.php");
+    // '9001' == '9001 ' is false on PHP 7 and true on PHP >= 8.0.
+    expect(source).not.toMatch(/quantityForSku\('[^']*\s'\)/);
+    expect(source).toContain("quantityForSku('9001.0')");
+  });
+});
+
 describe("creatorex PHP tests agree with their sources (audit C66)", () => {
   const entitlement = readFixture(CREATOREX, "tests/Access/EntitlementCheckerTest.php");
 

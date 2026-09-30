@@ -38,7 +38,7 @@ printed `DIGEST sha256` line.
 Current digests:
 
 ```
-php-sample:            76728d34a578a21d0b364ba5a5de1c603e61cff903750a055f22b050900196f9
+php-sample:            46720f113f7caec48719390f858f60cdf95281d065bd751bb0ac6626d6807bff
 creatorex-middleware:  461d9f9286fabb80aee3e274837eaa64f4899b815a44d4fbc07408dda91ace54
 ```
 
@@ -64,10 +64,10 @@ lines. (Total physical lines shown per file for reference.)
 | `src/InvoiceRepository.php` | 110 | 92 |
 | **src total (10 files)** | **777** | **636 (495 code)** |
 | `tests/MoneyTest.php` | 61 | 47 |
-| `tests/PricingTest.php` | 51 | 38 |
-| `tests/InvoiceTest.php` | 79 | 62 |
+| `tests/PricingTest.php` | 52 | 39 |
+| `tests/InvoiceTest.php` | 86 | 69 |
 | `tests/InvoiceRepositoryTest.php` | 97 | 74 |
-| **tests total (4 files)** | **288** | **221 (218 code)** |
+| **tests total (4 files)** | **296** | **229 (220 code)** |
 
 Per-file counts are also printed by the generator on every run.
 
@@ -118,6 +118,11 @@ round-trip loses the customer name; PHP `round()` is half away from zero
 - The PHP fixture is read-only input; no PHP toolchain runs anywhere in the
   pipeline. Expected TS output lives outside `fixtures/` (owned by the porting
   loop, not by this generator).
+- No PHP version is pinned because nothing executes the PHP. The tests avoid
+  assertions whose outcome changed between PHP 7 and 8: `'9001' == '9001 '` is
+  false before 8.0 and true from 8.0 (trailing whitespace became allowed in
+  numeric strings), so `InvoiceTest` pins `'9001.0'` (matches) and `'9001abc'`
+  (does not) instead.
 
 ---
 

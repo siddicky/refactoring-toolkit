@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Acme\Billing\Tests;
 
+use Acme\Billing\Money;
 use Acme\Billing\Product;
 use Acme\Billing\Pricing\FlatRateDiscount;
 use Acme\Billing\Pricing\PercentageDiscount;
