@@ -109,6 +109,13 @@ describe("mergedHistory: first + current run, one helper for parent and children
     expect(calls.some((c) => c.includes("run-2"))).toBe(false);
   });
 
+  test("a summary without run ids falls back to the default-run history instead of fetching nothing", () => {
+    const { run, calls } = fakeDex({ "history:f1:latest": { events: [ev("d1")] } });
+    const h = mergedHistory(flowFactsFromSummary("f1", {}), run);
+    expect(h.events.map((e) => e.eventId)).toEqual(["d1"]);
+    expect(calls).toEqual([["flow", "history", "f1", "-all"]]);
+  });
+
   test("a child is fetched through the same helper: summary first, then each of its runs", () => {
     const { run, calls } = fakeDex({
       "summary:child-1": { flowId: "child-1", runId: "c-run-2", firstRunId: "c-run-1" },

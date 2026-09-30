@@ -115,8 +115,15 @@ const runDexcli: DexRunner = (args) => {
  * covered. The parent and every child use this same helper.
  */
 export function mergedHistory(facts: FlowFacts, run: DexRunner = runDexcli): DispatchHistory {
-  const events = facts.runIds.flatMap((rid) => {
-    const h = run(["flow", "history", facts.flowId, "-run-id", rid, "-all"]) as DispatchHistory;
+  // A summary without run ids falls back to dexcli's default (latest) run
+  // instead of silently fetching nothing.
+  const runs: Array<string | undefined> = facts.runIds.length > 0 ? facts.runIds : [undefined];
+  const events = runs.flatMap((rid) => {
+    const args =
+      rid === undefined
+        ? ["flow", "history", facts.flowId, "-all"]
+        : ["flow", "history", facts.flowId, "-run-id", rid, "-all"];
+    const h = run(args) as DispatchHistory;
     return h.events ?? [];
   });
   return { flowId: facts.flowId, runId: facts.runId, events };

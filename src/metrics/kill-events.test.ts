@@ -269,7 +269,8 @@ describe("report rendering of kill evidence", () => {
       burnDown: [],
       killEventDiagnostics: { malformed_lines: 0, malformed_examples: [], excluded_events: 4 },
     });
-    expect(rendered.markdown).toContain("4 event(s) excluded — anchored to a different run than this flow");
+    expect(rendered.markdown).toContain("4 event(s) excluded — not anchored to this flow's run ids");
+    expect(rendered.markdown).toContain("--all-runs");
   });
 });
 

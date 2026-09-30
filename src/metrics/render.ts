@@ -1069,7 +1069,7 @@ function renderMarkdown(report: ReportJson): string {
     }
     if (diag.excluded_events > 0) {
       lines.push(
-        `- sidecar: ${diag.excluded_events} event(s) excluded — anchored to a different run than this flow`,
+        `- sidecar: ${diag.excluded_events} event(s) excluded — not anchored to this flow's run ids (another run's kill, or a legacy record without flow_run_id; pass --all-runs to include them)`,
       );
     }
   }
