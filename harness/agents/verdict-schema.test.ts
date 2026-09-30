@@ -4,8 +4,11 @@
  */
 
 import {
+  DISPOSITIONS,
   SEVERITIES,
+  dispositionList,
   isSeverity,
+  normalizeDisposition,
   isCompletedVerdictRecord,
   severityList,
   validateFinding,
@@ -23,13 +26,15 @@ function validRecord(): Record<string, unknown> {
       {
         finding_id: "F1",
         severity: "blocker",
+        description: "casts user.name to any, silencing strict mode",
         evidence_span: { start_line: 40, end_line: 42, snippet: "user.name as any" },
         disposition: "fix",
       },
       {
         finding_id: "F2",
         severity: "nit",
-        evidence_span: { start_line: 7, end_line: 7 },
+        description: "import order differs from the conventions",
+        evidence_span: { start_line: 7, end_line: 7, snippet: "import { b } from './b'" },
         disposition: "wontfix",
       },
     ],
@@ -57,6 +62,7 @@ runTestFile("verdict-schema", {
     assertTrue(result.ok, `expected ok, got ${JSON.stringify(result)}`);
     if (result.ok) {
       assertEquals(result.value.findings.length, 2);
+      assertEquals(result.value.findings[0]?.description, "casts user.name to any, silencing strict mode");
       assertEquals(result.value.citation_check[0], { finding_id: "F1", p_cited: 0.97 });
       assertEquals(result.value.file, "src/services/user-service.ts");
     }
@@ -99,22 +105,90 @@ runTestFile("verdict-schema", {
     }
   },
 
-  "rejects citations pointing at unknown findings, duplicates, bad p_cited": () => {
+  "citation_check is advisory: bad self-reports are dropped, never reject the verdict (C14)": () => {
     const unknownRef = validRecord();
     (unknownRef.citation_check as Record<string, unknown>[])[1]!.finding_id = "F999";
-    assertTrue(!validateVerdictRecord(unknownRef).ok, "unknown finding ref rejected");
+    const r1 = validateVerdictRecord(unknownRef);
+    assertTrue(r1.ok, "unknown finding ref tolerated");
+    if (r1.ok) assertEquals(r1.value.citation_check.map((c) => c.finding_id), ["F1"]);
 
     const dup = validRecord();
     (dup.citation_check as Record<string, unknown>[])[1]!.finding_id = "F1";
-    assertTrue(!validateVerdictRecord(dup).ok, "duplicate citation rejected");
+    const r2 = validateVerdictRecord(dup);
+    assertTrue(r2.ok, "duplicate citation tolerated");
+    if (r2.ok) assertEquals(r2.value.citation_check.length, 1);
 
     const outOfRange = validRecord();
     (outOfRange.citation_check as Record<string, unknown>[])[0]!.p_cited = 1.5;
-    assertTrue(!validateVerdictRecord(outOfRange).ok, "p_cited > 1 rejected");
+    const r3 = validateVerdictRecord(outOfRange);
+    assertTrue(r3.ok, "p_cited > 1 tolerated");
+    if (r3.ok) assertEquals(r3.value.citation_check.map((c) => c.finding_id), ["F2"]);
 
     const negative = validRecord();
     (negative.citation_check as Record<string, unknown>[])[0]!.p_cited = -0.1;
-    assertTrue(!validateVerdictRecord(negative).ok, "negative p_cited rejected");
+    assertTrue(validateVerdictRecord(negative).ok, "negative p_cited tolerated");
+
+    const absent = validRecord();
+    delete absent.citation_check;
+    const r4 = validateVerdictRecord(absent);
+    assertTrue(r4.ok, "missing citation_check tolerated");
+    if (r4.ok) assertEquals(r4.value.citation_check, []);
+
+    const notArray = { ...validRecord(), citation_check: "high" };
+    assertTrue(validateVerdictRecord(notArray).ok, "non-array citation_check tolerated");
+  },
+
+  "description and snippet are required on every finding (C12/C14)": () => {
+    const noDescription = validRecord();
+    delete (noDescription.findings as Record<string, unknown>[])[0]!.description;
+    const r1 = validateVerdictRecord(noDescription);
+    assertTrue(!r1.ok, "missing description rejected");
+    if (!r1.ok) assertTrue(r1.errors.join("; ").includes("description"), "error names description");
+
+    const blankDescription = validRecord();
+    (blankDescription.findings as Record<string, unknown>[])[0]!.description = "   ";
+    assertTrue(!validateVerdictRecord(blankDescription).ok, "blank description rejected");
+
+    const noSnippet = validRecord();
+    (noSnippet.findings as Record<string, unknown>[])[1]!.evidence_span = { start_line: 7, end_line: 7 };
+    const r2 = validateVerdictRecord(noSnippet);
+    assertTrue(!r2.ok, "missing snippet rejected");
+    if (!r2.ok) assertTrue(r2.errors.join("; ").includes("snippet"), "error names snippet");
+
+    const emptySnippet = validRecord();
+    (emptySnippet.findings as Record<string, unknown>[])[1]!.evidence_span = { start_line: 7, end_line: 7, snippet: "" };
+    assertTrue(!validateVerdictRecord(emptySnippet).ok, "empty snippet rejected");
+  },
+
+  "disposition is a closed enum with case/punctuation normalization (C14)": () => {
+    assertEquals([...DISPOSITIONS], ["fix", "wontfix"]);
+    assertEquals(dispositionList(), "fix | wontfix");
+    for (const [raw, expected] of [
+      ["fix", "fix"],
+      ["Fix", "fix"],
+      [" FIX ", "fix"],
+      ["wontfix", "wontfix"],
+      ["won't fix", "wontfix"],
+      ["wont_fix", "wontfix"],
+      ["WontFix", "wontfix"],
+    ] as const) {
+      assertEquals(normalizeDisposition(raw), expected, `"${raw}" -> ${expected}`);
+    }
+    for (const bad of ["accept", "will fix", "", "   ", "fix it", 1, null, undefined]) {
+      assertEquals(normalizeDisposition(bad), null, `${JSON.stringify(bad)} is not a disposition`);
+    }
+
+    const mixedCase = validRecord();
+    (mixedCase.findings as Record<string, unknown>[])[0]!.disposition = "Fix";
+    const r = validateVerdictRecord(mixedCase);
+    assertTrue(r.ok, "\"Fix\" validates");
+    if (r.ok) assertEquals(r.value.findings[0]?.disposition, "fix");
+
+    const unknown = validRecord();
+    (unknown.findings as Record<string, unknown>[])[0]!.disposition = "maybe later";
+    const r2 = validateVerdictRecord(unknown);
+    assertTrue(!r2.ok, "unknown disposition rejected");
+    if (!r2.ok) assertTrue(r2.errors.join("; ").includes("fix | wontfix"), "error lists the enum");
   },
 
   "rejects duplicate finding ids and bad evidence spans": () => {
@@ -149,7 +223,7 @@ runTestFile("verdict-schema", {
 
   "validateFinding reports all finding-level errors with a path": () => {
     const result = validateFinding(
-      { finding_id: "", severity: "mega", evidence_span: "nowhere", disposition: "" },
+      { finding_id: "", severity: "mega", description: "", evidence_span: "nowhere", disposition: "" },
       "findings[3]",
     );
     assertTrue(!result.ok, "bad finding rejected");
@@ -159,6 +233,7 @@ runTestFile("verdict-schema", {
       assertTrue(joined.includes("finding_id"), "reports finding_id");
       assertTrue(joined.includes("severity"), "reports severity");
       assertTrue(joined.includes("disposition"), "reports disposition");
+      assertTrue(joined.includes("description"), "reports description");
       assertTrue(joined.includes("evidence_span"), "reports evidence_span");
     }
   },

@@ -341,6 +341,7 @@ const HEALTHY_REPLY = JSON.stringify({
     {
       finding_id: "A1",
       severity: "major",
+      description: "add() does not guard against mixed currencies",
       evidence_span: { start_line: DIFF_HEADER_LINES + 8, end_line: DIFF_HEADER_LINES + 8, snippet: "add(other: Money): Money {" },
       disposition: "fix",
     },
@@ -353,6 +354,7 @@ function wallReply(tag: string): string {
   const findings = [1, 2, 3, 4, 5, 6].map((i) => ({
     finding_id: `${tag}${i}`,
     severity: "blocker",
+    description: `wall-of-blockers finding ${i}`,
     evidence_span: {
       // raw lines 7..11 = the first five body lines (raw 6 is the @@ header)
       start_line: DIFF_HEADER_LINES + 7 + (i % 5),
@@ -843,6 +845,7 @@ function healthyTuple(reviewer: string, round: number): ReviewTuple {
         {
           finding_id: `${reviewer === "reviewer-A" ? "A" : "B"}1`,
           severity: "major",
+          description: "add() does not guard against mixed currencies",
           evidence_span: { start_line: 13, end_line: 13, snippet: "add(other: Money): Money {" },
           disposition: "fix",
         },

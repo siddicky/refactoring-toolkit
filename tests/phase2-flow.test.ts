@@ -128,12 +128,14 @@ describe("verdict intake: validate + map onto metrics shapes", () => {
       {
         finding_id: "F1",
         severity: "blocker",
+        description: "add() drops the currency check, so mixed-currency sums silently succeed",
         evidence_span: { start_line: 9, end_line: 10, snippet: "add(other: Money): Money" },
         disposition: "fix",
       },
       {
         finding_id: "F2",
         severity: "nit",
+        description: "naming nit on a line that is not part of this diff",
         evidence_span: { start_line: 1, end_line: 1, snippet: "not in the diff at all" },
         disposition: "wontfix",
       },
@@ -151,7 +153,7 @@ describe("verdict intake: validate + map onto metrics shapes", () => {
       diffId: "diff-x-r2",
       parsedDiff: parsed,
       bodyLineOffset: DIFF_HEADER_LINES,
-      naiveCited: () => 0,
+      naiveCited: (f) => (f.finding_id === "F1" ? 1 : 0),
     });
     if (!mapped.ok) throw new Error(mapped.errors.join("; "));
     expect(mapped.record.file).toBe("src/Money.php");
@@ -162,11 +164,15 @@ describe("verdict intake: validate + map onto metrics shapes", () => {
     const f1 = mapped.record.findings.find((f) => f.finding_id === "F1");
     expect(f1?.evidence?.hunk_id).toBe("h1");
     expect(f1?.evidence?.quote).toBe("add(other: Money): Money");
-    expect(f1?.summary).toBe("fix");
-    // The model's honest self-assessment survives; F2 has no entry so it
-    // falls back to the naive check (0 — snippet not in the diff).
-    expect(mapped.record.citation_check.find((c) => c.finding_id === "F1")?.p_cited).toBe(0.9);
+    // C12: the summary is the reviewer's description, never the disposition.
+    expect(f1?.summary).toBe("add() drops the currency check, so mixed-currency sums silently succeed");
+    expect(f1?.summary).not.toBe("fix");
+    // C14: the mapped record carries the DETERMINISTIC citation check; the
+    // model's self-reported 0.9 is advisory (agentRecord only) and never shown
+    // as if the gate had computed it.
+    expect(mapped.record.citation_check.find((c) => c.finding_id === "F1")?.p_cited).toBe(1);
     expect(mapped.record.citation_check.find((c) => c.finding_id === "F2")?.p_cited).toBe(0);
+    expect(mapped.agentRecord.citation_check.find((c) => c.finding_id === "F1")?.p_cited).toBe(0.9);
   });
 
   test("structurally invalid verdicts are rejected with all errors", () => {

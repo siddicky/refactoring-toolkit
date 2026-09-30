@@ -65,6 +65,9 @@ export async function jevPrioritize(
         id: f.finding_id,
         severity: f.severity,
         summary: f.summary,
+        // The cited quote lets the judge tell a behavior-changing defect from
+        // a style preference (id + severity + a bare summary is not enough).
+        evidence: f.evidence?.quote ?? null,
       })),
     },
     questions,

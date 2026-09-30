@@ -16,6 +16,14 @@
  * Validation is hand-rolled (plain TS guards, NO zod) — zero runtime deps so
  * nothing fights worker-1's package.json.
  *
+ * Contract notes (audit C12/C14): every finding carries a REQUIRED
+ * `description` (what is wrong — the fixer and the Jev prioritizer read it),
+ * a REQUIRED verbatim `snippet` (the citation gate needs it), and a
+ * `disposition` from the closed {@link DISPOSITIONS} enum (normalized, so
+ * "Fix" and "won't fix" are accepted). `citation_check` is ADVISORY: the gate
+ * recomputes citations itself, so malformed self-reports are dropped instead
+ * of discarding the whole verdict.
+ *
  * NOTE: this module defines the CONTRACT only. Runtime probe tests for
  * reviewer tool isolation are owned by worker-1/lead (plan: effective
  * permissions tested after config + plugin merge).
@@ -47,32 +55,63 @@ export function severityList(): string {
 /**
  * Where in the reviewed diff the finding's evidence lives. Lines are 1-based
  * positions within the diff as delivered to the reviewer (by value).
- * `snippet` is optional quoted evidence; the citation check (TypeSafe noul)
- * verifies the cited evidence actually appears in the reviewed diff.
+ * `snippet` is REQUIRED quoted evidence: the citation check verifies the quote
+ * actually appears in the reviewed diff, and a span without a quote can never
+ * be cited (it would be dropped at the gate).
  */
 export interface EvidenceSpan {
   start_line: number;
   end_line: number;
-  snippet?: string;
+  snippet: string;
+}
+
+// ---------------------------------------------------------------------------
+// Disposition enum — closed, normalized on intake
+// ---------------------------------------------------------------------------
+
+export const DISPOSITIONS = ["fix", "wontfix"] as const;
+
+export type Disposition = (typeof DISPOSITIONS)[number];
+
+/** Canonical rendering for prompts ("fix | wontfix"). */
+export function dispositionList(): string {
+  return DISPOSITIONS.join(" | ");
+}
+
+/**
+ * Normalizes a model-written disposition: case-insensitive and punctuation
+ * tolerant ("Fix", " FIX ", "won't fix", "wont_fix" -> "wontfix"). Returns
+ * null for anything outside the closed enum.
+ */
+export function normalizeDisposition(value: unknown): Disposition | null {
+  if (typeof value !== "string") return null;
+  const folded = value.toLowerCase().replace(/[^a-z]/g, "");
+  return (DISPOSITIONS as readonly string[]).includes(folded) ? (folded as Disposition) : null;
 }
 
 export interface Finding {
   finding_id: string;
   severity: Severity;
+  /** What is wrong and why it matters (non-empty); becomes Finding.summary. */
+  description: string;
   evidence_span: EvidenceSpan;
-  /** What the fixer should do, e.g. "fix" | "wontfix". Free-form string. */
-  disposition: string;
+  /** What the fixer should do: "fix" applies the finding, "wontfix" skips it. */
+  disposition: Disposition;
 }
 
 export interface CitationCheck {
   finding_id: string;
-  /** Probability (0..1) that the cited evidence appears in the diff. */
+  /**
+   * The model's self-reported probability (0..1) that the cited evidence
+   * appears in the diff. ADVISORY ONLY: the gate recomputes citations.
+   */
   p_cited: number;
 }
 
 /**
  * One reviewer's completed verdict for one file-round. A record with
- * `findings: []` and `citation_check: []` is a COMPLETED clean review.
+ * `findings: []` is a COMPLETED clean review (`citation_check` is advisory
+ * and defaults to `[]` when absent).
  */
 export interface VerdictRecord {
   file: string;
@@ -110,9 +149,6 @@ export function validateVerdictRecord(value: unknown): ValidationResult<VerdictR
   if (!Array.isArray(value.findings)) {
     errors.push("findings: expected array");
   }
-  if (!Array.isArray(value.citation_check)) {
-    errors.push("citation_check: expected array");
-  }
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -135,31 +171,21 @@ export function validateVerdictRecord(value: unknown): ValidationResult<VerdictR
     findings.push(result.value);
   }
 
-  // Citation checks must reference known findings, no duplicates.
+  // citation_check is ADVISORY (the gate recomputes citations and never reads
+  // these values): keep only well-formed, non-duplicate entries that reference
+  // a known finding and silently drop the rest — a bad self-report must not
+  // discard an otherwise valid verdict.
   const citationChecks: CitationCheck[] = [];
   const citedIds = new Set<string>();
-  const citationArr = value.citation_check as unknown[];
-  for (let i = 0; i < citationArr.length; i++) {
-    const entry = citationArr[i];
-    const prefix = `citation_check[${i}]`;
-    if (!isRecord(entry)) {
-      errors.push(`${prefix}: expected an object`);
-      continue;
-    }
-    if (!isNonEmptyString(entry.finding_id)) {
-      errors.push(`${prefix}.finding_id: expected non-empty string`);
-      continue;
-    }
-    if (!isProbability(entry.p_cited)) {
-      errors.push(`${prefix}.p_cited: expected number in [0, 1]`);
-      continue;
-    }
-    if (!findingIds.has(entry.finding_id)) {
-      errors.push(`${prefix}.finding_id: "${entry.finding_id}" does not match any finding`);
-      continue;
-    }
-    if (citedIds.has(entry.finding_id)) {
-      errors.push(`${prefix}: duplicate citation for "${entry.finding_id}"`);
+  const citationArr = Array.isArray(value.citation_check) ? (value.citation_check as unknown[]) : [];
+  for (const entry of citationArr) {
+    if (
+      !isRecord(entry) ||
+      !isNonEmptyString(entry.finding_id) ||
+      !isProbability(entry.p_cited) ||
+      !findingIds.has(entry.finding_id) ||
+      citedIds.has(entry.finding_id)
+    ) {
       continue;
     }
     citedIds.add(entry.finding_id);
@@ -197,8 +223,12 @@ export function validateFinding(
   if (!isSeverity(value.severity)) {
     errors.push(`${path}.severity: expected one of ${severityList()}`);
   }
-  if (!isNonEmptyString(value.disposition)) {
-    errors.push(`${path}.disposition: expected non-empty string`);
+  if (!isNonEmptyString(value.description) || value.description.trim().length === 0) {
+    errors.push(`${path}.description: expected non-empty string`);
+  }
+  const disposition = normalizeDisposition(value.disposition);
+  if (disposition === null) {
+    errors.push(`${path}.disposition: expected one of ${dispositionList()}`);
   }
   const span = value.evidence_span;
   if (!isRecord(span)) {
@@ -217,23 +247,26 @@ export function validateFinding(
     ) {
       errors.push(`${path}.evidence_span: end_line must be >= start_line`);
     }
-    if (
-      span.snippet !== undefined &&
-      typeof span.snippet !== "string"
-    ) {
-      errors.push(`${path}.evidence_span.snippet: expected string when present`);
+    if (!isNonEmptyString(span.snippet) || span.snippet.trim().length === 0) {
+      errors.push(`${path}.evidence_span.snippet: expected non-empty string (verbatim quote from the diff)`);
     }
   }
   if (errors.length > 0) {
     return { ok: false, errors };
   }
+  const validSpan = span as Record<string, unknown>;
   return {
     ok: true,
     value: {
       finding_id: value.finding_id as string,
       severity: value.severity as Severity,
-      evidence_span: span as EvidenceSpan,
-      disposition: value.disposition as string,
+      description: (value.description as string).trim(),
+      evidence_span: {
+        start_line: validSpan.start_line as number,
+        end_line: validSpan.end_line as number,
+        snippet: validSpan.snippet as string,
+      },
+      disposition: disposition as Disposition,
     },
   };
 }

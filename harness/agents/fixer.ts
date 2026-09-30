@@ -21,7 +21,7 @@ export const FIXER: AgentDefinition = {
     "## Inputs (delivered in the prompt, by value)",
     "- The current ported file content (or worktree-relative path to read it).",
     "- One or more validated reviewer verdict records. Findings carry severities ("
-      + severityList() + "), an evidence_span citing the diff, and a disposition.",
+      + severityList() + "), a description of the defect, the evidence quoted from the diff, and a disposition.",
     "",
     "## Behavior",
     "- Address findings in severity order: blocker, then major, then minor, then nit.",

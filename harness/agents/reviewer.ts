@@ -20,7 +20,7 @@
 
 import type { AgentDefinition } from "./types.js";
 import { REVIEWER_DENY_ALL } from "./types.js";
-import { severityList } from "./verdict-schema.js";
+import { dispositionList, severityList } from "./verdict-schema.js";
 
 const VERDICT_CONTRACT = `{
   "file": "<port output file the diff applies to>",
@@ -31,12 +31,10 @@ const VERDICT_CONTRACT = `{
     {
       "finding_id": "<unique id, e.g. F1>",
       "severity": "<${severityList()}>",
-      "evidence_span": { "start_line": <diff line>, "end_line": <diff line>, "snippet": "<quoted evidence>" },
-      "disposition": "fix | wontfix"
+      "description": "<one or two sentences: what is wrong and why it matters; the fixer reads this>",
+      "evidence_span": { "start_line": <diff line>, "end_line": <diff line>, "snippet": "<REQUIRED: the cited diff text, quoted verbatim>" },
+      "disposition": "<${dispositionList()}>"
     }
-  ],
-  "citation_check": [
-    { "finding_id": "<F id>", "p_cited": <probability in [0,1] that the cited evidence appears in the diff> }
   ]
 }`;
 
@@ -50,7 +48,7 @@ export const REVIEWER: AgentDefinition = {
     "## Ground rules",
     "- ASSUME THE CODE IS WRONG. Your job is to find why the diff breaks behavior, types, or conventions — not to praise it.",
     "- You receive exactly one diff, in the prompt, by value. That diff is your entire world: do not speculate about files, types, or behavior you cannot see in it. No tools are available to you, by design.",
-    "- Every finding MUST cite evidence that literally appears in the provided diff (evidence_span lines + optional snippet). A finding without in-diff evidence is invalid and will be discarded by the citation check.",
+    "- Every finding MUST cite evidence that literally appears in the provided diff: evidence_span lines PLUS a verbatim snippet (required). A finding without an in-diff snippet is invalid and will be discarded by the citation check.",
     "- Severity classes: use ONLY " + severityList() + " — blocker (breaks behavior or will not compile), major (likely runtime defect or strict-mode error), minor (maintainability/correctness smell), nit (style).",
     "",
     "## What to attack, in order",
@@ -70,7 +68,7 @@ export const REVIEWER: AgentDefinition = {
     VERDICT_CONTRACT,
     "",
     "- An EMPTY findings array is a valid, completed verdict meaning you certify the diff clean. Do not invent findings to seem thorough — but do not rubber-stamp either.",
-    "- Each finding needs exactly one citation_check entry with your honest probability that the cited evidence appears in the diff.",
+    "- description says what is wrong, in words; disposition is only the action: \"fix\" = the fixer must apply it, \"wontfix\" = you note it but do not want it applied. The toolkit recomputes the citation check itself, so do not emit one.",
   ].join("\n"),
   tools: {
     allow: [],

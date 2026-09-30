@@ -431,9 +431,12 @@ export function extractCodeFence(text: string, hint = ""): string {
  * Validates the reviewer's raw verdict and maps it onto the metrics event
  * contract's VerdictRecord. Authoritative identity fields (file, reviewer,
  * round, diff_id) are FORCED from the pipeline values — the model's copies
- * are advisory. Findings whose citation_check entry is missing get one from
- * the naive citation check (the model's honest self-assessment is kept when
- * present).
+ * are advisory. Finding.summary is the reviewer's `description` (never the
+ * disposition). The mapped record's citation_check is the DETERMINISTIC
+ * citation check (`naiveCited`), not the model's self-report: the gate
+ * recomputes citations and never reads the self-reported values, so the
+ * report must not show them as if the gate had. The self-report survives
+ * only on `agentRecord.citation_check` (advisory).
  */
 export function mapVerdictToMetrics(input: {
   raw: unknown;
@@ -456,19 +459,14 @@ export function mapVerdictToMetrics(input: {
   if (!result.ok) return { ok: false, errors: result.errors };
 
   const agentRecord = result.value;
-  const citedById = new Map(agentRecord.citation_check.map((c) => [c.finding_id, c.p_cited]));
 
   const findings: MetricsFinding[] = [];
   for (const f of agentRecord.findings) {
     const evidence = resolveEvidence(f.evidence_span, input.parsedDiff, input.bodyLineOffset);
-    const summary =
-      f.disposition.length > 0
-        ? f.disposition
-        : f.evidence_span.snippet?.slice(0, 120) ?? "";
     findings.push({
       finding_id: f.finding_id,
       severity: f.severity,
-      summary,
+      summary: f.description,
       evidence,
     });
   }
@@ -483,10 +481,7 @@ export function mapVerdictToMetrics(input: {
       round: input.round,
       diff_id: input.diffId,
       findings,
-      citation_check: findings.map((f) => {
-        const given = citedById.get(f.finding_id);
-        return { finding_id: f.finding_id, p_cited: given ?? naive(f) };
-      }),
+      citation_check: findings.map((f) => ({ finding_id: f.finding_id, p_cited: naive(f) })),
     },
   };
 }
@@ -593,7 +588,7 @@ export function composeFixerTurn(input: {
       : input.findings
           .map(
             (f, i) =>
-              `${i + 1}. [${f.severity}] ${f.finding_id} (${f.summary}) — evidence: ${
+              `${i + 1}. [${f.severity}] ${f.finding_id}: ${f.summary} — evidence: ${
                 f.evidence?.quote ?? "(uncited)"
               }`,
           )
