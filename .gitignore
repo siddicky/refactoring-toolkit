@@ -30,6 +30,10 @@ kill-events*.jsonl
 *.log
 .DS_Store
 
-# OMC/ZCode local tool state
-.omo/
+# Local agent tool state (OMC, ZCode, Playwright MCP, Claude Code worktrees).
+# Only project-scoped OMC skills are meant to be committed.
+.omc/*
+!.omc/skills/
+.playwright-mcp/
+.claude/worktrees/
 .zcodeignore
