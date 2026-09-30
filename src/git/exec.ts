@@ -77,7 +77,12 @@ export function describeGitFailure(f: GitFailure): string {
   if (f.signal !== null) facts.push(`killed by ${f.signal}`);
   if (f.exitCode !== null) facts.push(`exit ${f.exitCode}`);
   if (f.spawnError !== null) facts.push(f.spawnError);
-  if (text.length === 0) return facts.length > 0 ? facts.join(", ") : f.message.trim();
+  if (text.length === 0) {
+    // A spawn failure (git missing, maxBuffer) has no output; the runtime's own
+    // message says why (e.g. `Executable not found in $PATH`).
+    if (f.spawnError !== null) return `${f.message.trim()} (${facts.join(", ")})`;
+    return facts.length > 0 ? facts.join(", ") : f.message.trim();
+  }
   return facts.length > 0 ? `${text} (${facts.join(", ")})` : text;
 }
 

@@ -95,6 +95,30 @@ describe("GitError keeps the cause", () => {
   });
 });
 
+describe("GitError for a spawn failure", () => {
+  test("git missing from PATH: the runtime's explanation and the ENOENT code both survive", async () => {
+    const emptyBin = await tmp("no-git-bin-");
+    process.env.PATH = emptyBin;
+    const dir = await tmp("git-exec-enoent-");
+    let caught: unknown;
+    try {
+      await git(dir).run(["status"]);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(GitError);
+    const msg = (caught as GitError).message;
+    expect(msg).toContain("ENOENT");
+    expect(msg).toMatch(/not found|ENOENT/i);
+    expect(msg.endsWith("failed: ")).toBe(false);
+    const tried = await git(dir).tryRun(["status"]);
+    expect(tried.ok).toBe(false);
+    expect(tried.spawnError).toBe("ENOENT");
+    expect(tried.exitCode).toBeNull();
+    expect(tried.timedOut).toBe(false);
+  });
+});
+
 describe("tryRun reports why it failed", () => {
   test("a non-zero exit carries exitCode; a timeout sets timedOut and a non-empty stderr", async () => {
     const dir = await tmp("git-exec-tryrun-");
