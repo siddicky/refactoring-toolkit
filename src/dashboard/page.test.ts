@@ -208,6 +208,44 @@ describe("headline styling (C54)", () => {
   });
 });
 
+describe("usage table fresh input (C60)", () => {
+  const usage = (over: Record<string, unknown>) => ({
+    role: "review",
+    calls: 2,
+    input: 329_000,
+    freshInput: 329_000,
+    cacheRead: 576_000,
+    output: 4_000,
+    reasoning: 0,
+    costUsd: 0,
+    estimated: true,
+    ...over,
+  });
+
+  test("a cache-heavy role shows its real fresh input, not a clamped 0", () => {
+    const page = loadPage();
+    page.api.renderUsage([usage({})]);
+    const cells = [...(page.el("usage").tBodies[0]?.innerHTML ?? "").matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
+    // role, calls, input (fresh), cache-read, output, reasoning, cost
+    expect(cells[2]).toBe("329,000");
+    expect(cells[3]).toBe("576,000");
+  });
+
+  test("the client never subtracts cache-read from input", () => {
+    const page = loadPage();
+    expect(page.script).not.toMatch(/\.input\s*-\s*\w+\.cacheRead/);
+  });
+
+  test("an older payload without freshInput falls back to input (no subtraction)", () => {
+    const page = loadPage();
+    const row = usage({});
+    delete (row as Record<string, unknown>).freshInput;
+    page.api.renderUsage([row]);
+    const cells = [...(page.el("usage").tBodies[0]?.innerHTML ?? "").matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
+    expect(cells[2]).toBe("329,000");
+  });
+});
+
 describe("burn-down chart not-run points (C56)", () => {
   const series = (points: unknown[]) => [{ queue: "vitest", points }];
   const ran = { iteration: 1, errorCount: 3, recordedAt: null, state: "ran", reason: null };

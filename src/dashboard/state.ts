@@ -947,6 +947,8 @@ export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[
       role: agg.role,
       calls: agg.calls,
       input: agg.splitCalls > 0 ? agg.input : null,
+      // Cache tokens are disjoint from `input` (see AgentUsageView.freshInput).
+      freshInput: agg.splitCalls > 0 ? agg.input : null,
       cacheRead: agg.splitCalls > 0 ? agg.cacheRead : null,
       output: agg.splitCalls > 0 ? agg.output : null,
       reasoning: agg.splitCalls > 0 ? agg.reasoning : null,

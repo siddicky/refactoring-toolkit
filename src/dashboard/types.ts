@@ -288,6 +288,14 @@ export interface AgentUsageView {
   calls: number;
   /** Sum over envelopes carrying the full split; null when none do. */
   input: number | null;
+  /**
+   * Fresh (non-cached) input tokens, computed server-side. Provider usage
+   * reports cache reads/writes DISJOINT from `input` (tokenTotal and
+   * normalizeTokens both sum them additively), so `input` already IS the
+   * fresh count: subtracting cacheRead under-reports it and clamps to 0 for
+   * cache-heavy roles. Null when no envelope carried the split.
+   */
+  freshInput: number | null;
   cacheRead: number | null;
   output: number | null;
   reasoning: number | null;

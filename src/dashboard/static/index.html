@@ -364,7 +364,9 @@ function renderUsage(rows) {
     : "no model-calling envelopes yet — usage split appears once agent turns report tokens";
   const num = (v) => (v == null ? '<span class="faint">n/a</span>' : esc(Number(v).toLocaleString("en-US")));
   tb.innerHTML = rows.map((u) => {
-    const fresh = u.input != null && u.cacheRead != null ? Math.max(0, u.input - u.cacheRead) : null;
+    // Server-computed: provider usage reports cache tokens disjoint from input,
+    // so the fresh count is `input` itself (never input - cacheRead).
+    const fresh = u.freshInput !== undefined ? u.freshInput : u.input;
     const cost =
       u.costUsd == null
         ? '<span class="faint">n/a</span>'

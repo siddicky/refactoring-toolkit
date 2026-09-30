@@ -907,6 +907,27 @@ describe("aggregateAgentUsage (wave-5 cost honesty)", () => {
     expect(agent?.estimated).toBe(false);
   });
 
+  test("C60: freshInput is the provider's input (cache is disjoint), never input - cacheRead", () => {
+    // Real cx-5e aggregate: review 329k input with 576k cache-read (cache >
+    // input is impossible if input included the cache reads).
+    const rows = aggregateAgentUsage([
+      feedEntry({
+        usage: { input: 329_000, output: 4_000, reasoning: 0, cacheRead: 576_000, cacheWrite: 0, costUsd: 0 },
+      }),
+      feedEntry({
+        role: "agent",
+        usage: { input: 772_000, output: 9_000, reasoning: 0, cacheRead: 350_000, cacheWrite: 0, costUsd: 0 },
+      }),
+    ]);
+    expect(rows.find((r) => r.role === "review")).toMatchObject({ input: 329_000, freshInput: 329_000, cacheRead: 576_000 });
+    expect(rows.find((r) => r.role === "agent")).toMatchObject({ freshInput: 772_000 });
+  });
+
+  test("freshInput is null when no envelope carried the usage split", () => {
+    const rows = aggregateAgentUsage([feedEntry({ usage: null })]);
+    expect(rows[0]).toMatchObject({ calls: 1, input: null, freshInput: null });
+  });
+
   test("attempt-0 markers and non-model roles are excluded", () => {
     const rows = aggregateAgentUsage([
       feedEntry({ attempt: 0, usage: { input: 5, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 } }),
