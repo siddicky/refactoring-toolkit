@@ -213,18 +213,15 @@ export function walkHistory(flowId: string, history: DexHistoryWire): HistoryWal
 
   for (const event of events) {
     const payload = event.payload ?? {};
-    // Any stepInput carrying a file updates the context (LeaseStep onward,
-    // every chained step input is a FileRoundInput).
-    const candidates: Array<Record<string, unknown> | undefined> = [
+    // The step's OWN input (when the wire carries it) is the context in force
+    // while it ran (LeaseStep onward, every chained step input is a
+    // FileRoundInput).
+    for (const own of [
       payload.initialStart?.stepInput,
       payload.input?.stepInput,
       payload.movement?.stepInput,
-    ];
-    for (const next of payload.output?.stepDecision?.nextSteps ?? []) {
-      candidates.push(next.stepInput);
-    }
-    for (const candidate of candidates) {
-      const found = stepInputContext(candidate);
+    ]) {
+      const found = stepInputContext(own);
       if (found !== null) ctx = found;
     }
 
@@ -239,8 +236,17 @@ export function walkHistory(flowId: string, history: DexHistoryWire): HistoryWal
       });
     }
 
+    // Stamp the envelopes with the context the step ran under BEFORE the
+    // decision's nextSteps advance it: a completing step's envelope must not
+    // take the following step's file/round (queue-verify -> queue-fix, or a
+    // release that hands the next file's lease to its successor).
     for (const upsert of payload.output?.upsertAttributes ?? []) {
       collectUpsert(flowId, upsert, ctx, feed, burnDown);
+    }
+
+    for (const next of payload.output?.stepDecision?.nextSteps ?? []) {
+      const found = stepInputContext(next.stepInput);
+      if (found !== null) ctx = found;
     }
   }
   return { feed, dispatch, burnDown };

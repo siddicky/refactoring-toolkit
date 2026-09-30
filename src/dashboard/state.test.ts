@@ -29,6 +29,7 @@ import {
   readBurnDownFile,
   readKillEventsFile,
 } from "./queries.js";
+import type { DexHistoryEventWire, DexHistoryWire, FeedEntry } from "./types.js";
 import {
   BURN_DOWN_FILE_SAMPLES,
   FLOW_PROBE,
@@ -177,6 +178,101 @@ describe("walkHistory", () => {
     expect(probe.feed).toHaveLength(1);
     expect(probe.feed[0]?.file).toBeNull();
     expect(probe.feed[0]?.attempt).toBe(7);
+  });
+});
+
+describe("walkHistory file/round attribution at step boundaries (C64)", () => {
+  const at = (n: number) => `2026-09-28T10:00:${String(n).padStart(2, "0")}.000Z`;
+  const env = (stepId: string, role: string, n: number) => ({
+    key: `envelope-event/${stepId}#1`,
+    value: {
+      stepId,
+      role,
+      file: null,
+      round: null,
+      attempt: 1,
+      started_at: at(n),
+      ended_at: at(n + 1),
+      outcome: "completed",
+      tokens: null,
+      wall_clock_ms: 1,
+    },
+  });
+  const step = (
+    eventId: string,
+    stepType: string,
+    upserts: Array<ReturnType<typeof env>>,
+    next?: { stepType: string; stepInput: Record<string, unknown> },
+  ): DexHistoryEventWire => ({
+    eventId,
+    eventTime: at(Number(eventId)),
+    type: "StepExecuteCompleted",
+    payload: {
+      context: { stepExecutionId: `${stepType}-${eventId}`, stepType, finalAttempt: 1 },
+      output: {
+        ...(next !== undefined ? { stepDecision: { nextSteps: [next] } } : {}),
+        upsertAttributes: upserts,
+      },
+    },
+  });
+  const history = (events: DexHistoryEventWire[]): DexHistoryWire => ({
+    flowId: "f",
+    runId: "r",
+    events,
+  });
+  const fileOf = (feed: FeedEntry[], stepId: string) => feed.find((e) => e.stepId === stepId)?.file;
+
+  test("a completing step's envelope keeps ITS file; the next step's file applies afterwards", () => {
+    const walked = walkHistory(
+      "f",
+      history([
+        step("1", "PpLease", [], { stepType: "PpFence", stepInput: { file: "src/A.php", round: 1, epoch: 1 } }),
+        step("2", "PpCommit", [env("pp-commit", "commit", 2)], {
+          stepType: "PpRelease",
+          stepInput: { file: "src/A.php", round: 1, epoch: 1 },
+        }),
+        // Release hands the NEXT file's lease to the following step.
+        step("3", "PpRelease", [env("pp-release", "record", 3)], {
+          stepType: "PpLease",
+          stepInput: { file: "src/B.php", round: 1, epoch: 1 },
+        }),
+        step("4", "PpLease", [env("pp-lease", "record", 4)]),
+      ]),
+    );
+    expect(fileOf(walked.feed, "pp-commit")).toBe("src/A.php");
+    expect(fileOf(walked.feed, "pp-release")).toBe("src/A.php"); // was B before the fix
+    expect(fileOf(walked.feed, "pp-lease")).toBe("src/B.php");
+  });
+
+  test("queue-verify -> queue-fix: the verify envelope is not pulled onto the first fix-round file", () => {
+    const walked = walkHistory(
+      "f",
+      history([
+        step("1", "PpBootstrap", []),
+        step("2", "PpQueueVerify", [env("pp-queue-verify", "queue", 2)], {
+          stepType: "PpQueueFix",
+          stepInput: { file: "src/C.php", round: 2, epoch: 1 },
+        }),
+        step("3", "PpQueueFix", [env("pp-queue-fix", "agent", 3)]),
+      ]),
+    );
+    expect(fileOf(walked.feed, "pp-queue-verify")).toBeNull(); // flow-level
+    expect(fileOf(walked.feed, "pp-queue-fix")).toBe("src/C.php");
+    expect(walked.feed.find((e) => e.stepId === "pp-queue-fix")?.round).toBe(2);
+  });
+
+  test("a step's own input (when the wire carries it) wins over the previous step's context", () => {
+    const own = step("2", "PpCommit", [env("pp-commit", "commit", 2)]);
+    own.payload.input = { stepInput: { file: "src/B.php", round: 3, epoch: 1 } };
+    const walked = walkHistory(
+      "f",
+      history([
+        step("1", "PpLease", [], { stepType: "PpFence", stepInput: { file: "src/A.php", round: 1, epoch: 1 } }),
+        own,
+      ]),
+    );
+    expect(fileOf(walked.feed, "pp-commit")).toBe("src/B.php");
+    expect(walked.feed[0]?.round).toBe(3);
   });
 });
 
