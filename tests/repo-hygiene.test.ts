@@ -120,3 +120,98 @@ describe("C83: no orphan media is committed", () => {
     expect(orphans).toEqual([]);
   });
 });
+
+describe("C86: package.json metadata and scripts", () => {
+  const pkg = readPackageJson();
+
+  test("declares the Bun runtime and the MIT license", () => {
+    expect(pkg.packageManager).toMatch(/^bun@\d+\.\d+\.\d+$/);
+    expect(pkg.engines?.bun).toBeDefined();
+    expect(pkg.license).toBe("MIT");
+    expect(readFileSync(join(ROOT, "LICENSE"), "utf8")).toMatch(/^MIT License/);
+  });
+
+  test("the pinned Bun version matches @types/bun", () => {
+    const pinned = pkg.packageManager?.replace("bun@", "");
+    expect(pkg.devDependencies?.["@types/bun"]).toBe(pinned);
+  });
+
+  test("has aliases for every documented entry point plus a combined check", () => {
+    const s = pkg.scripts ?? {};
+    expect(s["check"]).toBe("bun run typecheck && bun test");
+    expect(s["worker"]).toBe("bun run scripts/run-demo.ts worker");
+    expect(s["dashboard"]).toBe("bun run scripts/serve-status.ts");
+    expect(s["metrics"]).toBe("bun run scripts/render-metrics.ts");
+    // existing names are kept
+    expect(s["typecheck"]).toBe("tsc --noEmit");
+    expect(s["test"]).toBe("bun test");
+    expect(s["demo"]).toBe("bun run scripts/run-demo.ts");
+    expect(s["chaos"]).toBe("bun run scripts/chaos-kill.ts");
+  });
+
+  test("every script alias points at a file that exists", () => {
+    for (const cmd of Object.values(pkg.scripts ?? {})) {
+      for (const m of cmd.matchAll(/bun run (scripts\/[\w.-]+\.ts)/g)) {
+        expect(existsSync(join(ROOT, m[1] as string))).toBe(true);
+      }
+    }
+  });
+});
+
+describe("C36: every bare import is a declared dependency", () => {
+  const SCAN_DIRS = ["src", "flows", "harness", "scripts", "tests", "fixtures"];
+  // Sample projects that the toolkit ports; not toolkit code.
+  const SKIP_PREFIXES = ["fixtures/php-sample/", "fixtures/creatorex-middleware/"];
+  const BUILTINS = new Set([...builtinModules, "bun"]);
+
+  function walk(dir: string, out: string[]): void {
+    for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+      const rel = `${dir}/${entry.name}`;
+      if (SKIP_PREFIXES.some((p) => `${rel}/`.startsWith(p))) continue;
+      if (entry.isDirectory()) walk(rel, out);
+      else if (/\.(ts|tsx|mts)$/.test(entry.name)) out.push(rel);
+    }
+  }
+
+  function packageOf(specifier: string): string | null {
+    if (specifier.startsWith(".") || specifier.startsWith("/")) return null;
+    if (specifier.startsWith("node:") || specifier.startsWith("bun:")) return null;
+    const parts = specifier.split("/");
+    const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : (parts[0] as string);
+    return BUILTINS.has(name) ? null : name;
+  }
+
+  const STATIC_IMPORT = /^[ \t]*(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']/gm;
+  const SIDE_EFFECT_IMPORT = /^[ \t]*import\s*["']([^"']+)["']/gm;
+  const DYNAMIC_IMPORT = /\b(?:import|require)\(\s*["']([^"']+)["']\s*\)/g;
+
+  test("imports of third-party packages appear in package.json", () => {
+    const pkg = readPackageJson();
+    const declared = new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})]);
+    const files: string[] = [];
+    for (const d of SCAN_DIRS) if (existsSync(join(ROOT, d))) walk(d, files);
+    expect(files.length).toBeGreaterThan(20);
+
+    const undeclared = new Map<string, string[]>();
+    for (const file of files) {
+      const text = readFileSync(join(ROOT, file), "utf8");
+      for (const re of [STATIC_IMPORT, SIDE_EFFECT_IMPORT, DYNAMIC_IMPORT]) {
+        for (const m of text.matchAll(re)) {
+          const pkgName = packageOf(m[1] as string);
+          if (pkgName === null || declared.has(pkgName)) continue;
+          undeclared.set(pkgName, [...(undeclared.get(pkgName) ?? []), file]);
+        }
+      }
+    }
+    expect(Object.fromEntries(undeclared)).toEqual({});
+  });
+
+  test("@grpc/grpc-js is pinned to the version bun.lock resolves", () => {
+    const pkg = readPackageJson();
+    const lock = readFileSync(join(ROOT, "bun.lock"), "utf8");
+    const resolved = lock.match(/"@grpc\/grpc-js": \["@grpc\/grpc-js@([^"]+)"/)?.[1];
+    expect(resolved).toBeDefined();
+    expect(pkg.dependencies?.["@grpc/grpc-js"]).toBe(resolved);
+  });
+});
