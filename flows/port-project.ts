@@ -756,7 +756,7 @@ function requireHarness(): AgentSessionClient {
 }
 
 /** One agent turn: definition prompt + enforced tool policy + turn text. */
-function composeAgentTurn(def: AgentDefinition, turn: string): string {
+export function composeAgentTurn(def: AgentDefinition, turn: string): string {
   return [def.prompt, "", toolPolicyBlock(def), "", turn].join("\n\n");
 }
 
@@ -780,7 +780,7 @@ interface AgentTurnResult {
   usage: TokenUsage | null;
 }
 
-async function runAgentTurn(input: {
+export async function runAgentTurn(input: {
   def: AgentDefinition;
   sessionId: string;
   turn: string;

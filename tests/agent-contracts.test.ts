@@ -4,8 +4,15 @@
  * every block fails on the pre-fix code and passes on the fixed code.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
+import { FIXER } from "../harness/agents/fixer.js";
+import { IMPLEMENTER } from "../harness/agents/implementer.js";
+import { REVIEWER } from "../harness/agents/reviewer.js";
+import { TOOL_CATEGORIES } from "../harness/agents/types.js";
+import { PORTING_CONVENTIONS } from "../harness/skills/porting-conventions.js";
+import { configurePortHarness, runAgentTurn } from "../flows/port-project.js";
+import type { AgentSessionClient, PromptOptions } from "../src/harness/opencode.js";
 import { evaluateSuspicion } from "../src/metrics/suspicion.js";
 import type { Finding, VerdictRecord } from "../src/metrics/types.js";
 import {
@@ -20,6 +27,8 @@ import {
   mapVerdictToMetrics,
   parseUnifiedDiff,
   specMapProblems,
+  toolOverridesAllOff,
+  toolPolicyBlock,
 } from "../src/harness/runtime.js";
 
 // ---------------------------------------------------------------------------
@@ -380,5 +389,72 @@ describe("C13: prep turns ask for a long outer fence and fence embedded markdown
     expect(gen).toContain("````markdown\n" + withFences + "\n````");
     const rev = composePrepReviseTurn({ specMapText: withFences, findings: [] });
     expect(rev).toContain("````markdown\n" + withFences + "\n````");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C15 — the tool policy the model reads matches the tools actually sent;
+// writer prompts say "reply with a fenced block", not "write the file"
+// ---------------------------------------------------------------------------
+
+interface CapturedPrompt {
+  text: string;
+  opts: PromptOptions | undefined;
+}
+
+function capturingHarness(): AgentSessionClient & { calls: CapturedPrompt[] } {
+  const calls: CapturedPrompt[] = [];
+  return {
+    calls,
+    createSession: (label: string) => Promise.resolve({ id: "sess-1", title: label }),
+    prompt: (_sessionId: string, text: string, opts?: PromptOptions) => {
+      calls.push({ text, opts });
+      return Promise.resolve({ text: "ok", usage: null, aborted: false });
+    },
+    abortSessionsNotTagged: () => Promise.resolve([]),
+  };
+}
+
+describe("C15: tool policy block is rendered from the tools map actually sent", () => {
+  afterEach(() => {
+    configurePortHarness(undefined as unknown as AgentSessionClient);
+  });
+
+  test("every agent turn sends ALL categories disabled, and the body says NONE for every agent", async () => {
+    for (const def of [IMPLEMENTER, FIXER, REVIEWER]) {
+      const harness = capturingHarness();
+      configurePortHarness(harness);
+      await runAgentTurn({ def, sessionId: "sess-1", turn: "TURN TEXT", file: "src/Money.php", round: 1 });
+      const call = harness.calls[0];
+      // the tools map sent server-side: every category present and false
+      expect(Object.keys(call?.opts?.tools ?? {}).sort()).toEqual([...TOOL_CATEGORIES].sort());
+      expect(Object.values(call?.opts?.tools ?? {}).every((v) => v === false)).toBe(true);
+      // the body the model reads agrees with it
+      expect(call?.text).toContain("NONE — you have no tools at all");
+      expect(call?.text).not.toMatch(/Effective tools this turn: (?!NONE)/);
+      expect(call?.text).toContain("TURN TEXT");
+    }
+  });
+
+  test("the block follows the map it is given: an enabled, allowed category is listed, a denied one never is", () => {
+    const sent = { ...toolOverridesAllOff(), write: true, bash: true };
+    const block = toolPolicyBlock(IMPLEMENTER, sent);
+    expect(block).toContain("Effective tools this turn: write");
+    expect(block).not.toContain("NONE");
+    // bash is on in the map but denied by the agent config: deny stays authoritative
+    expect(block).not.toMatch(/Effective tools this turn:[^\n]*bash/);
+    expect(toolPolicyBlock(REVIEWER, sent)).toContain("NONE — you have no tools at all");
+  });
+
+  test("implementer/fixer prompts ask for a fenced reply, not a file write, and name no demo fixture", () => {
+    for (const def of [IMPLEMENTER, FIXER]) {
+      expect(def.prompt).toContain("```typescript");
+      expect(def.prompt).not.toContain("Write the ported TypeScript file to the output path");
+      expect(def.prompt).not.toContain("fixtures/php-sample");
+      expect(def.prompt).not.toContain("lease worktree only");
+      expect(def.prompt).not.toContain("worktree-relative path to read");
+    }
+    expect(IMPLEMENTER.prompt).toContain("READ-ONLY");
+    expect(PORTING_CONVENTIONS.instructions).not.toContain("PHP fixture");
   });
 });

@@ -3,8 +3,9 @@
  *
  * The implementer prompt (harness/agents/implementer.ts) composes this skill
  * in by name; conventions here are the single source both the prompt and the
- * tests read. Kept deliberately small: the conventions that matter for the
- * demo port of the generated PHP fixture to a `tsc --strict`-clean TS output.
+ * tests read. Kept deliberately small: the conventions that matter for a
+ * PHP → `tsc --strict`-clean TypeScript port (the source project is whatever
+ * the run's source root points at; nothing here names a specific fixture).
  */
 
 import type { SkillModule } from "./types.js";
@@ -58,6 +59,6 @@ export const PORTING_CONVENTIONS: SkillModule = {
     "### Forbidden in ported output",
     "- No direct DB/IO client usage (e.g. `mysqli`, `PDO`) — call through the seam interface named by the prep artifact.",
     "- No `any`, no `@ts-ignore`, no `as unknown as X` casts to silence the compiler.",
-    "- Do not modify the read-only PHP fixture or files outside your lease worktree.",
+    "- Do not modify the read-only PHP source; emit only the one file the prompt asks for.",
   ].join("\n"),
 };

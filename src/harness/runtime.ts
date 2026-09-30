@@ -95,17 +95,30 @@ export function hasZeroEffectiveTools(def: AgentDefinition): boolean {
 }
 
 /**
- * The hard tool policy block appended to every agent turn. This is the
- * runtime enforcement of the deny list in the prompt-in/content-out bridge:
- * the model is told its limits verbatim on every turn.
+ * The hard tool policy block appended to every agent turn: the model is told
+ * its limits verbatim. It is rendered from the `tools` map that is ACTUALLY
+ * SENT with the turn (default: {@link toolOverridesAllOff}, which is what the
+ * port flow's runAgentTurn sends for every agent in bridge mode), intersected
+ * with the agent's declarative config — so the text can never advertise a
+ * tool the server has disabled. In bridge mode every agent (writers included)
+ * therefore reads NONE.
  */
-export function toolPolicyBlock(def: AgentDefinition): string {
-  const denied = def.tools.deny.length > 0 ? def.tools.deny.join(", ") : "none";
-  const allowed = effectiveTools(def);
+export function toolPolicyBlock(
+  def: AgentDefinition,
+  sentTools: Readonly<Record<string, boolean>> = toolOverridesAllOff(),
+): string {
+  const effective = TOOL_CATEGORIES.filter(
+    (c) => sentTools[c] === true && def.tools.allow.includes(c) && !def.tools.deny.includes(c),
+  );
+  const denied = TOOL_CATEGORIES.filter((c) => !effective.includes(c));
   return [
     "## Tool policy (enforced)",
-    `- Effective tools after the config + plugin merge: ${allowed.length === 0 ? "NONE — you have no tools at all" : allowed.join(", ")}`,
-    `- Denied (cannot be re-enabled): ${denied}`,
+    `- Effective tools this turn: ${
+      effective.length === 0
+        ? "NONE — you have no tools at all (the toolkit writes files and runs git; you only reply in text)"
+        : effective.join(", ")
+    }`,
+    `- Denied (cannot be re-enabled): ${denied.length > 0 ? denied.join(", ") : "none"}`,
     "- No git operations of any kind: the toolkit is the sole committer.",
     "- Everything you need is inside this prompt; answer in your reply text.",
   ].join("\n");
