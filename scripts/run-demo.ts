@@ -6,8 +6,10 @@
  *   hello                                               0(a)/0(b): start+wait hello flow
  *   long-step --ms 90000 [--flow-id long-1]             0(c): start a multi-minute step (kill target)
  *   wait-flow --id <flowId>                             wait for a flow (resume observation)
- *   round --dir <repoDir> --file src/a.php --round 1 --epoch 1
+ *   round --dir <repoDir> --file src/a.php --round 1 --epoch 1 [--init-fixture]
  *                                                       0(d)/0(e): fixture repo + PortRound flow
+ *                                                       (--dir must already be a git repo unless
+ *                                                       --init-fixture creates a throwaway one)
  *   recover --dir <repoDir> --epoch 2                   ordered recovery: abort/confirm sessions
  *                                                       (enumeration fallback) → lease reclaim →
  *                                                       reconcile → re-dispatch
@@ -18,13 +20,24 @@
  *   gate --flow-id <id>                                 US-002 lead-layer dispatch health gate:
  *                                                       review-step failure facts from dexcli flow
  *                                                       history; fail-open (degraded => no protection)
- *   demo [--gate-flow-id <id>] [--dispatch parallel]    port flow dispatch (gate optional pre-dispatch), integration
+ *   demo --dir <repo> [--files a.php,b.php|creatorex] [--prep P] [--source-root R]
+ *        [--epoch N] [--max-rounds N (default 1)] [--wait-minutes N] [--flow-id ID]
+ *        [--gate-flow-id <id>] [--dispatch parallel|sequential] [--start-only]
+ *        [--init-fixture]                               port flow dispatch (gate optional pre-dispatch), integration;
+ *                                                       --dir must be an existing git repo (--init-fixture creates a
+ *                                                       throwaway one), defaults are the php-sample fixtures,
+ *                                                       `--files creatorex` implies the creatorex prep + source root,
+ *                                                       inputs are preflighted before dex is contacted
+ *
+ * Exit codes (demo / wait-flow / hello / long-step / round): 0 ok, 1 failed/cancelled/
+ * terminated or fatal error, 2 usage, 3 completed with blocked files or tsc/vitest
+ * failures, 4 wait elapsed while the flow is still running (use wait-flow --id).
  *
  * Requires a running dex server: `dexcli dev -open=false` (see BUILD_NOTES.md).
  */
 
-import { mkdir, stat, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -67,6 +80,8 @@ import {
   PortProjectFlow,
   PortFileFlowInstance,
   configurePortHarness,
+  parsePrepSourceMap,
+  type PortRunInput,
   type PortRunResult,
 } from "../flows/port-project.js";
 import {
@@ -535,11 +550,163 @@ export async function waitAndReport(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Demo input resolution + preflight (C70): everything that can be wrong with a
+// `demo` invocation is checked BEFORE a repo is created, dex is contacted or a
+// flow is started, and reported in one message.
+// ---------------------------------------------------------------------------
+
+/** Fixture inputs ship next to this script, whatever the caller's cwd is. */
+const FIXTURES_DIR = join(import.meta.dir, "..", "fixtures");
+const DEMO_DEFAULT_FILES = "src/Money.php,src/Pricing/FlatRateDiscount.php";
+
+export interface DemoInputs {
+  /** Absolute project repository root (the target of the port). */
+  dir: string;
+  /** Create a throwaway fixture repo when `dir` does not exist (opt-in). */
+  initFixture: boolean;
+  /** The raw --files value (kept so a printed command can echo `creatorex`). */
+  filesArg: string;
+  files: string[];
+  /** Absolute path of the prep artifact. */
+  prepPath: string;
+  /** Absolute dir holding the source files named by `files`. */
+  sourceRoot: string;
+  epoch: number;
+  maxRounds: number;
+  waitMinutes: number;
+  dispatchMode: "sequential" | "parallel";
+}
+
+function parsePositiveInt(flag: string, raw: string): number {
+  if (!/^\d+$/.test(raw.trim()) || Number.parseInt(raw, 10) < 1) {
+    throw new Error(`${flag} must be a positive integer (got ${JSON.stringify(raw)})`);
+  }
+  return Number.parseInt(raw, 10);
+}
+
+/**
+ * Resolves the `demo` flags. Defaults are the php-sample fixtures located from
+ * THIS script (never the cwd); `--files creatorex` implies the creatorex prep
+ * artifact and source root (explicit --prep / --source-root still win), which
+ * is the pair its 10 files need. All paths come back absolute because the flow
+ * runs in the worker process, whose cwd may differ.
+ */
+export function resolveDemoInputs(
+  argv: readonly string[] = process.argv,
+  fixturesDir: string = FIXTURES_DIR,
+): DemoInputs {
+  const dir = argValue("--dir", undefined, argv);
+  if (dir === undefined) throw new Error("demo requires --dir <projectRepoDir>");
+  const filesArg = (argValue("--files", DEMO_DEFAULT_FILES, argv) as string).trim();
+  const creatorex = filesArg === "creatorex";
+  const creatorexDir = join(fixturesDir, "creatorex-middleware");
+  const dispatch = argValue("--dispatch", "parallel", argv) as string;
+  if (dispatch !== "parallel" && dispatch !== "sequential") {
+    throw new Error(`--dispatch must be "parallel" or "sequential" (got ${JSON.stringify(dispatch)})`);
+  }
+  return {
+    dir: resolve(dir),
+    initFixture: argv.includes("--init-fixture"),
+    filesArg,
+    files: expandFilesArg(filesArg),
+    prepPath: resolve(
+      argValue("--prep", undefined, argv) ??
+        (creatorex ? join(creatorexDir, "prep-stub.md") : join(fixturesDir, "stub-prep.md")),
+    ),
+    sourceRoot: resolve(
+      argValue("--source-root", undefined, argv) ?? (creatorex ? creatorexDir : join(fixturesDir, "php-sample")),
+    ),
+    epoch: parsePositiveInt("--epoch", argValue("--epoch", "1", argv) as string),
+    maxRounds: parsePositiveInt("--max-rounds", argValue("--max-rounds", "1", argv) as string),
+    waitMinutes: parsePositiveInt("--wait-minutes", argValue("--wait-minutes", "30", argv) as string),
+    dispatchMode: dispatch,
+  };
+}
+
+/**
+ * Fails fast with ONE message listing every problem, instead of the flow
+ * failing after dispatch (`prep source map lacks rows for: ...`): the prep
+ * artifact is readable, every file has an exact row in its source map, the
+ * source root is a directory, and every file exists under it.
+ */
+export async function preflightDemoInputs(
+  inputs: Pick<DemoInputs, "files" | "prepPath" | "sourceRoot">,
+): Promise<void> {
+  const problems: string[] = [];
+  if (inputs.files.length === 0) problems.push("--files names no files");
+
+  let prep: string | undefined;
+  try {
+    prep = await readFile(inputs.prepPath, "utf8");
+  } catch (err) {
+    problems.push(`prep artifact ${inputs.prepPath} is not readable (${(err as NodeJS.ErrnoException).code ?? String(err)})`);
+  }
+  if (prep !== undefined) {
+    const sourceMap = parsePrepSourceMap(prep);
+    const missing = inputs.files.filter((f) => sourceMap[f] === undefined);
+    if (missing.length > 0) {
+      problems.push(`prep artifact ${inputs.prepPath} has no source-map row for: ${missing.join(", ")}`);
+    }
+  }
+
+  const rootIsDir = await stat(inputs.sourceRoot).then((s) => s.isDirectory(), () => false);
+  if (!rootIsDir) {
+    problems.push(`source root ${inputs.sourceRoot} is not a directory`);
+  } else {
+    const absent: string[] = [];
+    for (const f of inputs.files) {
+      if (!(await exists(join(inputs.sourceRoot, f)))) absent.push(f);
+    }
+    if (absent.length > 0) problems.push(`not found under source root ${inputs.sourceRoot}: ${absent.join(", ")}`);
+  }
+
+  if (problems.length > 0) {
+    throw new Error(`demo preflight failed:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
+  }
+}
+
+/**
+ * The project repository must already exist (a git repository root with at
+ * least one commit). A typo in --dir used to silently become a fresh README-only
+ * repo; creating one is now opt-in via --init-fixture and only ever happens for
+ * a path that does not exist (an existing directory is never removed).
+ */
+export async function ensureProjectRepo(
+  dir: string,
+  opts: { initFixture: boolean },
+): Promise<"existing" | "created"> {
+  if (!(await exists(dir))) {
+    if (!opts.initFixture) {
+      throw new Error(
+        `--dir ${dir} does not exist. Pass the path of an existing git repository, or --init-fixture to create a throwaway fixture repository there.`,
+      );
+    }
+    await makeFixtureRepo(dir);
+    return "created";
+  }
+  const head = await git(dir).tryRun(["rev-parse", "--verify", "HEAD"]);
+  if (!head.ok) {
+    throw new Error(
+      `--dir ${dir} exists but is not a git repository with at least one commit (git rev-parse --verify HEAD: ${head.stderr.trim()})`,
+    );
+  }
+  const top = (await git(dir).run(["rev-parse", "--show-toplevel"])).trim();
+  if ((await realpath(top)) !== (await realpath(dir))) {
+    throw new Error(`--dir ${dir} is inside the git repository at ${top}; pass the repository root`);
+  }
+  return "existing";
+}
+
 async function startDemo(): Promise<number> {
   const config = dexConfigFromEnv();
-  const dir = argValue("--dir");
-  if (dir === undefined) throw new Error("demo requires --dir <projectRepoDir>");
-  if (!(await exists(dir))) await makeFixtureRepo(dir);
+  const inputs = resolveDemoInputs();
+  const { dir, files, prepPath, sourceRoot, epoch, maxRounds, waitMinutes } = inputs;
+  // Validate before anything is created or contacted.
+  await preflightDemoInputs(inputs);
+  if ((await ensureProjectRepo(dir, { initFixture: inputs.initFixture })) === "created") {
+    console.log(`[demo] --init-fixture: created throwaway fixture repository at ${dir}`);
+  }
   // US-002: optional pre-dispatch health gate (lead-layer, fail-open). When
   // --gate-flow-id names a previous/current flow, its review-step facts are
   // consulted and surfaced BEFORE startFlow; a degraded gate prints the
@@ -548,14 +715,6 @@ async function startDemo(): Promise<number> {
   if (gateFlowId !== undefined) {
     await runDispatchGate(gateFlowId);
   }
-  const files = expandFilesArg(
-    argValue("--files") ?? "src/Money.php,src/Pricing/FlatRateDiscount.php",
-  );
-  const prepPath = argValue("--prep") ?? join(process.cwd(), "fixtures/stub-prep.md");
-  const sourceRoot = argValue("--source-root") ?? join(process.cwd(), "fixtures/php-sample");
-  const epoch = Number.parseInt(argValue("--epoch", "1") as string, 10);
-  const maxRounds = Number.parseInt(argValue("--max-rounds", "1") as string, 10);
-  const waitMinutes = Number.parseInt(argValue("--wait-minutes", "30") as string, 10);
 
   const flows: Flow<any>[] = [new PortProjectFlow()];
   const runtime = await openDexClient(flows, config);
@@ -563,7 +722,7 @@ async function startDemo(): Promise<number> {
     const flow = flows[0];
     if (flow === undefined) throw new Error("PortProjectFlow not registered");
     const flowId = argValue("--flow-id", `demo-${Date.now()}`) as string;
-    const input = {
+    const input: PortRunInput = {
       repoRoot: dir,
       worktreeRoot: join(dir, ".worktrees"),
       integrationWorktreePath: join(dir, ".worktrees", "integration"),
@@ -573,7 +732,7 @@ async function startDemo(): Promise<number> {
       files,
       maxRounds,
       // v1.1 default: parallel per-file waves (SubFlows over the 2 slots).
-      dispatchMode: (argValue("--dispatch", "parallel") as string) === "sequential" ? "sequential" : "parallel",
+      dispatchMode: inputs.dispatchMode,
     };
     const runId = await runtime.client.startFlow(flow, flowId, input);
     console.log(`[demo] started flowId=${flowId} runId=${runId} files=${files.join(",")} epoch=${epoch}`);
@@ -944,9 +1103,11 @@ async function main(): Promise<number> {
       }
     }
     case "round": {
-      const dir = argValue("--dir");
-      if (dir === undefined) throw new Error("round requires --dir <fixtureRepoDir>");
-      if (!(await exists(dir))) await makeFixtureRepo(dir);
+      const dirArg = argValue("--dir");
+      if (dirArg === undefined) throw new Error("round requires --dir <fixtureRepoDir>");
+      const dir = resolve(dirArg);
+      // A nonexistent --dir is an error unless --init-fixture asks for a fixture.
+      await ensureProjectRepo(dir, { initFixture: process.argv.includes("--init-fixture") });
       const file = argValue("--file", "src/a.php") as string;
       const round = Number.parseInt(argValue("--round", "1") as string, 10);
       const epoch = Number.parseInt(argValue("--epoch", "1") as string, 10);
