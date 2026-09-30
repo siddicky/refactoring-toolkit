@@ -17,10 +17,10 @@ import { DEFAULT_MAX_CHILD_FLOWS, DEFAULT_MAX_FLOWS } from "./flow-select.js";
  */
 export const CLIENT_POLL_MS = 2_000;
 
-export const DEFAULT_PORT = 4646;
+const DEFAULT_PORT = 4646;
 
 /** Under the gitignored `.dex-cache/` (a sibling of the worker's own cache). */
-export const DEFAULT_BLOB_CACHE_DIR = ".dex-cache/dashboard";
+const DEFAULT_BLOB_CACHE_DIR = ".dex-cache/dashboard";
 
 /**
  * Kill-event sidecars the dashboard scans by default, relative to the working
@@ -73,7 +73,7 @@ export function isLoopbackHost(host: string): boolean {
   return h === "localhost" || h === "::1" || h === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(h);
 }
 
-export function csv(value: string | undefined, fallback: readonly string[]): string[] {
+function csv(value: string | undefined, fallback: readonly string[]): string[] {
   if (value === undefined || value.trim() === "") return [...fallback];
   return value
     .split(",")

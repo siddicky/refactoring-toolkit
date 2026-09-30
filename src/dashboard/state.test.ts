@@ -56,6 +56,30 @@ import {
   STATE_TRIAL,
 } from "./testdata.js";
 
+const flowView = (over: Partial<FlowView> = {}): FlowView => ({
+  flowId: "cx-5",
+  flowType: "port.Project",
+  status: "running",
+  startTime: "2026-09-26T10:00:00Z",
+  closeTime: null,
+  runId: "r1",
+  ...over,
+});
+
+const killEvent = (over: Partial<NormalizedKillEvent> = {}): NormalizedKillEvent => ({
+  source: "s",
+  kind: "intent",
+  runId: "k1",
+  utc: "2026-09-26T10:30:00Z",
+  monotonicMs: 1,
+  pids: [1],
+  signal: "SIGKILL",
+  reason: null,
+  note: null,
+  resumed: null,
+  ...over,
+});
+
 // ---------------------------------------------------------------------------
 // Envelope parsing
 // ---------------------------------------------------------------------------
@@ -978,19 +1002,8 @@ describe("aggregateAgentUsage (wave-5 cost honesty)", () => {
 });
 
 describe("lifecycleHeadline (wave-5 lifecycle flip)", () => {
-  const flow = (over: Partial<import("./types.js").FlowView>): import("./types.js").FlowView => ({
-    flowId: "cx-5",
-    flowType: "port.Project",
-    status: "running",
-    startTime: "2026-09-26T10:00:00Z",
-    closeTime: null,
-    runId: "r1",
-    ...over,
-  });
-  const kill = (utc: string): import("./types.js").NormalizedKillEvent => ({
-    source: "s", kind: "intent", runId: "r", utc, monotonicMs: 1, pids: [1],
-    signal: "SIGKILL", reason: null, note: null, resumed: null,
-  });
+  const flow = flowView;
+  const kill = (utc: string) => killEvent({ utc });
 
   test("running without kills", () => {
     const h = lifecycleHeadline({ flow: flow({}), filesDone: 2, filesTotal: 5, killEvents: [], dexAvailable: true, feed: [] });
@@ -1094,19 +1107,8 @@ describe("headline flow selection (C55)", () => {
 // ---------------------------------------------------------------------------
 
 describe("lifecycleHeadlineView (C54 structured headline)", () => {
-  const flow = (over: Partial<FlowView>): FlowView => ({
-    flowId: "cx-5",
-    flowType: "port.Project",
-    status: "running",
-    startTime: "2026-09-26T10:00:00Z",
-    closeTime: null,
-    runId: "r1",
-    ...over,
-  });
-  const kill = (utc: string): NormalizedKillEvent => ({
-    source: "s", kind: "intent", runId: "r", utc, monotonicMs: 1, pids: [1],
-    signal: "SIGKILL", reason: null, note: null, resumed: null,
-  });
+  const flow = flowView;
+  const kill = (utc: string) => killEvent({ utc });
   const args = { filesDone: 3, filesTotal: 5, dexAvailable: true, feed: [] as FeedEntry[] };
 
   test("a resumed headline is state 'resumed' even though its text contains the word 'killed'", () => {
@@ -1264,30 +1266,8 @@ describe("kill-event contract B: fired / flow_run_id (C59)", () => {
     expect(byRun("k5", "completed")?.fired).toBeNull(); // legacy metrics spelling: unknown
   });
 
-  const flow = (over: Partial<FlowView> = {}): FlowView => ({
-    flowId: "cx-5",
-    flowType: "port.Project",
-    status: "running",
-    startTime: "2026-09-26T10:00:00Z",
-    closeTime: null,
-    runId: "run-abc",
-    ...over,
-  });
-  const ev = (over: Partial<NormalizedKillEvent>): NormalizedKillEvent => ({
-    source: "s",
-    kind: "intent",
-    runId: "k1",
-    utc: "2026-09-26T10:30:00Z",
-    monotonicMs: 1,
-    pids: [1],
-    signal: "SIGKILL",
-    reason: null,
-    note: null,
-    resumed: null,
-    fired: null,
-    flowRunId: null,
-    ...over,
-  });
+  const flow = (over: Partial<FlowView> = {}) => flowView({ runId: "run-abc", ...over });
+  const ev = killEvent;
   const headline = (events: NormalizedKillEvent[], feedAt?: string) =>
     lifecycleHeadline({
       flow: flow(),

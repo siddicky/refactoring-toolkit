@@ -42,7 +42,7 @@ import type {
  * arrive while a load is running await the same promise instead of starting
  * their own (a resolved-value-only cache lets every concurrent request miss).
  */
-export class AsyncTtlCache<T> {
+class AsyncTtlCache<T> {
   readonly #ttlMs: number;
   readonly #clock: () => number;
   #value: { value: T; at: number } | null = null;

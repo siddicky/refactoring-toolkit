@@ -17,7 +17,7 @@ export const DEFAULT_MAX_FLOWS = 12;
 /** Default cap on SubFlow children inside that budget (separate from parents). */
 export const DEFAULT_MAX_CHILD_FLOWS = 8;
 /** Default cap on top-level port.Project runs kept first (newest first). */
-export const DEFAULT_MAX_PARENT_FLOWS = 3;
+const DEFAULT_MAX_PARENT_FLOWS = 3;
 
 /** Flows worth querying: the porting pipeline and the Phase 0 probe flows. */
 export function flowOfInterest(flowType: string): boolean {

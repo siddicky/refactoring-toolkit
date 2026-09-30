@@ -409,7 +409,7 @@ export const BURN_DOWN_FILE_SAMPLES: BurnDownSample[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Shapes the live flow really emits (audit C63): every fixture below models a
+// Shapes the live flow really emits: every fixture below models a
 // dashboard defect that the original fixtures could not express.
 // ---------------------------------------------------------------------------
 

@@ -1021,7 +1021,7 @@ function terminalHeadlineState(status: string): HeadlineState {
   }
 }
 
-/** Headline text plus the structured state/degraded flag behind it (C54). */
+/** Headline text plus the structured state/degraded flag behind it. */
 export function lifecycleHeadlineView(input: LifecycleHeadlineInput): HeadlineView {
   const { flow, filesDone, filesTotal } = input;
   if (flow === undefined) return { text: "no port flow found", state: "none", degraded: false };
@@ -1037,7 +1037,7 @@ export function lifecycleHeadlineView(input: LifecycleHeadlineInput): HeadlineVi
   const status = flow.status;
   // Every non-running status is terminal (completed/failed/terminated/
   // canceled/continued-as-new/timed-out...): print the status word instead of
-  // letting a stopped flow read as `running` (C55).
+  // letting a stopped flow read as `running`.
   if (status !== "running") {
     const killedNote =
       killAfterStart !== undefined && (status === "completed" || status === "failed") ? " (survived kill)" : "";
@@ -1067,7 +1067,7 @@ export function lifecycleHeadlineView(input: LifecycleHeadlineInput): HeadlineVi
 }
 
 /** Display word for a non-running dex flow status (lower-cased, prefix stripped). */
-export function terminalStatusWord(status: string): string {
+function terminalStatusWord(status: string): string {
   if (status === "continued_as_new") return "continued-as-new";
   if (status === "server_side_timeout_internal_only") return "timed-out";
   return status.replace(/_/g, "-");
@@ -1102,7 +1102,7 @@ export function isSubFlowChild(flowId: string): boolean {
  * True when `flowId` is the run flow itself or one of its SubFlow children
  * (dex names them `SubFlow:<parentFlowId>-<stepExecutionId>-<index>`).
  */
-export function belongsToRun(flowId: string, runFlowId: string): boolean {
+function belongsToRun(flowId: string, runFlowId: string): boolean {
   return flowId === runFlowId || flowId.startsWith(`SubFlow:${runFlowId}-`);
 }
 
@@ -1111,7 +1111,7 @@ export function belongsToRun(flowId: string, runFlowId: string): boolean {
  * (SubFlow children and probe.* flows never hijack it); any other top-level
  * flow is only a fallback when no port.Project exists. `flows` is newest-first.
  */
-export function pickHeadlineFlow(flows: readonly FlowView[]): FlowView | undefined {
+function pickHeadlineFlow(flows: readonly FlowView[]): FlowView | undefined {
   const topLevel = flows.filter((f) => !isSubFlowChild(f.flowId));
   return topLevel.find((f) => f.flowType === "port.Project") ?? topLevel[0];
 }
@@ -1171,7 +1171,7 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
   // US-007: merge stream-delivered events (subscriber receipt) into the feed.
   // Stream messages are UPSERTS: an envelope's start and completion events
   // share one key (flowId#stepId#attempt#startedAt), so the merge keeps the
-  // most complete row instead of the first one seen (C52). An event that BOTH
+  // most complete row instead of the first one seen. An event that BOTH
   // the stream and a poll delivered still appears once; events for flows
   // outside the selection still render (their flowId rides the entry).
   if (input.streamFeed !== undefined && input.streamFeed.length > 0) {

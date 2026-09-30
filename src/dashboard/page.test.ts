@@ -360,6 +360,9 @@ describe("flows table stream mode (C57)", () => {
 });
 
 describe("usage table fresh input (C60)", () => {
+  /** Cell HTML of the first usage row: role, calls, input (fresh), cache-read, output, reasoning, cost. */
+  const usageCells = (page: LoadedPage) =>
+    [...(page.el("usage").tBodies[0]?.innerHTML ?? "").matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
   const usage = (over: Record<string, unknown>) => ({
     role: "review",
     calls: 2,
@@ -376,8 +379,7 @@ describe("usage table fresh input (C60)", () => {
   test("a cache-heavy role shows its real fresh input, not a clamped 0", () => {
     const page = loadPage();
     page.api.renderUsage([usage({})]);
-    const cells = [...(page.el("usage").tBodies[0]?.innerHTML ?? "").matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
-    // role, calls, input (fresh), cache-read, output, reasoning, cost
+    const cells = usageCells(page);
     expect(cells[2]).toBe("329,000");
     expect(cells[3]).toBe("576,000");
   });
@@ -392,7 +394,7 @@ describe("usage table fresh input (C60)", () => {
     const row = usage({});
     delete (row as Record<string, unknown>).freshInput;
     page.api.renderUsage([row]);
-    const cells = [...(page.el("usage").tBodies[0]?.innerHTML ?? "").matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
+    const cells = usageCells(page);
     expect(cells[2]).toBe("329,000");
   });
 });
@@ -420,7 +422,7 @@ describe("burn-down chart not-run points (C56)", () => {
     page.api.renderBurnDown(series([ran, notRun, after]));
     const polylines = page.el("burndown").innerHTML.match(/<polyline /g) ?? [];
     // iteration 1 and iteration 3 are isolated single-point segments (no polyline to join them).
-    expect(polylines.length).toBeLessThanOrEqual(0);
+    expect(polylines).toHaveLength(0);
     expect(page.el("burndown").innerHTML.match(/<circle /g)?.length).toBe(3);
   });
 

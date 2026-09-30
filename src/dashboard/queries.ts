@@ -487,18 +487,15 @@ export type EnvelopeStreamReader = (
   timeoutMs: number,
 ) => Promise<StreamRead>;
 
-/** Per-flow subscriber mode: live stream, or poll fallback after a failure. */
-export type SubscriberMode = StreamMode;
-
 export interface EnvelopeStreamSubscriber {
   /** Follow the given flow ids (starts loops; stops loops for removed ids). */
   follow(flowIds: readonly string[]): void;
   /** Buffered stream events for one flow, in arrival order (bounded). */
   recentEvents(flowId: string): StreamEventMessage[];
   /** Current mode of one flow's source ("poll-fallback" once it has failed). */
-  mode(flowId: string): SubscriberMode;
+  mode(flowId: string): StreamMode;
   /** Mode of every FOLLOWED flow (surfaced per flow in /api/state). */
-  modes(): Record<string, SubscriberMode>;
+  modes(): Record<string, StreamMode>;
   /** Count of buffered events per flow (render/test convenience). */
   size(flowId: string): number;
   /** Stops every loop; the buffered events remain readable. */
@@ -545,8 +542,7 @@ function describeStreamError(err: unknown): string {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    (timer as { unref?: () => void }).unref?.();
+    setTimeout(resolve, ms).unref();
   });
 }
 
@@ -575,7 +571,7 @@ export function startEnvelopeStreamSubscriber(
   interface LoopState {
     token: string;
     buffer: StreamEventMessage[];
-    mode: SubscriberMode;
+    mode: StreamMode;
     /** Cleared by follow() dropping the flow and by stop(): ends the loop. */
     active: boolean;
   }
@@ -639,7 +635,7 @@ export function startEnvelopeStreamSubscriber(
       return loops.get(flowId)?.mode ?? "poll-fallback";
     },
     modes() {
-      const out: Record<string, SubscriberMode> = {};
+      const out: Record<string, StreamMode> = {};
       for (const [flowId, state] of loops) out[flowId] = state.mode;
       return out;
     },
