@@ -22,9 +22,13 @@
  * for the trigger, and the follow cursor is pinned to the drained HEAD — the
  * follow long-poll then sees post-arm messages ~immediately instead of
  * consuming a stale backlog at ~1 message/pollInterval (cx8: cursor ~28 min
- * behind; both ~1.1-1.6 s queue-verify windows missed). Keep the follow
- * cadence SHORT (`--poll-seconds 1..5`) so a message published mid-cycle is
- * read within seconds of its window, not after a full default interval.
+ * behind; both ~1.1-1.6 s queue-verify windows missed). The follow long-poll
+ * wakes the moment a message is published, so `--poll-seconds` only sets the
+ * poll-fallback cadence; the reads AFTER the first event use their own short
+ * `--catch-up-seconds` (default 1 s — the SDK takes whole seconds and 0 means
+ * the 60 s server default, not "no wait"), so the DONE that closes the kill
+ * window can no longer land in the same batch as its START and cancel the kill
+ * (audit C27). A window shorter than ~1 s stays structurally unkillable.
  *
  * Scope: kill only. The resume (dex server + worker restart on the same DB)
  * stays the documented operator procedure — this watcher never restarts
@@ -32,7 +36,8 @@
  *
  * Usage:
  *   bun run scripts/watch-queue-verify.ts --flow-id <id> --run-id <runId> \
- *     --events /tmp/kill-events.jsonl [--deadline-minutes 30] [--poll-seconds 60]
+ *     --events /tmp/kill-events.jsonl [--deadline-minutes 30] [--poll-seconds 60] \
+ *     [--catch-up-seconds 1]
  *
  * Env: DEX_SERVER_ADDRESS / DEX_BLOB_CACHE_DIR (per-process cache dir is
  * deliberate — cross-process BlobCache sharing is not the guidance).
@@ -125,6 +130,7 @@ async function main(): Promise<number> {
   const eventsPath = argValue("--events", "/tmp/kill-events.jsonl") as string;
   const deadlineMinutes = Number.parseInt(argValue("--deadline-minutes", "30") as string, 10);
   const pollSeconds = Number.parseInt(argValue("--poll-seconds", "60") as string, 10);
+  const catchUpSeconds = Number.parseInt(argValue("--catch-up-seconds", "1") as string, 10);
 
   // Read-side stream client: a registry with EXACTLY the flow type that owns
   // envelopeStream (port.Project — one-flow stream ownership, dex Registry
@@ -191,6 +197,7 @@ async function main(): Promise<number> {
     const result = await runQueueVerifyWatcher({
       deadlineMs: deadlineMinutes * 60_000,
       pollIntervalMs: pollSeconds * 1_000,
+      catchUpTimeoutMs: catchUpSeconds * 1_000,
       drainBacklog,
       nextStreamEvent: async (timeoutMs) => {
         if (runtime === undefined) return null; // poll-only degradation

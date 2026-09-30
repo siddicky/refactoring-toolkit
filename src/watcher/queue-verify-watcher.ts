@@ -30,7 +30,11 @@
  *   backlog published AFTER arm re-created the cx8 miss inside the window.
  *   After each (non-empty) follow read the loop now keeps reading until the
  *   retained events are exhausted BEFORE any poll/terminal check or sleep —
- *   a full backlog published mid-watch is consumed within one cycle.
+ *   a full backlog published mid-watch is consumed within one cycle. The
+ *   catch-up reads use their OWN short `catchUpTimeoutMs` (default 1 s, the
+ *   SDK's whole-second floor), never the poll interval: a full-interval wait
+ *   after a START let its DONE (same event key) land in the same batch and
+ *   the stale-start guard cancelled the kill (audit C27).
  * - STALE-START GUARD: a start in the drained backlog fires only when its
  *   attempt is still ACTIVE (no same-key completion appears later in the
  *   backlog — start/completion correlated by event key) AND the flow has
@@ -118,6 +122,18 @@ export interface QueueVerifyWatcherOptions {
   deadlineMs: number;
   /** Poll cadence (production: 60 s). */
   pollIntervalMs: number;
+  /**
+   * Long-poll budget for every stream read AFTER the first event of a cycle
+   * (the catch-up reads). Default `min(pollIntervalMs, 1000)`. It MUST stay
+   * short and non-zero: with a full `pollIntervalMs` the read that follows a
+   * START blocks for the whole interval, the queue-verify DONE (same event
+   * key) lands in that same batch, and the stale-start guard then suppresses
+   * the kill (audit C27). The dex SDK only takes whole seconds, and 0 means
+   * "server default long-poll" (60 s — measured against a live dex server),
+   * NOT "do not wait", so 1000 ms is the practical floor. A value <= 0 falls
+   * back to the default.
+   */
+  catchUpTimeoutMs?: number;
   /** Monotonic-ish clock injection (tests advance it manually). */
   now?: () => number;
   /** Sleep injection (tests resolve immediately / pump the fake clock). */
@@ -134,6 +150,9 @@ export interface WatcherResult {
   firings: number;
 }
 
+/** Practical floor of a stream read wait: whole seconds (SDK), 0 = server default. */
+export const DEFAULT_CATCH_UP_TIMEOUT_MS = 1_000;
+
 const DEFAULT_NOW = () => Date.now();
 const DEFAULT_SLEEP = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -144,6 +163,10 @@ export async function runQueueVerifyWatcher(
   const sleep = options.sleep ?? DEFAULT_SLEEP;
   const log = options.log ?? (() => {});
   const start = now();
+  const catchUpTimeoutMs =
+    options.catchUpTimeoutMs !== undefined && options.catchUpTimeoutMs > 0
+      ? options.catchUpTimeoutMs
+      : Math.min(options.pollIntervalMs, DEFAULT_CATCH_UP_TIMEOUT_MS);
   let fired = false;
   let streamUsable = true;
 
@@ -219,10 +242,19 @@ export async function runQueueVerifyWatcher(
         let event = await options.nextStreamEvent(options.pollIntervalMs);
         if (event !== null) {
           const batch: WatcherStreamEvent[] = [];
+          // Lookahead budget (C27): once a START is in the batch, the rest of
+          // the retained events are read for at most catchUpTimeoutMs — enough
+          // to see a same-key DONE that is ALREADY retained, short enough that
+          // a DONE published ~1.5 s later cannot land in this batch and cancel
+          // the kill. Quiet stream: the empty catch-up read times out after
+          // catchUpTimeoutMs. Busy stream: the budget check below ends it.
+          let startSeenAt: number | null = null;
           while (event !== null) {
             batch.push(event);
+            if (startSeenAt === null && isQueueVerifyStart(event)) startSeenAt = now();
             if (now() - start >= options.deadlineMs) break; // bounded drain
-            event = await options.nextStreamEvent(options.pollIntervalMs);
+            if (startSeenAt !== null && now() - startSeenAt >= catchUpTimeoutMs) break;
+            event = await options.nextStreamEvent(catchUpTimeoutMs);
           }
           // Follow-path stale-start guard (fix-wave, same correlation as the
           // arm-time drain): fire only on a start whose attempt is UNMATCHED
