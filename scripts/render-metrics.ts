@@ -37,6 +37,7 @@ import {
   collectJevUsage,
   collectTombstones,
   collectVerdicts,
+  discoverChildFlowIds,
   type FlowFacts,
   flowFactsFromSummary,
   type FlowSummaryWire,
@@ -91,29 +92,39 @@ export function dexcliInvocation(
   };
 }
 
-function runDexcli(args: readonly string[]): unknown {
+/** One dexcli read returning the parsed JSON payload (injectable for tests). */
+export type DexRunner = (args: readonly string[]) => unknown;
+
+const runDexcli: DexRunner = (args) => {
   const call = dexcliInvocation(args);
   const stdout = execFileSync(call.bin, call.args, {
     encoding: "utf8",
     maxBuffer: 256 * 1024 * 1024,
   });
   return JSON.parse(stdout);
-}
+};
 
 /**
- * Dispatch history of the flow's FIRST and CURRENT run (from `flow summary`):
- * a continue-as-new flow (dex housekeeping at its event threshold) accumulates
- * envelopes across runs while `flow history` returns one run at a time — the
- * anchor needs both runs' dispatch entries or first-run envelopes fail as
- * anchorless. `dexcli flow summary` exposes no run chain, so a flow with three
- * or more runs is not fully covered (the middle runs are not enumerable).
+ * Dispatch history of a flow's FIRST and CURRENT run (from its `flow
+ * summary`). A continue-as-new flow (dex housekeeping at its event threshold)
+ * accumulates envelopes across runs while `flow history` returns one run at a
+ * time, so the anchor needs both runs' dispatch entries or first-run envelopes
+ * fail as anchorless. `dexcli flow summary` exposes no run chain, so the
+ * middle runs of a flow with three or more runs are NOT enumerable and not
+ * covered. The parent and every child use this same helper.
  */
-function mergedHistory(facts: FlowFacts): DispatchHistory {
+export function mergedHistory(facts: FlowFacts, run: DexRunner = runDexcli): DispatchHistory {
   const events = facts.runIds.flatMap((rid) => {
-    const h = runDexcli(["flow", "history", facts.flowId, "-run-id", rid, "-all"]) as DispatchHistory;
+    const h = run(["flow", "history", facts.flowId, "-run-id", rid, "-all"]) as DispatchHistory;
     return h.events ?? [];
   });
   return { flowId: facts.flowId, runId: facts.runId, events };
+}
+
+/** {@link mergedHistory} for a flow known only by id (fetches its summary first). */
+export function mergedHistoryOf(flowId: string, run: DexRunner = runDexcli): DispatchHistory {
+  const summary = run(["flow", "summary", flowId]) as FlowSummaryWire;
+  return mergedHistory(flowFactsFromSummary(flowId, summary), run);
 }
 
 async function main(argv: readonly string[]): Promise<number> {
@@ -140,41 +151,11 @@ async function main(argv: readonly string[]): Promise<number> {
   const attrs = state.attributes ?? [];
   const flowCompleted = facts.flowCompleted;
 
-  // Parallel topology (v1.1): child flows are published by the parent under
-  // `pp-wave-children/children` — but that attribute is OVERWRITTEN on every wave, so
-  // the final state only names the LAST wave's children (live finding cx-5e:
-  // 10 children across 6 waves, 1 in final state). Walk the parent's durable
-  // HISTORY for every pp-wave-children upsert, then merge the final state's
-  // copy; every child's envelope/verdict/burn-down evidence joins the report.
-  const childIds: Set<string> = new Set();
-  for (const a of attrs) {
-    if (!a.key.startsWith("pp-wave-children")) continue;
-    const v = a.value as { children?: Array<{ flowId?: string }> } | null;
-    for (const c of v?.children ?? []) {
-      if (typeof c?.flowId === "string" && c.flowId.length > 0) childIds.add(c.flowId);
-    }
-  }
-  interface HistoryChildrenWire {
-    events?: Array<{
-      payload?: {
-        output?: {
-          upsertAttributes?: Array<{
-            key?: string;
-            value?: { children?: Array<{ flowId?: string }> };
-          }>;
-        };
-      };
-    }>;
-  }
-  const parentHistory = runDexcli(["flow", "history", flowId, "-all"]) as HistoryChildrenWire;
-  for (const event of parentHistory.events ?? []) {
-    for (const up of event.payload?.output?.upsertAttributes ?? []) {
-      if (up?.key === undefined || !up.key.startsWith("pp-wave-children")) continue;
-      for (const c of up.value?.children ?? []) {
-        if (typeof c?.flowId === "string" && c.flowId.length > 0) childIds.add(c.flowId);
-      }
-    }
-  }
+  // Parallel topology (v1.1): every child's envelope/verdict/burn-down
+  // evidence joins the report. Children come from the parent's final state AND
+  // every pp-wave-children upsert in its durable history.
+  const history = mergedHistory(facts);
+  const childIds = discoverChildFlowIds(attrs, history.events);
   const envelopes: EnvelopeEvent[] = [];
   const verdicts: VerdictRecord[] = [];
   const tombstones: Array<VerdictTombstone & { file: string; round: number }> = [];
@@ -189,10 +170,8 @@ async function main(argv: readonly string[]): Promise<number> {
     jevUsage.push(...collectJevUsage(s.attributes ?? []));
   }
 
-  const history = mergedHistory(facts);
   for (const id of childIds) {
-    const h = runDexcli(["flow", "history", id, "-all"]) as DispatchHistory;
-    history.events.push(...(h.events ?? []));
+    history.events.push(...mergedHistoryOf(id).events);
   }
   // Contract B: one sidecar parser; only this flow's kills (run id, flow id)
   // are attributed to it; malformed lines are reported, not dropped.

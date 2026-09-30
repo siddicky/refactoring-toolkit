@@ -243,3 +243,46 @@ export function flowFactsFromSummary(flowId: string, summary: FlowSummaryWire): 
     flowCompleted: summary.flowStatus === FLOW_STATUS_COMPLETED,
   };
 }
+
+/** History events that may carry `pp-wave-children` attribute upserts (dexcli wire subset). */
+interface WaveChildrenHistoryEvent {
+  payload?: {
+    output?: {
+      upsertAttributes?: Array<{
+        key?: string;
+        value?: { children?: Array<{ flowId?: string }> };
+      }>;
+    };
+  };
+}
+
+/**
+ * Child flow ids of a parallel-topology parent. The parent publishes its
+ * children under `pp-wave-children/children`, but that attribute is
+ * OVERWRITTEN on every wave, so the final state only names the LAST wave's
+ * children (live finding cx-5e: 10 children across 6 waves, 1 in final
+ * state). Walk the parent's durable history for every pp-wave-children upsert
+ * and merge the final state's copy.
+ */
+export function discoverChildFlowIds(
+  attrs: readonly StateAttribute[],
+  historyEvents: readonly unknown[],
+): string[] {
+  const ids = new Set<string>();
+  const add = (children: Array<{ flowId?: string }> | undefined): void => {
+    for (const c of children ?? []) {
+      if (typeof c?.flowId === "string" && c.flowId.length > 0) ids.add(c.flowId);
+    }
+  };
+  for (const a of attrs) {
+    if (!a.key.startsWith("pp-wave-children")) continue;
+    add((a.value as { children?: Array<{ flowId?: string }> } | null)?.children);
+  }
+  for (const event of historyEvents as readonly WaveChildrenHistoryEvent[]) {
+    for (const up of event?.payload?.output?.upsertAttributes ?? []) {
+      if (up?.key === undefined || !up.key.startsWith("pp-wave-children")) continue;
+      add(up.value?.children);
+    }
+  }
+  return [...ids];
+}
