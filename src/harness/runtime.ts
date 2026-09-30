@@ -790,17 +790,39 @@ export function composeFixerTurn(input: {
 // ---------------------------------------------------------------------------
 
 /**
+ * Per-file symbol cap (cost guard: every symbol costs two Jev calls). Shared
+ * by the port flow and scripts/jev-spot-check.ts so the spot-check grades the
+ * production path; truncation is REPORTED (see {@link SymbolHarvest},
+ * {@link renderSymbolTable}), never silent.
+ */
+export const SYMBOL_HARVEST_CAP = 20;
+
+/** Result of one file's symbol harvest, including what the cap cut off. */
+export interface SymbolHarvest {
+  symbols: PhpSymbol[];
+  /** Distinct symbols found beyond the cap (0 when nothing was truncated). */
+  omitted: number;
+}
+
+/**
  * Deterministic, code-only harvest of PHP symbols from one source file
  * (read-only input for the per-symbol table). Zero model calls. Captures
  * named functions, class methods, and typed properties, each with its
- * immediately preceding docblock when present.
+ * immediately preceding docblock when present. Comment lines never yield
+ * symbols (`/** ... function helper(x) ... *\/` is prose, not a function).
  *
- * @param cap maximum symbols returned (seed-scale cost guard); default 12.
+ * @param cap maximum symbols returned (cost guard); default {@link SYMBOL_HARVEST_CAP}.
  */
-export function harvestPhpSymbols(fileName: string, phpSource: string, cap = 12): PhpSymbol[] {
+export function harvestPhpSymbols(fileName: string, phpSource: string, cap = SYMBOL_HARVEST_CAP): PhpSymbol[] {
+  return harvestPhpSymbolsReport(fileName, phpSource, cap).symbols;
+}
+
+/** {@link harvestPhpSymbols} plus the count of symbols the cap omitted. */
+export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap = SYMBOL_HARVEST_CAP): SymbolHarvest {
   const lines = phpSource.split("\n");
   const symbols: PhpSymbol[] = [];
   const seen = new Set<string>();
+  let omitted = 0;
 
   const docblockBefore = (index: number): string | null => {
     // Walk upward from `index` (line of the signature), skipping blanks and
@@ -829,8 +851,12 @@ export function harvestPhpSymbols(fileName: string, phpSource: string, cap = 12)
     docblockOverride?: string,
   ): void => {
     const key = `${kind}:${name}`;
-    if (seen.has(key) || symbols.length >= cap) return;
+    if (seen.has(key)) return;
     seen.add(key);
+    if (symbols.length >= cap) {
+      omitted++;
+      return;
+    }
     symbols.push({
       name,
       kind,
@@ -852,22 +878,37 @@ export function harvestPhpSymbols(fileName: string, phpSource: string, cap = 12)
     }
   }
 
+  let inBlockComment = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    // Typed properties with a @var docblock are harvested via their docblock
-    // annotation (handled below); functions and methods via signatures.
-    const fn = /(?:public|protected|private)?\s*(?:static\s+)?function\s+(\w+)\s*\(([^)]*)\)/.exec(line);
-    if (fn !== null) {
-      const name = fn[1] ?? "";
-      push(name === "__construct" ? "method" : "method", name, line.trim(), i);
-      continue;
+    const trimmed = line.trim();
+    // Comment lines are prose: neither a declaration regex nor a phantom
+    // `function` mention inside a docblock may produce a symbol.
+    let isComment = false;
+    if (inBlockComment) {
+      isComment = true;
+      if (trimmed.includes("*/")) inBlockComment = false;
+    } else if (trimmed.startsWith("/*")) {
+      isComment = true;
+      if (!trimmed.includes("*/")) inBlockComment = true;
+    } else if (trimmed.startsWith("//") || (trimmed.startsWith("#") && !trimmed.startsWith("#["))) {
+      isComment = true;
     }
-    const prop = /@(?:var)\s+([\w\\\[\|]+)\s*\n/.exec(line) ?? null;
-    void prop;
-    const typedProp = /^(?:public|protected|private)\s+(?:readonly\s+)?\??[\w\\]+\s+\$(\w+)/.exec(line.trim());
-    if (typedProp !== null) {
-      push("property", typedProp[1] ?? "", line.trim(), i);
-      continue;
+    if (!isComment) {
+      // Typed properties with a @var docblock are harvested via their docblock
+      // annotation (handled below); functions and methods via signatures.
+      // Trailing comments are dropped so `// function x(` is not a symbol.
+      const code = line.replace(/\/\*.*?\*\//g, "").replace(/\s\/\/.*$/, "");
+      const fn = /(?:public|protected|private)?\s*(?:static\s+)?function\s+(\w+)\s*\(([^)]*)\)/.exec(code);
+      if (fn !== null) {
+        push("method", fn[1] ?? "", code.trim(), i);
+        continue;
+      }
+      const typedProp = /^(?:public|protected|private)\s+(?:readonly\s+)?\??[\w\\]+\s+\$(\w+)/.exec(code.trim());
+      if (typedProp !== null) {
+        push("property", typedProp[1] ?? "", code.trim(), i);
+        continue;
+      }
     }
     // @var-annotated properties: the @var line itself names the symbol.
     const varAnnot = /@var\s+([\w\\\[\|]+)\s*$/.exec(line.trim());
@@ -879,7 +920,47 @@ export function harvestPhpSymbols(fileName: string, phpSource: string, cap = 12)
       }
     }
   }
-  return symbols;
+  return { symbols, omitted };
+}
+
+/** One per-symbol table row as the planner turn renders it. */
+export interface SymbolTableRowView {
+  file: string;
+  symbol: string;
+  kind: string;
+  candidates: readonly string[];
+  selected: string;
+  flagged: boolean;
+}
+
+/**
+ * Markdown per-symbol table handed to the planner. When `sources` are given,
+ * a file whose harvest was cut by the cap gets an explicit note, so the table
+ * is never mistaken for complete ("N of M symbols listed").
+ */
+export function renderSymbolTable(
+  rows: readonly SymbolTableRowView[],
+  sources: ReadonlyArray<{ name: string; source: string }> = [],
+): string {
+  const lines = [
+    "| Symbol | Kind | File | Candidates | Selected | Flagged |",
+    "|---|---|---|---|---|---|",
+    ...rows.map(
+      (r) =>
+        `| ${r.symbol} | ${r.kind} | ${r.file} | ${r.candidates.join(", ") || "—"} | ${r.selected} | ${r.flagged ? "yes" : "no"} |`,
+    ),
+  ];
+  for (const f of sources) {
+    const total = harvestPhpSymbols(f.name, f.source, Number.POSITIVE_INFINITY).length;
+    const listed = rows.filter((r) => r.file === f.name).length;
+    if (total > listed) {
+      lines.push(
+        "",
+        `> TRUNCATED: ${f.name} lists ${listed} of ${total} harvested symbols; the other ${total - listed} have NO pre-computed type — decide theirs from the PHP source.`,
+      );
+    }
+  }
+  return lines.join("\n");
 }
 
 /**

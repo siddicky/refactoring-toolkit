@@ -97,6 +97,7 @@ import {
   composePrepReviseTurn,
   composeQueueFixTurn,
   harvestPhpSymbols,
+  renderSymbolTable,
 } from "../src/harness/runtime.js";
 import {
   buildTscQueueState,
@@ -1331,7 +1332,7 @@ const PrepStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput
     const symbols: PhpSymbol[] = [];
     for (const file of input.files) {
       const source = await readFile(join(input.sourceRoot, file), "utf8");
-      symbols.push(...harvestPhpSymbols(file, source, 12));
+      symbols.push(...harvestPhpSymbols(file, source));
     }
     ppPrepSeed.set(ctx, "seed", { stubRaw: raw, symbols });
     ppPrepState.set(ctx, "state", { prepIteration: 0 });
@@ -2107,18 +2108,11 @@ const PrepGenerateStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
     if (seed === undefined || symtab === undefined) {
       throw new Error("prep seed/symbol table missing");
     }
-    const symbolTableText = [
-      "| Symbol | Kind | File | Candidates | Selected | Flagged |",
-      "|---|---|---|---|---|---|",
-      ...symtab.rows.map(
-        (r) =>
-          `| ${r.symbol} | ${r.kind} | ${r.file} | ${r.candidates.join(", ") || "—"} | ${r.selected} | ${r.flagged ? "yes" : "no"} |`,
-      ),
-    ].join("\n");
     const sources: Array<{ name: string; source: string }> = [];
     for (const file of input.files) {
       sources.push({ name: file, source: await readFile(join(input.sourceRoot, file), "utf8") });
     }
+    const symbolTableText = renderSymbolTable(symtab.rows, sources);
     const turn = composePrepGenerateTurn({
       phpFiles: sources,
       symbolTableText,
