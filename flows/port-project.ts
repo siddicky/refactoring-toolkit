@@ -2016,6 +2016,17 @@ const CommitStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoun
   stepId: "pp-commit",
   role: "commit",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  // This step is the COMMIT-TIME subset of the recovery decision table: keyed
+  // dedup (op-ID scan across ALL branches) plus the C1 cross-branch
+  // reachability fix. It deliberately does NOT call reconcile()/applyReconcile()
+  // (src/git/worktree.ts): those are the round-START recovery table that
+  // `recover-port` (scripts/run-demo.ts) applies to a worktree before
+  // re-dispatch. At commit time the lease worktree is dirty BY DESIGN (the
+  // implementer's uncommitted output), and reconcile's `redone` arm resets a
+  // dirty worktree to the lease base — wiring it in here would wipe the
+  // round's own work. The `poisoned` rows (marker committed but no keyed
+  // commit; no-op marker beside a keyed commit) are therefore raised by
+  // recovery, not by this step.
   inner: async (ctx, fri) => {
     const opId = operationId(fri.file, fri.round);
     const key = markerKeyOf(fri.file, fri.round);

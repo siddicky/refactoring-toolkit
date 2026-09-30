@@ -21,9 +21,11 @@ import type { Context, StepDecision } from "@superdurable/dex";
 import {
   LEASE_SLOT_CAP,
   PortProjectFlow,
+  ppBootstrap,
   ppConfig,
-  ppLease,
   ppDiff,
+  ppLease,
+  ppMarker,
   ppOut,
   ppPrep,
   ppPrepDiff,
@@ -31,13 +33,23 @@ import {
   ppPrepSeed,
   ppPrepState,
   ppQueue,
+  type BootstrapRecord,
   type CapturedDiff,
   type FileRoundInput,
   type PortQueueState,
   type PortRunInput,
 } from "../flows/port-project.js";
+import { envelopeEvents, type EnvelopeEvent } from "../flows/steps/envelope.js";
 import { git } from "../src/git/exec.js";
-import { findCommitByOpId, operationId, type LeaseRecord } from "../src/git/worktree.js";
+import {
+  commitLeaseChanges,
+  findCommitByOpId,
+  InMemoryLeaseStore,
+  operationId,
+  WorktreePool,
+  type CompletionMarker,
+  type LeaseRecord,
+} from "../src/git/worktree.js";
 
 // ---------------------------------------------------------------------------
 // Harness: stub dex Context with declared-load enforcement
@@ -433,4 +445,303 @@ describe("C88: PrepDiffCapture no longer swallows failures of its diff command",
       else process.env.PATH = originalPath;
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// C92: the remaining core steps, arm by arm
+// ---------------------------------------------------------------------------
+
+function completedEnvelope(stores: Stores): EnvelopeEvent | undefined {
+  return ([...(stores.get(envelopeEvents)?.values() ?? [])] as EnvelopeEvent[]).find((e) => e.ended_at !== null);
+}
+
+const ROUND1_OPID = operationId("src/A.php", 1);
+
+describe("C92: DispatchStep arms", () => {
+  const base: PortRunInput = {
+    repoRoot: "/r",
+    worktreeRoot: "/r/.wt",
+    integrationWorktreePath: "/r/.wt/integration",
+    epoch: 4,
+    sourceRoot: "/r/php",
+    prepPath: "/r/stub-prep.md",
+    files: ["src/A.php", "src/B.php"],
+    maxRounds: 2,
+    dispatchMode: "sequential",
+  };
+
+  function dispatchStores(queue: PortQueueState, maxRounds = 2): Stores {
+    const stores: Stores = new Map();
+    seed(stores, ppConfig, "config", { maxRounds, prepMaxRounds: 2 });
+    seed(stores, ppQueue, "queue", queue);
+    return stores;
+  }
+
+  test("sequential start: claims the first pending file at the run epoch and routes to Lease", async () => {
+    const flow = new PortProjectFlow();
+    const stores = dispatchStores({ pending: ["src/A.php", "src/B.php"], current: null, done: [], blocked: [] });
+    const next = nextOf(await run(stores, flow.dispatch, base));
+    expect(next.step).toBe(flow.lease.constructor);
+    expect(next.input.done).toBe(false);
+    expect(peek<PortQueueState>(stores, ppQueue, "queue")).toEqual({
+      pending: ["src/B.php"],
+      current: { file: "src/A.php", round: 1, epoch: 4 },
+      done: [],
+      blocked: [],
+    });
+    expect(completedEnvelope(stores)?.outcome).toBe("completed");
+  });
+
+  test("sequential resume: an in-flight file (kill mid-file) stays current; pending is untouched", async () => {
+    const flow = new PortProjectFlow();
+    const queue: PortQueueState = {
+      pending: ["src/B.php"],
+      current: { file: "src/A.php", round: 1, epoch: 3 },
+      done: [],
+      blocked: [],
+    };
+    const stores = dispatchStores(queue);
+    const next = nextOf(await run(stores, flow.dispatch, base));
+    expect(next.step).toBe(flow.lease.constructor);
+    expect(peek<PortQueueState>(stores, ppQueue, "queue")).toEqual(queue);
+  });
+
+  test("an empty queue routes to the verify queue with done=true in both modes", async () => {
+    const flow = new PortProjectFlow();
+    const empty: PortQueueState = { pending: [], current: null, done: [], blocked: [] };
+    for (const dispatchMode of ["sequential", "parallel"] as const) {
+      const stores = dispatchStores(empty);
+      const next = nextOf(await run(stores, flow.dispatch, { ...base, dispatchMode }));
+      expect(next.step).toBe(flow.queueVerify.constructor);
+      expect(next.input.done).toBe(true);
+    }
+  });
+
+  test("blocked: an in-flight file past the round cap moves to blocked with its reason (outcome skipped)", async () => {
+    const flow = new PortProjectFlow();
+    const stores = dispatchStores(
+      { pending: ["src/B.php"], current: { file: "src/A.php", round: 3, epoch: 4 }, done: [], blocked: [] },
+      2,
+    );
+    await run(stores, flow.dispatch, base);
+    const queue = peek<PortQueueState>(stores, ppQueue, "queue");
+    expect(queue?.blocked).toEqual([{ file: "src/A.php", round: 3, reason: "round cap 2 exceeded" }]);
+    expect(queue?.current).toBeNull();
+    expect(completedEnvelope(stores)?.outcome).toBe("skipped");
+  });
+});
+
+describe("C92: LeaseStep arms", () => {
+  const input: PortRunInput = {
+    repoRoot: "/nonexistent-repo",
+    worktreeRoot: "/nonexistent-repo/.wt",
+    integrationWorktreePath: "/nonexistent-repo/.wt/integration",
+    epoch: 1,
+    sourceRoot: "/r/php",
+    prepPath: "/r/stub-prep.md",
+    files: ["src/A.php"],
+    maxRounds: 2,
+    dispatchMode: "sequential",
+  };
+  const lease = (file: string, epoch: number): LeaseRecord => ({
+    file,
+    worktreePath: `/nonexistent-repo/.wt/${file.replace(/\//g, "_")}-${epoch}`,
+    branch: `lease/${file}/${epoch}`,
+    epoch,
+    baseSha: "abc",
+    holderExecutionId: `pp-${epoch}`,
+    acquiredAtUtc: "2026-09-30T00:00:00.000Z",
+  });
+
+  test("a queue exhausted between dispatch and lease ends gracefully (skipped -> Final), not an error loop", async () => {
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    seed(stores, ppQueue, "queue", { pending: [], current: null, done: [], blocked: [] } satisfies PortQueueState);
+    const next = nextOf(await run(stores, flow.lease, input));
+    expect(next.step).toBe(flow.final.constructor);
+    expect(completedEnvelope(stores)?.outcome).toBe("skipped");
+  });
+
+  test("a current-epoch lease surviving a kill is reused (no git, no second acquire)", async () => {
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    seed(stores, ppQueue, "queue", { pending: [], current: { file: "src/A.php", round: 1, epoch: 1 }, done: [], blocked: [] } satisfies PortQueueState);
+    seed(stores, ppLease, "pool", { "src/A.php": lease("src/A.php", 1) });
+    const next = nextOf(await run(stores, flow.lease, input));
+    expect(next.step).toBe(flow.fence.constructor);
+    expect(next.input.worktreePath).toBe(lease("src/A.php", 1).worktreePath);
+    expect(next.input.branch).toBe("lease/src/A.php/1");
+    expect(next.input.dispatchMode).toBe("sequential"); // run fields ride the file-round
+  });
+
+  test("a genuine overload still fails loudly: a third live lease at the epoch is refused by the pool cap", async () => {
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    seed(stores, ppQueue, "queue", { pending: [], current: { file: "src/C.php", round: 1, epoch: 1 }, done: [], blocked: [] } satisfies PortQueueState);
+    seed(stores, ppLease, "pool", { "src/A.php": lease("src/A.php", 1), "src/B.php": lease("src/B.php", 1) });
+    await expect(run(stores, flow.lease, input)).rejects.toThrow(/lease failed for src\/C\.php: worktree cap \(2\) reached/);
+  });
+
+  test("a stale-epoch lease (recovery bumped the epoch) is reclaimed and re-acquired at the new epoch", async () => {
+    const fx = await makeBootstrappedRepo();
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    const run1 = runInput(fx, ["src/A.php"], { dispatchMode: "sequential" });
+    seed(stores, ppQueue, "queue", { pending: [], current: { file: "src/A.php", round: 1, epoch: 1 }, done: [], blocked: [] } satisfies PortQueueState);
+    const first = nextOf(await run(stores, flow.lease, run1));
+    const firstPath = first.input.worktreePath as string;
+    await stat(firstPath); // the epoch-1 worktree exists
+
+    seed(stores, ppQueue, "queue", { pending: [], current: { file: "src/A.php", round: 1, epoch: 2 }, done: [], blocked: [] } satisfies PortQueueState);
+    const second = nextOf(await run(stores, flow.lease, { ...run1, epoch: 2 }));
+    expect(second.input.epoch).toBe(2);
+    expect(second.input.branch).toContain("/2");
+    const table = peek<Record<string, LeaseRecord>>(stores, ppLease, "pool") ?? {};
+    expect(Object.values(table).map((l) => l.epoch)).toEqual([2]);
+    await expect(stat(firstPath)).rejects.toThrow(); // the stale worktree was reclaimed
+  }, 60_000);
+});
+
+describe("C92: sequential fix round re-leases a released file on its kept branch (C02 regression guard)", () => {
+  test("Release -> queue verify sets current round 2 -> Lease acquires a fresh worktree that already holds the round-1 commit", async () => {
+    const fx = await makeBootstrappedRepo();
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    seedRun(stores, ["src/A.php"]);
+
+    let current: Record<string, unknown> = runInput(fx, ["src/A.php"], { dispatchMode: "sequential" }) as unknown as Record<string, unknown>;
+    const dispatched = nextOf(await run(stores, flow.dispatch, current));
+    const leased = nextOf(await run(stores, flow.lease, dispatched.input));
+    const fri = leased.input as unknown as FileRoundInput;
+    await mkdir(join(fri.worktreePath, "src"), { recursive: true });
+    await writeFile(join(fri.worktreePath, "src/a.ts"), "export const a = 1;\n");
+    seed(stores, ppOut, "src__A.php#1", { outPath: "src/a.ts" });
+    const committed = nextOf(await run(stores, flow.commit, fri));
+    const integrated = nextOf(await run(stores, flow.integrate, committed.input));
+    const released = nextOf(await run(stores, flow.release, integrated.input));
+    current = released.input;
+    await expect(stat(fri.worktreePath)).rejects.toThrow();
+
+    // What QueueVerifyStep does for a fixable file in sequential mode.
+    seed(stores, ppQueue, "queue", {
+      ...(peek<PortQueueState>(stores, ppQueue, "queue") as PortQueueState),
+      current: { file: "src/A.php", round: 2, epoch: 1 },
+    });
+    const released2 = nextOf(await run(stores, flow.lease, current));
+    const fri2 = released2.input as unknown as FileRoundInput;
+    expect(fri2.round).toBe(2);
+    expect(fri2.worktreePath).toBe(fri.worktreePath); // same path, re-created
+    expect(await readFile(join(fri2.worktreePath, "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+  }, 60_000);
+});
+
+describe("C92: CommitStep", () => {
+  test("a dirty worktree with no keyed commit commits the implementer's output (why reconcile() is not wired in here)", async () => {
+    const fx = await makeBootstrappedRepo();
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    const pool = new WorktreePool(fx.repo, fx.worktreeRoot, new InMemoryLeaseStore(), LEASE_SLOT_CAP);
+    const acquired = await pool.acquire("src/A.php", 1, "pp-1");
+    if (!acquired.acquired) throw new Error(acquired.reason);
+    const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", acquired.lease.worktreePath, acquired.lease.branch);
+    await mkdir(join(fri.worktreePath, "src"), { recursive: true });
+    await writeFile(join(fri.worktreePath, "src/a.ts"), "export const a = 1;\n");
+    // Dirty by design: reconcile()'s `redone` arm would `reset --hard` this away.
+    expect((await git(fri.worktreePath).run(["status", "--porcelain"])).trim().length).toBeGreaterThan(0);
+
+    const decision = await run(stores, flow.commit, fri);
+    expect(nextOf(decision).step).toBe(flow.integrate.constructor);
+    const marker = peek<CompletionMarker>(stores, ppMarker, "src__A.php#1");
+    expect(marker?.disposition).toBe(`committed:${ROUND1_OPID}`);
+    const head = (await git(fri.worktreePath).run(["rev-parse", "HEAD"])).trim();
+    expect(marker?.sha).toBe(head);
+    expect((await git(fri.worktreePath).run(["show", "HEAD:src/a.ts"])).trim()).toBe("export const a = 1;");
+    expect(completedEnvelope(stores)?.outcome).toBe("completed");
+  }, 60_000);
+
+  test("an empty diff records the no-op disposition (outcome skipped) and commits nothing", async () => {
+    const fx = await makeBootstrappedRepo();
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", fx.integration, "integration");
+    await run(stores, flow.commit, fri);
+    const marker = peek<CompletionMarker>(stores, ppMarker, "src__A.php#1");
+    expect(marker?.disposition).toBe("no-op-empty-diff");
+    expect(marker?.sha ?? null).toBeNull();
+    expect(completedEnvelope(stores)?.outcome).toBe("skipped");
+    expect(await findCommitByOpId(fx.repo, ROUND1_OPID)).toBeUndefined();
+  }, 60_000);
+});
+
+describe("C92: IntegrateStep", () => {
+  async function committedLease(fx: { repo: string; worktreeRoot: string }): Promise<{ branch: string; sha: string }> {
+    const pool = new WorktreePool(fx.repo, fx.worktreeRoot, new InMemoryLeaseStore(), LEASE_SLOT_CAP);
+    const acquired = await pool.acquire("src/A.php", 1, "pp-1");
+    if (!acquired.acquired) throw new Error(acquired.reason);
+    await mkdir(join(acquired.lease.worktreePath, "src"), { recursive: true });
+    await writeFile(join(acquired.lease.worktreePath, "src/a.ts"), "export const a = 1;\n");
+    const res = await commitLeaseChanges(acquired.lease.worktreePath, ROUND1_OPID, "round 1");
+    if (res.sha === null) throw new Error("expected a keyed commit");
+    return { branch: acquired.lease.branch, sha: res.sha };
+  }
+
+  test("merges the round's lease branch into integration and routes to Release", async () => {
+    const fx = await makeBootstrappedRepo();
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    const { branch, sha } = await committedLease(fx);
+    const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", "/unused", branch);
+    const next = nextOf(await run(stores, flow.integrate, fri));
+    expect(next.step).toBe(flow.release.constructor);
+    const tip = (await git(fx.integration).run(["rev-parse", "HEAD"])).trim();
+    expect(tip).toBe(sha); // fast-forward
+    // Replay is idempotent.
+    const again = nextOf(await run(stores, flow.integrate, fri));
+    expect(again.step).toBe(flow.release.constructor);
+    expect((await git(fx.integration).run(["rev-parse", "HEAD"])).trim()).toBe(sha);
+  }, 60_000);
+
+  test("C1 guard: refuses to integrate a branch that lacks the round's keyed commit", async () => {
+    const fx = await makeBootstrappedRepo();
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    await committedLease(fx); // the keyed commit lands on lease/src__A.php.../1
+    await git(fx.repo).run(["branch", "lacks-the-commit", "main"]);
+    const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", "/unused", "lacks-the-commit");
+    await expect(run(stores, flow.integrate, fri)).rejects.toThrow(/C1: keyed commit .* is NOT reachable from integration/);
+  }, 60_000);
+
+  test("no-op round: succeeds only when the integrated output already holds the ported file", async () => {
+    const fx = await makeBootstrappedRepo();
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    seedRun(stores, ["src/A.php"]);
+    seed(stores, ppMarker, "src__A.php#1", { round: 1, disposition: "no-op-empty-diff", content_hash: "t" } satisfies CompletionMarker);
+    await git(fx.repo).run(["branch", "noop-lease", "main"]);
+    const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", "/unused", "noop-lease");
+
+    await expect(run(stores, flow.integrate, fri)).rejects.toThrow(/no-op round for src\/A\.php \(output src\/a\.ts\) but integrated output lacks the file/);
+
+    await mkdir(join(fx.integration, "src"), { recursive: true });
+    await writeFile(join(fx.integration, "src/a.ts"), "export const a = 1;\n");
+    await git(fx.integration).run(["add", "-A"]);
+    await git(fx.integration).run(["commit", "-m", "prior round content"]);
+    const next = nextOf(await run(stores, flow.integrate, fri));
+    expect(next.step).toBe(flow.release.constructor);
+  }, 60_000);
+});
+
+describe("C92: BootstrapStep", () => {
+  test("a provisioned checkout is a no-op: nothing written, no install, outcome skipped, input handed to Dispatch intact", async () => {
+    const fx = await makeBootstrappedRepo();
+    const flow = new PortProjectFlow();
+    const stores: Stores = new Map();
+    const input = runInput(fx, ["src/A.php", "src/B.php"], { dispatchMode: "sequential" });
+    const next = nextOf(await run(stores, flow.bootstrap, input));
+    expect(next.step).toBe(flow.dispatch.constructor);
+    expect(next.input).toEqual(input as unknown as Record<string, unknown>);
+    const record = peek<BootstrapRecord>(stores, ppBootstrap, "bootstrap");
+    expect(record).toMatchObject({ wrote: [], installRan: false, committed: false, sha: null });
+    expect(completedEnvelope(stores)?.outcome).toBe("skipped");
+  }, 60_000);
 });

@@ -1,3 +1,15 @@
+/**
+ * reconcile() decision table (plan §State ownership).
+ *
+ * Scope note (audit T2, C92): reconcile()/applyReconcile() are the round-START
+ * recovery table that `recover-port` (scripts/run-demo.ts) applies to a lease
+ * worktree before re-dispatch. The durable flow does NOT call them: CommitStep
+ * implements only the commit-time subset (keyed dedup + C1 reachability),
+ * because at commit time the worktree is dirty by design and reconcile's
+ * `redone` arm would reset it to the lease base (see the CommitStep comment in
+ * flows/port-project.ts and tests/port-flow-core.test.ts "CommitStep"). The
+ * `poisoned` rows below are raised by recovery, not by the flow.
+ */
 import { describe, expect, test } from "bun:test";
 import {
   commitObjectReadable,
