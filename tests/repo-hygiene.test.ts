@@ -52,6 +52,30 @@ function readPackageJson(): PackageJson {
   return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as PackageJson;
 }
 
+describe("C00: recorded metrics fixtures are trackable", () => {
+  test("the kill-events render fixture is not ignored", () => {
+    expect(isIgnored("src/metrics/fixtures/kill-events-run-a.json")).toBe(false);
+    expect(isIgnored("src/metrics/fixtures/kill-events-run-b.jsonl")).toBe(false);
+  });
+
+  test("run-time kill-event sidecars stay ignored", () => {
+    expect(isIgnored("kill-events.json")).toBe(true);
+    expect(isIgnored("kill-events-run.jsonl")).toBe(true);
+    expect(isIgnored("metrics/kill-events.jsonl")).toBe(true);
+    expect(isIgnored("src/metrics/kill-events-live.jsonl")).toBe(true);
+  });
+});
+
+describe("C36: every dex blob-cache dir is ignored", () => {
+  test.each([".dex-cache", ".dex-cache-watch", ".dex-cache-dashboard"])("%s/ is ignored", (dir) => {
+    expect(isIgnored(`${dir}/blob`)).toBe(true);
+  });
+
+  test("source dirs named like a cache are not swallowed", () => {
+    expect(isIgnored("src/dex/client.ts")).toBe(false);
+  });
+});
+
 describe("C81: .omc and .playwright-mcp are local tool state, not repo content", () => {
   test("nothing under .omc/ or .playwright-mcp/ is tracked (except .omc/skills/)", () => {
     const offenders = trackedFiles(".omc", ".playwright-mcp").filter((p) => !p.startsWith(".omc/skills/"));
