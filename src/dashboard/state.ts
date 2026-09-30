@@ -567,12 +567,14 @@ export function deriveGridRows(
     const active = activeStepsOf(flow.state);
     const feedForFlow = feedByFlow.get(flow.summary.flowId) ?? [];
 
-    const latestFeedForFile = (file: string): FeedEntry | null => {
+    // `withMarkers: false` skips attempt-0 start markers: they say a step began
+    // but carry no attempt number or outcome worth showing (the row would read
+    // "attempt 0 / interrupted" for a step that is simply running).
+    const latestFeedForFile = (file: string, withMarkers: boolean): FeedEntry | null => {
       let latest: FeedEntry | null = null;
       for (const entry of feedForFlow) {
-        if (entry.file === file && (latest === null || tsMs(entry.ts) > tsMs(latest.ts))) {
-          latest = entry;
-        }
+        if (entry.file !== file || (!withMarkers && entry.attempt === 0)) continue;
+        if (latest === null || tsMs(entry.ts) > tsMs(latest.ts)) latest = entry;
       }
       return latest;
     };
@@ -593,7 +595,8 @@ export function deriveGridRows(
         .reduce((acc, b) => Math.max(acc, b.round), 0);
       const round = isCurrent && current !== null ? current.round : Math.max(doneRound, blockedRound) || null;
 
-      const latest = latestFeedForFile(lease.file);
+      const latest = latestFeedForFile(lease.file, true); // stage: a marker still names the step
+      const latestReal = latestFeedForFile(lease.file, false); // attempt/outcome: real attempts only
       const clean = findWorktree(worktrees, lease.worktreePath)?.clean ?? null;
 
       rows.push({
@@ -614,8 +617,8 @@ export function deriveGridRows(
               ? stageLabel(latest.stepId)
               : null,
         stepExecutionId: activeForFile?.stepExecutionId ?? null,
-        attempt: activeForFile?.lastFailureInfo?.attempt ?? (latest !== null ? latest.attempt : null),
-        lastOutcome: latest?.outcome ?? null,
+        attempt: activeForFile?.lastFailureInfo?.attempt ?? latestReal?.attempt ?? null,
+        lastOutcome: latestReal?.outcome ?? null,
         inFlight: activeForFile !== undefined || isCurrent,
         note: activeForFile !== undefined ? activeError(activeForFile) : null,
         flowId: flow.summary.flowId,

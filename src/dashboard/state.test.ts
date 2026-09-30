@@ -335,6 +335,45 @@ describe("deriveGridRows", () => {
     expect(row?.clean).toBe(true);
   });
 
+  test("C53: an attempt-0 start marker names the stage but never the attempt or outcome", () => {
+    const entry = (over: Partial<FeedEntry>): FeedEntry => ({
+      flowId: FLOW_TRIAL.flowId,
+      ts: "2026-09-25T21:40:00.000Z",
+      startedAt: "2026-09-25T21:40:00.000Z",
+      endedAt: null,
+      stepId: "pp-implement",
+      role: "agent",
+      file: "src/Money.php",
+      round: 1,
+      attempt: 0,
+      outcome: "interrupted",
+      tokens: null,
+      usage: null,
+      wallClockMs: null,
+      tokensRequired: false,
+      ...over,
+    });
+    const previous = entry({ ts: "2026-09-25T21:30:00.000Z", stepId: "pp-commit", role: "commit", attempt: 1, outcome: "completed", endedAt: "2026-09-25T21:30:00.000Z" });
+    const marker = entry({});
+    const markerOnly = deriveGridRows(
+      [{ summary: FLOW_TRIAL, state: { ...STATE_TRIAL, activeStepExecutions: [] } }],
+      GIT_WORKTREES,
+      new Map([[FLOW_TRIAL.flowId, [marker]]]),
+    ).find((r) => r.kind === "lease" && r.file === "src/Money.php");
+    expect(markerOnly?.stage).toBe("implementer"); // the marker still names the step
+    expect(markerOnly?.attempt).toBeNull(); // not "0"
+    expect(markerOnly?.lastOutcome).toBeNull(); // not a red "interrupted"
+
+    const withHistory = deriveGridRows(
+      [{ summary: FLOW_TRIAL, state: { ...STATE_TRIAL, activeStepExecutions: [] } }],
+      GIT_WORKTREES,
+      new Map([[FLOW_TRIAL.flowId, [previous, marker]]]),
+    ).find((r) => r.kind === "lease" && r.file === "src/Money.php");
+    expect(withHistory?.stage).toBe("implementer");
+    expect(withHistory?.attempt).toBe(1); // the last REAL attempt
+    expect(withHistory?.lastOutcome).toBe("completed");
+  });
+
   test("emits blocked rows from the queue", () => {
     const row = rows.find((r) => r.kind === "blocked");
     expect(row?.file).toBe("src/Util/Csv.php");
