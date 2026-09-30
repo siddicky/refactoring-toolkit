@@ -4,8 +4,11 @@
  * Wire types mirror the JSON shapes returned by the read-only `dexcli` surface
  * (`flow search` / `flow state` / `flow history -output json`) as observed
  * against dex 0.13.5 (see BUILD_NOTES.md, exit 0(h)). The dashboard queries dex
- * only through the CLI (read-only); it never starts flows and never opens a
- * blob cache.
+ * through the CLI (read-only) and never starts flows; the query layer itself
+ * opens no blob cache. The one exception is the optional stream subscriber
+ * composed in src/dashboard/stream-feed.ts (STATUS_STREAM_SUBSCRIBE=0 opts
+ * out): its read-side SDK client opens its OWN blob cache under
+ * .dex-cache/dashboard.
  *
  * View types are what /api/state returns and the static page renders. All
  * aggregation lives in state.ts as pure functions over these shapes.

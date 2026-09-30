@@ -19,6 +19,9 @@ export const CLIENT_POLL_MS = 2_000;
 
 export const DEFAULT_PORT = 4646;
 
+/** Under the gitignored `.dex-cache/` (a sibling of the worker's own cache). */
+export const DEFAULT_BLOB_CACHE_DIR = ".dex-cache/dashboard";
+
 /**
  * Kill-event sidecars the dashboard scans by default, relative to the working
  * directory. Data contract B: the writers' default is
@@ -47,6 +50,14 @@ export interface StatusConfig {
   burnDownFiles: string[];
   feedLimit: number;
   commitLimit: number;
+  /** false when STATUS_STREAM_SUBSCRIBE=0 (dexcli polling only). */
+  streamSubscribe: boolean;
+  /**
+   * Blob-cache directory of the stream subscriber's read-side client. Under
+   * the already-ignored `.dex-cache/`, and deliberately NOT the worker's
+   * DEX_BLOB_CACHE_DIR (see stream-feed.ts).
+   */
+  blobCacheDir: string;
   /** Problems found while reading the environment (invalid values, deprecated names). */
   warnings: string[];
 }
@@ -106,6 +117,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env, cwd: string 
     burnDownFiles: csv(env.BURN_DOWN_FILES, DEFAULT_BURN_DOWN_FILES),
     feedLimit: 80,
     commitLimit: 40,
+    streamSubscribe: env.STATUS_STREAM_SUBSCRIBE?.trim() !== "0",
+    blobCacheDir: env.STATUS_BLOB_CACHE_DIR?.trim() || DEFAULT_BLOB_CACHE_DIR,
     warnings,
   };
 }
