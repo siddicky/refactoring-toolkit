@@ -117,6 +117,15 @@ describe("collectVerdicts / collectTombstones / collectEnvelopes", () => {
     ]);
     expect(out.map((e) => e.stepId)).toEqual(["a", "b"]);
   });
+
+  test("a record without started_at is kept (provenance reports it) and never crashes the sort", () => {
+    const base = { stepId: "a", role: "record", attempt: 1, outcome: "completed" };
+    const out = collectEnvelopes([
+      attr("envelope-event/1", { ...base, stepId: "late", started_at: "2026-09-26T10:00:01Z" }),
+      attr("envelope-event/2", { ...base, stepId: "no-start" }),
+    ]);
+    expect(out.map((e) => e.stepId)).toEqual(["no-start", "late"]);
+  });
 });
 
 describe("collectBurnDown tsc accounting (Contract A)", () => {

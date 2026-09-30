@@ -168,7 +168,11 @@ export function collectEnvelopes(attrs: readonly StateAttribute[]): EnvelopeEven
       out.push(v as EnvelopeEvent);
     }
   }
-  return out.sort((p, q) => p.started_at.localeCompare(q.started_at));
+  // A record without a string started_at is kept (validateProvenance reports
+  // it as unparsable) but must not crash the sort.
+  const startedAt = (e: EnvelopeEvent): string =>
+    typeof e.started_at === "string" ? e.started_at : "";
+  return out.sort((p, q) => startedAt(p).localeCompare(startedAt(q)));
 }
 
 /**

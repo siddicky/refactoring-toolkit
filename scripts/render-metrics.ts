@@ -2,8 +2,11 @@
  * render-metrics — AC2 evidence driver (Phase 7): collects one flow's durable
  * evidence from the read-only dex surfaces and renders the metrics report.
  *
- *   bun scripts/render-metrics.ts --flow-id <id> [--kill-events <jsonl>] \
+ *   bun scripts/render-metrics.ts --flow-id <id> [--kill-events|--events <jsonl>] [--all-runs] \
  *     [--out-dir metrics] [--generated-at <utc-iso>]
+ *
+ * dexcli is resolved like every other dex caller: DEXCLI_BIN (default
+ * `dexcli`) and DEX_SERVER_ADDRESS (passed as `-server`).
  *
  * Inputs (all read-only, matching the proven surfaces):
  * - `dexcli flow state <flowId>` attribute store: `envelope-event/*` (the
@@ -25,6 +28,8 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+import { dexConfigFromEnv } from "../src/dex/client.js";
 
 import {
   collectBurnDown,
@@ -53,13 +58,42 @@ interface FlowState {
   attributes?: StateAttribute[];
 }
 
-function argValue(flag: string): string | undefined {
-  const i = process.argv.indexOf(flag);
-  return i >= 0 ? process.argv[i + 1] : undefined;
+class UsageError extends Error {}
+
+/**
+ * Value of `--flag <value>`; undefined when the flag is absent. A missing
+ * value or one that is itself a flag (`--flow-id --out-dir x`) is a usage
+ * error rather than silently swallowing the next flag as the value.
+ */
+export function argValueFrom(argv: readonly string[], flag: string): string | undefined {
+  const i = argv.indexOf(flag);
+  if (i < 0) return undefined;
+  const value = argv[i + 1];
+  if (value === undefined || value.startsWith("--")) {
+    throw new UsageError(`${flag} requires a value`);
+  }
+  return value;
 }
 
-function runDexcli(args: string[]): unknown {
-  const stdout = execFileSync("dexcli", args, {
+/**
+ * The dexcli call every read goes through: the binary honours DEXCLI_BIN and
+ * the server honours DEX_SERVER_ADDRESS (same resolution as run-demo,
+ * serve-status, watch-queue-verify and the dashboard queries), so a non-default
+ * dex is never silently bypassed in favour of dexcli's own 127.0.0.1:8801.
+ */
+export function dexcliInvocation(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): { bin: string; args: string[] } {
+  return {
+    bin: env.DEXCLI_BIN?.trim() || "dexcli",
+    args: [...args, "-server", dexConfigFromEnv(env).serverAddress, "-output", "json"],
+  };
+}
+
+function runDexcli(args: readonly string[]): unknown {
+  const call = dexcliInvocation(args);
+  const stdout = execFileSync(call.bin, call.args, {
     encoding: "utf8",
     maxBuffer: 256 * 1024 * 1024,
   });
@@ -82,7 +116,8 @@ function mergedHistory(facts: FlowFacts): DispatchHistory {
   return { flowId: facts.flowId, runId: facts.runId, events };
 }
 
-async function main(): Promise<number> {
+async function main(argv: readonly string[]): Promise<number> {
+  const argValue = (flag: string): string | undefined => argValueFrom(argv, flag);
   const flowId = argValue("--flow-id");
   if (flowId === undefined) {
     console.error("usage: render-metrics.ts --flow-id <id> [--kill-events|--events <jsonl>] [--all-runs] [--out-dir metrics] [--generated-at <iso>]");
@@ -165,7 +200,7 @@ async function main(): Promise<number> {
   const loaded = loadKillEvents({
     explicitPath: killEventsPath,
     matchIds: runIds,
-    allRuns: process.argv.includes("--all-runs"),
+    allRuns: argv.includes("--all-runs"),
     runId,
   });
   // "resumed" is a post-kill fact this driver supplies per kill: the flow
@@ -197,9 +232,15 @@ async function main(): Promise<number> {
   return report.json.provenance_ok ? 0 : 1;
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
-    console.error("[render-metrics] fatal:", err);
-    process.exit(1);
-  });
+if (import.meta.main) {
+  main(process.argv.slice(2))
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      if (err instanceof UsageError) {
+        console.error(`[render-metrics] usage: ${err.message}`);
+        process.exit(2);
+      }
+      console.error("[render-metrics] fatal:", err);
+      process.exit(1);
+    });
+}
