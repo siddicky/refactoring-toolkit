@@ -504,6 +504,76 @@ describe("burnDownSeries plots the aggregate row per iteration (C41)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// C06 (dashboard half of data contract A): tsc ran/not-run accounting
+// ---------------------------------------------------------------------------
+
+describe("tsc run accounting through the burn-down (C06 / Contract A)", () => {
+  const total = (iteration: number, count: number, tsc?: unknown) => ({
+    queue: "tsc",
+    iteration,
+    error_count: count,
+    file: null,
+    recorded_at: `2026-09-26T10:0${iteration}:00.000Z`,
+    ...(tsc !== undefined ? { tsc } : {}),
+  });
+  const notRun = {
+    state: "not-run" as const,
+    reason: "tsc exited 2 with no located diagnostics: error TS18003: No inputs were found",
+    exit_code: 2,
+    unlocated: 1,
+  };
+  const ran = { state: "ran" as const, reason: null, exit_code: 0, unlocated: 0 };
+  const parseAll = (rows: unknown[]) =>
+    rows.map((r) => burnDownFromUnknown(r)).filter((s): s is NonNullable<typeof s> => s !== null);
+
+  test("both adapters preserve the tsc accounting (snake_case, as written by the flow)", () => {
+    for (const parse of [(v: unknown) => burnDownFromUnknown(v), (v: unknown) => normalizeBurnDown(v, "x")]) {
+      expect(parse(total(2, 0, notRun))?.tsc).toEqual(notRun);
+      expect(parse(total(1, 3, ran))?.tsc).toEqual(ran);
+      expect(parse(total(1, 3))?.tsc).toBeUndefined(); // legacy row
+    }
+  });
+
+  test("a not-run tsc total is a not-run point with its reason, never a 0-error point", () => {
+    const tsc = burnDownSeries(parseAll([total(1, 4, ran), total(2, 0, notRun)])).find((s) => s.queue === "tsc");
+    expect(tsc?.points[0]).toMatchObject({ iteration: 1, errorCount: 4, state: "ran", reason: null });
+    expect(tsc?.points[1]).toMatchObject({ iteration: 2, errorCount: null, state: "not-run" });
+    expect(tsc?.points[1]?.reason).toContain("TS18003");
+  });
+
+  test("a ran total keeps plotting its count even with unlocated diagnostics", () => {
+    const point = burnDownSeries(parseAll([total(1, 2, { ...ran, unlocated: 1, exit_code: 2 })]))[0]?.points[0];
+    expect(point).toMatchObject({ errorCount: 2, state: "ran" });
+  });
+
+  test("legacy tsc rows without accounting render exactly as before", () => {
+    const point = burnDownSeries(parseAll([total(1, 0)]))[0]?.points[0];
+    expect(point).toMatchObject({ errorCount: 0, state: "ran", reason: null });
+  });
+
+  test("the not-run total is authoritative over per-file rows of the same iteration", () => {
+    const rows = parseAll([
+      total(2, 0, notRun),
+      { queue: "tsc", iteration: 2, error_count: 3, file: "src/a.php", recorded_at: "2026-09-26T10:02:00.000Z" },
+    ]);
+    const point = burnDownSeries(rows)[0]?.points[0];
+    expect(point).toMatchObject({ errorCount: null, state: "not-run" });
+  });
+
+  test("malformed tsc accounting degrades to not-run, and a stray vitest key on a tsc row is ignored", () => {
+    const bad = burnDownFromUnknown(total(1, 0, { state: "weird" }));
+    expect(bad?.tsc?.state).toBe("not-run");
+    expect(bad?.tsc?.reason).toContain("malformed");
+    const stray = burnDownFromUnknown({
+      ...total(1, 5),
+      vitest: { state: "not-run", reason: "x", passed: null, failed: null, total: null },
+    });
+    expect(stray?.vitest).toBeUndefined();
+    expect(burnDownSeries([stray as NonNullable<typeof stray>])[0]?.points[0]?.state).toBe("ran");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // C56: vitest ran/not-run accounting survives the burn-down adapters (US-010
 // honesty invariant: a not-run iteration is never plotted as zero failures)
 // ---------------------------------------------------------------------------

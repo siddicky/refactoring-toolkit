@@ -170,6 +170,23 @@ export interface VitestAccountingSample {
   total: number | null;
 }
 
+/**
+ * Mirror of Contract A TscRunAccounting (snake_case, same as vitest's). Only
+ * present on the tsc TOTAL row (file: null); absent on legacy rows and on
+ * per-file rows. state "not-run" means tsc could not produce a trustworthy
+ * count (spawn error/ENOENT, timeout/kill, or non-zero exit with no located
+ * diagnostics): the row's error_count is vacuous, never "0 errors".
+ */
+export interface TscAccountingSample {
+  state: "ran" | "not-run";
+  /** Explicit reason when not-run (e.g. "tsc timed out after 180s"); null when ran. */
+  reason: string | null;
+  /** Process exit code; null when killed / not spawned. */
+  exit_code: number | null;
+  /** Count of global (file-less) `error TSnnnn:` diagnostics seen. */
+  unlocated: number;
+}
+
 /** Minimal shape check target; matches metrics QueueBurnDownEvent fields. */
 export interface BurnDownSample {
   queue: string;
@@ -179,6 +196,8 @@ export interface BurnDownSample {
   recorded_at: string | null;
   /** Vitest rows only; absent on legacy rows (pre-US-010 runs). */
   vitest?: VitestAccountingSample;
+  /** tsc TOTAL row only (Contract A); absent on legacy rows and per-file rows. */
+  tsc?: TscAccountingSample;
 }
 
 // ---------------------------------------------------------------------------

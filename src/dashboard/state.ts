@@ -35,6 +35,7 @@ import type {
   QueueSummaryView,
   SourceStatus,
   AgentUsageView,
+  TscAccountingSample,
   UsageSplitView,
   VitestAccountingSample,
 } from "./types.js";
@@ -328,6 +329,24 @@ function parseVitestAccounting(raw: unknown): VitestAccountingSample | undefined
 }
 
 /**
+ * tsc ran/not-run accounting (Contract A). Same honesty rule as vitest: a
+ * present but malformed object degrades to not-run, never to a clean run.
+ */
+function parseTscAccounting(raw: unknown): TscAccountingSample | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const rec = typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  if (rec.state !== "ran" && rec.state !== "not-run") {
+    return { state: "not-run", reason: "malformed tsc accounting", exit_code: null, unlocated: 0 };
+  }
+  return {
+    state: rec.state,
+    reason: typeof rec.reason === "string" ? rec.reason : null,
+    exit_code: finiteOrNull(rec.exit_code),
+    unlocated: finiteOrNull(rec.unlocated) ?? 0,
+  };
+}
+
+/**
  * Shape-checks an attribute value into a burn-down sample. The single parser
  * for both the history attributes and the burn-down file sources
  * (queries.ts normalizeBurnDown delegates here), so accounting fields are
@@ -349,6 +368,9 @@ export function burnDownFromUnknown(value: unknown): BurnDownSample | null {
   if (queue === "vitest") {
     const vitest = parseVitestAccounting(rec.vitest);
     if (vitest !== undefined) sample.vitest = vitest;
+  } else {
+    const tsc = parseTscAccounting(rec.tsc);
+    if (tsc !== undefined) sample.tsc = tsc;
   }
   return sample;
 }
@@ -674,13 +696,16 @@ function findWorktree(
  * (the flow writes 0 alongside the marker) and must never be plotted.
  */
 function burnDownPoint(s: BurnDownSample): BurnDownPointView {
-  const notRun = s.vitest?.state === "not-run";
+  // vitest accounting rides vitest rows, tsc accounting (Contract A) rides the
+  // tsc total row; either state "not-run" voids the count.
+  const accounting = s.vitest ?? s.tsc;
+  const notRun = accounting?.state === "not-run";
   return {
     iteration: s.iteration,
     errorCount: notRun ? null : s.error_count,
     recordedAt: s.recorded_at,
     state: notRun ? "not-run" : "ran",
-    reason: notRun ? (s.vitest?.reason ?? "no reason recorded") : null,
+    reason: notRun ? (accounting.reason ?? "no reason recorded") : null,
   };
 }
 
