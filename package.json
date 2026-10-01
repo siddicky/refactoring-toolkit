@@ -18,8 +18,8 @@
     "metrics": "bun run scripts/render-metrics.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "check": "bun run typecheck && bun test",
-    "lint": "biome lint .",
+    "check": "bun run typecheck && bun run lint && bun test",
+    "lint": "biome lint --error-on-warnings .",
     "format:check": "biome format ."
   },
   "dependencies": {

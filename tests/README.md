@@ -42,4 +42,4 @@ bun test src/harness/lanes      # one file (path substring)
 bun test -t "refnames"           # by test name
 ```
 
-`bun run check` runs `tsc --noEmit` and then `bun test`, which is what CI runs.
+`bun run check` runs `tsc --noEmit`, `biome lint` (warnings fail it) and then `bun test`, which is what CI runs. `tsc` also gates unused imports, locals and parameters; Biome rules are turned off only in `biome.jsonc`, each with a one-line justification.

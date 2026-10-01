@@ -135,7 +135,7 @@ describe("package.json metadata and scripts", () => {
 
   test("has aliases for every documented entry point plus a combined check", () => {
     const s = pkg.scripts ?? {};
-    expect(s.check).toBe("bun run typecheck && bun test");
+    expect(s.check).toBe("bun run typecheck && bun run lint && bun test");
     expect(s.worker).toBe("bun run scripts/run-demo.ts worker");
     expect(s.dashboard).toBe("bun run scripts/serve-status.ts");
     expect(s.metrics).toBe("bun run scripts/render-metrics.ts");
@@ -249,7 +249,7 @@ describe("CI workflow", () => {
     expect(Bun.YAML.parse(readFileSync(path, "utf8"))).toBeObject();
   });
 
-  test("runs install, typecheck and tests with the pinned Bun, read-only", () => {
+  test("runs install, typecheck, lint and tests with the pinned Bun, read-only", () => {
     const wf = Bun.YAML.parse(readFileSync(path, "utf8")) as Workflow;
     expect(wf.permissions).toEqual({ contents: "read" });
     expect(Object.keys(wf.on ?? {})).toEqual(expect.arrayContaining(["push", "pull_request"]));
@@ -265,6 +265,7 @@ describe("CI workflow", () => {
     const idx = (cmd: string) => runs.indexOf(cmd);
     expect(idx("bun install --frozen-lockfile")).toBeGreaterThanOrEqual(0);
     expect(idx("bun run typecheck")).toBeGreaterThan(idx("bun install --frozen-lockfile"));
+    expect(idx("bun run lint")).toBeGreaterThan(idx("bun install --frozen-lockfile"));
     expect(idx("bun test")).toBeGreaterThan(idx("bun install --frozen-lockfile"));
   });
 });
@@ -275,11 +276,17 @@ describe("Biome", () => {
     vcs?: Record<string, unknown>;
     files?: { includes?: string[] };
     formatter?: { includes?: string[]; indentStyle?: string; indentWidth?: number };
+    linter?: unknown;
     assist?: { actions?: { source?: { organizeImports?: string } } };
+    overrides?: Array<{ includes?: string[]; linter?: { rules?: Record<string, Record<string, unknown>> } }>;
   }
 
   const biomeBin = join(REPO_ROOT, "node_modules/.bin/biome");
-  const config = () => JSON.parse(readFileSync(join(REPO_ROOT, "biome.json"), "utf8")) as BiomeConfig;
+  // biome.jsonc, not biome.json: Biome rejects comments in a .json config, and the
+  // justification of every disabled rule is a comment.
+  const CONFIG_FILE = "biome.jsonc";
+  const configText = () => readFileSync(join(REPO_ROOT, CONFIG_FILE), "utf8");
+  const config = () => Bun.JSONC.parse(configText()) as BiomeConfig;
 
   function biome(...args: string[]): { status: number | null; output: string } {
     const r = spawnSync(biomeBin, args, { cwd: REPO_ROOT, encoding: "utf8" });
@@ -287,16 +294,40 @@ describe("Biome", () => {
     return { status: r.status, output: `${r.stdout}${r.stderr}` };
   }
 
-  test("is an exact-pinned devDependency matching the biome.json schema version", () => {
+  test("is an exact-pinned devDependency matching the config's schema version", () => {
     const version = readPackageJson().devDependencies?.["@biomejs/biome"];
     expect(version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(config().$schema).toBe(`https://biomejs.dev/schemas/${version}/schema.json`);
   });
 
-  test("has lint and format:check scripts", () => {
+  test("has lint (warnings fail it) and format:check scripts", () => {
     const s = readPackageJson().scripts ?? {};
-    expect(s.lint).toBe("biome lint .");
+    expect(s.lint).toBe("biome lint --error-on-warnings .");
     expect(s["format:check"]).toBe("biome format .");
+  });
+
+  test("there is one Biome config, so no biome.json shadows biome.jsonc", () => {
+    expect(existsSync(join(REPO_ROOT, "biome.json"))).toBe(false);
+    expect(existsSync(join(REPO_ROOT, CONFIG_FILE))).toBe(true);
+  });
+
+  test("no rule is disabled repo-wide, and every disabled rule has a one-line justification above it (audit C50)", () => {
+    const c = config();
+    // Rules are only ever turned off inside a scoped override, never in a top-level `linter`.
+    expect(c.linter).toBeUndefined();
+    for (const override of c.overrides ?? []) {
+      expect(override.includes?.length ?? 0).toBeGreaterThan(0);
+      expect(override.includes).not.toContain("**");
+    }
+    const lines = configText().split("\n");
+    const disabled = lines.flatMap((line, i) => (/"[A-Za-z]+"\s*:\s*"off"/.test(line) ? [i] : []));
+    // organizeImports is a formatter assist action, not a lint rule; every other "off" is a rule.
+    const rules = disabled.filter((i) => !(lines[i] ?? "").includes("organizeImports"));
+    expect(rules.length).toBeGreaterThan(0);
+    for (const i of rules) {
+      const above = (lines[i - 1] ?? "").trim();
+      expect(above.startsWith("//") && above.length > 40, `${CONFIG_FILE}:${i + 1} needs a justification comment on the line above: ${(lines[i] ?? "").trim()}`).toBe(true);
+    }
   });
 
   test("formatter matches the repo style and respects .gitignore", () => {
@@ -320,9 +351,15 @@ describe("Biome", () => {
 
   test("the installed biome loads the config and accepts the repo's own config files", () => {
     expect(existsSync(biomeBin)).toBe(true);
-    const fmt = biome("format", "package.json", "biome.json");
+    const fmt = biome("format", "package.json", CONFIG_FILE);
     expect(fmt.output).not.toContain("Formatter would have printed");
     expect(fmt.status).toBe(0);
-    expect(biome("lint", "package.json", "biome.json").status).toBe(0);
+    expect(biome("lint", "package.json", CONFIG_FILE).status).toBe(0);
+  });
+
+  test("the whole repository lints clean, warnings included (audit C50)", () => {
+    const r = biome("lint", "--error-on-warnings", "--max-diagnostics=20", ".");
+    expect(r.output, r.output).not.toMatch(/lint\//);
+    expect(r.status).toBe(0);
   });
 });
