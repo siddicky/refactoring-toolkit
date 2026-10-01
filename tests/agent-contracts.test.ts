@@ -6,7 +6,6 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import type { Context } from "@superdurable/dex";
 
 import { FIXER } from "../harness/agents/fixer.js";
 import { IMPLEMENTER } from "../harness/agents/implementer.js";
@@ -28,7 +27,8 @@ import {
 } from "../flows/port-project.js";
 import type { AgentSessionClient, PromptOptions } from "../src/harness/opencode.js";
 import { evaluateSuspicion } from "../src/metrics/suspicion.js";
-import { portFlowSource } from "./helpers/port-flow-source.js";
+import { stubContext } from "./support/dex-context.js";
+import { portFlowSource } from "./support/port-flow-source.js";
 import type { Finding, VerdictRecord } from "../src/metrics/types.js";
 import {
   composeFixerTurn,
@@ -652,19 +652,7 @@ describe("C75: user contract by value in implement/fix turns", () => {
       [ppPrepSeed as unknown, new Map<string, unknown>([["seed", { stubRaw: stub, symbols: [] }]])],
       [ppSymtab as unknown, new Map<string, unknown>([["symtab", { rows: [] }]])],
     ]);
-    const ctx = {
-      attempt: 1,
-      flowId: "c75-flow",
-      getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
-      setAttribute: (attr: unknown, value: unknown, instance: string) => {
-        let store = stores.get(attr);
-        if (store === undefined) {
-          store = new Map();
-          stores.set(attr, store);
-        }
-        store.set(instance, value);
-      },
-    } as unknown as Context;
+    const ctx = stubContext(stores, { flowId: "c75-flow" });
     const input = {
       repoRoot: "/tmp/c75",
       worktreeRoot: "/tmp/c75/.wt",

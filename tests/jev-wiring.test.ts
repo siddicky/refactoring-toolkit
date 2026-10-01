@@ -25,7 +25,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { configurePortJudgment } from "../flows/runtime-hooks.js";
-import { portFlowSource } from "./helpers/port-flow-source.js";
+import { stagingContext, stubContext } from "./support/dex-context.js";
+import { portFlowSource } from "./support/port-flow-source.js";
 import {
   liveJevClient,
   markerKeyOf,
@@ -45,7 +46,6 @@ import {
   createInMemoryJevClient,
   type JudgmentClient,
 } from "../src/typesafe/client.js";
-import type { Context } from "@superdurable/dex";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -141,15 +141,7 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
       [ppKept, new Map()],
       [ppJevUsage, new Map()],
     ]);
-    const ctx = {
-      attempt: 1,
-      flowId: "us007-wiring-steps",
-      getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
-      setAttribute: (attr: unknown, value: unknown, instance: string) => {
-        if (!stores.has(attr)) stores.set(attr, new Map());
-        stores.get(attr)?.set(instance, value);
-      },
-    } as unknown as Context;
+    const ctx = stubContext(stores, { flowId: "us007-wiring-steps" });
 
     const flow = new PortFileFlow();
     const before = client.calls;
@@ -213,17 +205,7 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
 // ---------------------------------------------------------------------------
 
 describe("bounded telemetry swallow (US-007): DexServiceError silent, defects loud, durable path safe", () => {
-  function fakeContext(): { context: Context; staged: Array<{ instance: string }> } {
-    const staged: Array<{ instance: string }> = [];
-    const context = {
-      attempt: 1,
-      flowId: "us007-wiring-flow",
-      setAttribute: (_attr: unknown, _value: unknown, instance: string) => {
-        staged.push({ instance });
-      },
-    } as unknown as Context;
-    return { context, staged };
-  }
+  const fakeContext = () => stagingContext({ flowId: "us007-wiring-flow" });
 
   const step = envelopeStep<{ n: number }, { n: number }>({
     stepType: "ProbeWiringSwallow",

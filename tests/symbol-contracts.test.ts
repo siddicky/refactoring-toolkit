@@ -7,7 +7,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Context } from "@superdurable/dex";
 
 import {
   SYMBOL_HARVEST_CAP,
@@ -29,7 +28,8 @@ import {
   type SymbolTableRow,
 } from "../flows/port-project.js";
 import { configurePortJudgment } from "../flows/runtime-hooks.js";
-import { portFlowFiles } from "./helpers/port-flow-source.js";
+import { stubContext, type AttributeStores } from "./support/dex-context.js";
+import { portFlowFiles } from "./support/port-flow-source.js";
 import { envelopeEvents } from "../flows/steps/envelope.js";
 import type { EnvelopeEvent } from "../src/metrics/types.js";
 import * as typesafeClientModule from "../src/typesafe/client.js";
@@ -345,23 +345,6 @@ describe("C18: one offline factory, and the lane banner names the symbol table",
   });
 });
 
-/** Context stub answering getAttribute by AttributeMap identity (flow-step harness). */
-function stepCtx(stores: Map<unknown, Map<string, unknown>>): Context {
-  return {
-    attempt: 1,
-    flowId: "c18-flow",
-    getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      let store = stores.get(attr);
-      if (store === undefined) {
-        store = new Map();
-        stores.set(attr, store);
-      }
-      store.set(instance, value);
-    },
-  } as unknown as Context;
-}
-
 const RUN_INPUT: PortRunInput = {
   repoRoot: "/tmp/c18",
   worktreeRoot: "/tmp/c18/.wt",
@@ -383,10 +366,10 @@ const UNTYPED: PhpSymbol = symbol({ name: "mystery", kind: "method", file: "src/
 
 async function runSymbolTable(client: JudgmentClient, symbols: PhpSymbol[]) {
   configurePortJudgment(client);
-  const stores = new Map<unknown, Map<string, unknown>>([
+  const stores: AttributeStores = new Map([
     [ppPrepSeed as unknown, new Map<string, unknown>([["seed", { stubRaw: "stub", symbols } satisfies PrepSeedState]])],
   ]);
-  const decision = await new PortProjectFlow().symbolTable.execute(stepCtx(stores) as never, RUN_INPUT);
+  const decision = await new PortProjectFlow().symbolTable.execute(stubContext(stores, { flowId: "c18-flow" }), RUN_INPUT);
   const rows = (stores.get(ppSymtab as unknown)?.get("symtab") as { rows: SymbolTableRow[] } | undefined)?.rows ?? [];
   const envelopes = [...(stores.get(envelopeEvents as unknown)?.values() ?? [])] as EnvelopeEvent[];
   const completed = envelopes.find((e) => e.ended_at !== null);

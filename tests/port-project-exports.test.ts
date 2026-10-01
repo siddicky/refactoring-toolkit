@@ -20,7 +20,7 @@ import ts from "typescript";
 
 import * as entry from "../flows/port-project.js";
 import { releaseStepLink } from "../flows/port/links.js";
-import { PORT_FLOW_ENTRY } from "./helpers/port-flow-source.js";
+import { PORT_FLOW_ENTRY } from "./support/port-flow-source.js";
 
 const ROOT = join(import.meta.dir, "..");
 const ENTRY = PORT_FLOW_ENTRY;

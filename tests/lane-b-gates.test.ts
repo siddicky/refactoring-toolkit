@@ -14,7 +14,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { Context } from "@superdurable/dex";
 
 import {
   citationKept,
@@ -46,51 +45,21 @@ import {
   type SystemOneRequest,
   type SystemOneResult,
 } from "../src/typesafe/client.js";
+import {
+  declaredLoads,
+  peekAttribute,
+  seedAttribute,
+  stubContext,
+  type AttributeStores,
+  type DeclaresLoads,
+} from "./support/dex-context.js";
 
 // ---------------------------------------------------------------------------
 // Harness (stub dex Context that enforces declared attribute loads)
 // ---------------------------------------------------------------------------
 
-type Stores = Map<unknown, Map<string, unknown>>;
-
-function ctxFor(
-  stores: Stores,
-  step: { getStepOptions?: () => unknown },
-): Context {
-  const options = step.getStepOptions?.() as { executeLoadAttributeMaps?: readonly unknown[] } | undefined;
-  const declared = options?.executeLoadAttributeMaps ?? [];
-  return {
-    attempt: 1,
-    flowId: "t2-lane-b",
-    getAttribute: (attr: unknown, instance: string) => {
-      if (!declared.includes(attr)) {
-        throw new Error(`AttributeMap instance was not loaded: ${(attr as { name?: string }).name ?? "?"}/${instance}`);
-      }
-      return stores.get(attr)?.get(instance);
-    },
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      let store = stores.get(attr);
-      if (store === undefined) {
-        store = new Map();
-        stores.set(attr, store);
-      }
-      store.set(instance, value);
-    },
-  } as unknown as Context;
-}
-
-function put(stores: Stores, attr: unknown, key: string, value: unknown): void {
-  let store = stores.get(attr);
-  if (store === undefined) {
-    store = new Map();
-    stores.set(attr, store);
-  }
-  store.set(key, value);
-}
-
-function get<T>(stores: Stores, attr: unknown, key: string): T | undefined {
-  return stores.get(attr)?.get(key) as T | undefined;
-}
+const ctxFor = (stores: AttributeStores, step: DeclaresLoads) =>
+  stubContext(stores, { flowId: "t2-lane-b", loads: declaredLoads(step) });
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -193,11 +162,11 @@ function tuple(reviewer: string, findings: Finding[], round = 1, file = FILE): R
   };
 }
 
-function gateStores(a: Finding[], b: Finding[]): Stores {
-  const stores: Stores = new Map();
-  put(stores, ppDiff, KEY, DIFF_ATTR);
-  put(stores, ppVerdict, `${KEY}#reviewer-A`, tuple("reviewer-A", a));
-  put(stores, ppVerdict, `${KEY}#reviewer-B`, tuple("reviewer-B", b));
+function gateStores(a: Finding[], b: Finding[]): AttributeStores {
+  const stores: AttributeStores = new Map();
+  seedAttribute(stores, ppDiff, KEY, DIFF_ATTR);
+  seedAttribute(stores, ppVerdict, `${KEY}#reviewer-A`, tuple("reviewer-A", a));
+  seedAttribute(stores, ppVerdict, `${KEY}#reviewer-B`, tuple("reviewer-B", b));
   return stores;
 }
 
@@ -289,7 +258,7 @@ describe("VerdictCheckStep: live Jev scores", () => {
     const decision = await flow.verdictCheck.execute(ctxFor(stores, flow.verdictCheck) as never, FRI);
     expect(decision.kind).toBe("next");
 
-    const record = get<KeptFindings>(stores, ppKept, KEY);
+    const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
     expect(record?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
     expect(record?.dropped).toEqual([
       { finding_id: "A2", reviewer: "reviewer-A", reason: "citation check failed (p_cited=0.2)", p_cited: 0.2 },
@@ -302,7 +271,7 @@ describe("VerdictCheckStep: live Jev scores", () => {
       { finding_id: "A2", p_cited: 0.2 },
     ]);
     // Live spend is evidence-recorded (one call: 10 + 5 tokens).
-    const usage = get<Array<{ stepId: string; tokens: number }>>(stores, ppJevUsage, "usage");
+    const usage = peekAttribute<Array<{ stepId: string; tokens: number }>>(stores, ppJevUsage, "usage");
     expect(usage?.map((u) => u.tokens)).toEqual([15]);
   });
 
@@ -311,7 +280,7 @@ describe("VerdictCheckStep: live Jev scores", () => {
     // UNCITED_QUOTE scores 0 naively; under Jev the probability is what counts.
     const stores = gateStores([finding("A1", UNCITED_QUOTE)], []);
     await flow.verdictCheck.execute(ctxFor(stores, flow.verdictCheck) as never, FRI);
-    expect(get<KeptFindings>(stores, ppKept, KEY)?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
+    expect(peekAttribute<KeptFindings>(stores, ppKept, KEY)?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
   });
 });
 
@@ -323,7 +292,7 @@ describe("VerdictCheckStep: live Jev failure fails open to the naive check", () 
     const decision = await flow.verdictCheck.execute(ctxFor(stores, flow.verdictCheck) as never, FRI);
     expect(decision.kind).toBe("next");
 
-    const record = get<KeptFindings>(stores, ppKept, KEY);
+    const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
     // Naive semantics apply: cited quote kept (1), uncited quote dropped (0).
     expect(record?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
     expect(record?.dropped.map((d) => d.finding_id)).toEqual(["A2"]);
@@ -344,7 +313,7 @@ describe("VerdictCheckStep: live Jev failure fails open to the naive check", () 
 
     const decision = await flow.verdictCheck.execute(ctxFor(stores, flow.verdictCheck) as never, FRI);
     expect(decision.kind).toBe("next");
-    const gateA = get<KeptFindings>(stores, ppKept, KEY)?.citationGate?.find((g) => g.reviewer === "reviewer-A");
+    const gateA = peekAttribute<KeptFindings>(stores, ppKept, KEY)?.citationGate?.find((g) => g.reviewer === "reviewer-A");
     expect(gateA?.checker).toBe("naive-fallback");
     expect(gateA?.fallbackReason).toContain("no answer returned");
   });
@@ -355,13 +324,13 @@ describe("VerdictCheckStep: live Jev failure fails open to the naive check", () 
     const stores = gateStores([finding("A1", CITED_QUOTE)], [finding("B1", CITED_QUOTE)]);
 
     await flow.verdictCheck.execute(ctxFor(stores, flow.verdictCheck) as never, FRI);
-    const record = get<KeptFindings>(stores, ppKept, KEY);
+    const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
     expect(record?.citationGate?.map((g) => [g.reviewer, g.checker])).toEqual([
       ["reviewer-A", "jev"],
       ["reviewer-B", "naive-fallback"],
     ]);
     expect(record?.findings.map((f) => f.finding_id).sort()).toEqual(["A1", "B1"]);
-    const usage = get<Array<{ tokens: number }>>(stores, ppJevUsage, "usage");
+    const usage = peekAttribute<Array<{ tokens: number }>>(stores, ppJevUsage, "usage");
     expect(usage?.map((u) => u.tokens)).toEqual([15]);
   });
 });
@@ -370,7 +339,7 @@ describe("VerdictCheckStep: no live client keeps the naive default", () => {
   test("naive scores are persisted with checker 'naive' and apply the binary threshold", async () => {
     const stores = gateStores([finding("A1", CITED_QUOTE), finding("A2", UNCITED_QUOTE)], []);
     await flow.verdictCheck.execute(ctxFor(stores, flow.verdictCheck) as never, FRI);
-    const record = get<KeptFindings>(stores, ppKept, KEY);
+    const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
     expect(record?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
     expect(record?.dropped).toEqual([
       { finding_id: "A2", reviewer: "reviewer-A", reason: "citation check failed (p_cited=0)", p_cited: 0 },
@@ -378,7 +347,7 @@ describe("VerdictCheckStep: no live client keeps the naive default", () => {
     const gateA = record?.citationGate?.find((g) => g.reviewer === "reviewer-A");
     expect(gateA?.checker).toBe("naive");
     expect(gateA?.fallbackReason).toBeNull();
-    expect(get(stores, ppJevUsage, "usage")).toBeUndefined();
+    expect(peekAttribute(stores, ppJevUsage, "usage")).toBeUndefined();
   });
 });
 
@@ -392,9 +361,9 @@ describe("PrioritizeStep: live rerank with naive fail-open", () => {
     dropped: [],
   };
 
-  function prioritizeStores(): Stores {
-    const stores: Stores = new Map();
-    put(stores, ppKept, KEY, structuredClone(kept));
+  function prioritizeStores(): AttributeStores {
+    const stores: AttributeStores = new Map();
+    seedAttribute(stores, ppKept, KEY, structuredClone(kept));
     return stores;
   }
 
@@ -404,10 +373,10 @@ describe("PrioritizeStep: live rerank with naive fail-open", () => {
     const stores = prioritizeStores();
     const decision = await flow.prioritize.execute(ctxFor(stores, flow.prioritize) as never, FRI);
     expect(decision.kind).toBe("next");
-    const record = get<KeptFindings>(stores, ppKept, KEY);
+    const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
     expect(record?.findings[0]?.finding_id).toBe("F1");
     expect(record?.prioritize).toEqual({ checker: "jev", fallbackReason: null });
-    expect(get<Array<{ tokens: number }>>(stores, ppJevUsage, "usage")?.map((u) => u.tokens)).toEqual([15]);
+    expect(peekAttribute<Array<{ tokens: number }>>(stores, ppJevUsage, "usage")?.map((u) => u.tokens)).toEqual([15]);
   });
 
   test("a Jev outage falls back to severity order and is recorded, never thrown", async () => {
@@ -415,7 +384,7 @@ describe("PrioritizeStep: live rerank with naive fail-open", () => {
     const stores = prioritizeStores();
     const decision = await flow.prioritize.execute(ctxFor(stores, flow.prioritize) as never, FRI);
     expect(decision.kind).toBe("next");
-    const record = get<KeptFindings>(stores, ppKept, KEY);
+    const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
     expect(record?.findings.map((f) => f.finding_id)).toEqual(["F2", "F3", "F1"]); // blocker, major, nit
     expect(record?.prioritize?.checker).toBe("naive-fallback");
     expect(record?.prioritize?.fallbackReason).toContain("jev unavailable");
@@ -426,7 +395,7 @@ describe("PrioritizeStep: live rerank with naive fail-open", () => {
     configurePortJudgment(realClient((id) => (id === "F3" ? "missing" : 0.5)));
     const stores = prioritizeStores();
     await flow.prioritize.execute(ctxFor(stores, flow.prioritize) as never, FRI);
-    const record = get<KeptFindings>(stores, ppKept, KEY);
+    const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
     expect(record?.prioritize?.checker).toBe("naive-fallback");
     expect(record?.findings.map((f) => f.finding_id)).toEqual(["F2", "F3", "F1"]);
   });
@@ -434,7 +403,7 @@ describe("PrioritizeStep: live rerank with naive fail-open", () => {
   test("no live client: naive order, checker 'naive'", async () => {
     const stores = prioritizeStores();
     await flow.prioritize.execute(ctxFor(stores, flow.prioritize) as never, FRI);
-    const record = get<KeptFindings>(stores, ppKept, KEY);
+    const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
     expect(record?.findings.map((f) => f.finding_id)).toEqual(["F2", "F3", "F1"]);
     expect(record?.prioritize).toEqual({ checker: "naive", fallbackReason: null });
   });
@@ -461,17 +430,17 @@ describe("PrepVerdictCheckStep: naive-only gate through the shared predicate", (
   test("never consults a live client; scores persisted as checker 'naive'", async () => {
     const jev = realClient(() => 0.99);
     configurePortJudgment(jev);
-    const stores: Stores = new Map();
-    put(stores, ppPrepDiff, "diff", { raw: DIFF_RAW, doc: DIFF_DOC, diffId: "diff-f-r1", bodyLineOffset: DIFF_HEADER_LINES, iteration: 0 });
-    put(stores, ppPrepState, "state", { prepIteration: 0 });
-    put(stores, ppConfig, "config", { maxRounds: 2, prepMaxRounds: 2 });
-    put(stores, ppPrepVerdict, `${PREP_KEY}#reviewer-A`, tuple("reviewer-A", [finding("A1", CITED_QUOTE), finding("A2", UNCITED_QUOTE)], 0, "PORTING.spec.md"));
-    put(stores, ppPrepVerdict, `${PREP_KEY}#reviewer-B`, tuple("reviewer-B", [], 0, "PORTING.spec.md"));
+    const stores: AttributeStores = new Map();
+    seedAttribute(stores, ppPrepDiff, "diff", { raw: DIFF_RAW, doc: DIFF_DOC, diffId: "diff-f-r1", bodyLineOffset: DIFF_HEADER_LINES, iteration: 0 });
+    seedAttribute(stores, ppPrepState, "state", { prepIteration: 0 });
+    seedAttribute(stores, ppConfig, "config", { maxRounds: 2, prepMaxRounds: 2 });
+    seedAttribute(stores, ppPrepVerdict, `${PREP_KEY}#reviewer-A`, tuple("reviewer-A", [finding("A1", CITED_QUOTE), finding("A2", UNCITED_QUOTE)], 0, "PORTING.spec.md"));
+    seedAttribute(stores, ppPrepVerdict, `${PREP_KEY}#reviewer-B`, tuple("reviewer-B", [], 0, "PORTING.spec.md"));
 
     const decision = await parent.prepVerdictCheck.execute(ctxFor(stores, parent.prepVerdictCheck) as never, runInput);
     expect(decision.kind).toBe("next");
     expect(jev.calls).toBe(0);
-    const record = get<KeptFindings>(stores, ppPrepFindings, "findings");
+    const record = peekAttribute<KeptFindings>(stores, ppPrepFindings, "findings");
     expect(record?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
     expect(record?.dropped).toEqual([
       { finding_id: "A2", reviewer: "reviewer-A", reason: "citation check failed (p_cited=0)", p_cited: 0 },

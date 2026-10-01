@@ -2,7 +2,7 @@
  * C34 — probe lane of the queue-verify watcher: terminal statuses, logged probe
  * failures, real cadence, and no deaf window after a busy cycle.
  *
- * All on the blocking virtual-clock world (tests/helpers/virtual-stream.ts), so
+ * All on the blocking virtual-clock world (tests/support/virtual-stream.ts), so
  * cadence and pacing are observable; the older fake in
  * tests/queue-verify-watcher.test.ts ignores `timeoutMs` and the clock.
  */
@@ -15,7 +15,7 @@ import {
   runQueueVerifyWatcher,
   type WatcherFlowStatus,
 } from "../src/watcher/queue-verify-watcher.js";
-import { DONE, START, noise, virtualWorld } from "./helpers/virtual-stream.js";
+import { DONE, START, noise, virtualWorld } from "./support/virtual-stream.js";
 
 const SILENT_30_MIN = { pollIntervalMs: 60_000, deadlineMs: 30 * 60_000 };
 

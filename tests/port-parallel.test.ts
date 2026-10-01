@@ -17,7 +17,7 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { Context, StepDecision } from "@superdurable/dex";
+import type { StepDecision } from "@superdurable/dex";
 
 import {
   configurePortHarness,
@@ -34,44 +34,14 @@ import { classifyDispatchStepType, specForStepType } from "../src/metrics/dispat
 import { git } from "../src/git/exec.js";
 import { InMemoryLeaseStore, WorktreePool, operationId, type CompletionMarker, type LeaseRecord } from "../src/git/worktree.js";
 import type { AgentSessionClient } from "../src/harness/opencode.js";
+import { runStep, type AttributeStores, type StepLike } from "./support/dex-context.js";
 
 // ---------------------------------------------------------------------------
 // Harness (stub Context that enforces declared attribute loads)
 // ---------------------------------------------------------------------------
 
-type Stores = Map<unknown, Map<string, unknown>>;
-
-interface StepLike {
-  getStepOptions?: () => unknown;
-  execute: (context: never, input: never) => StepDecision | Promise<StepDecision>;
-}
-
-function ctxFor(stores: Stores, step: StepLike): Context {
-  const options = step.getStepOptions?.() as { executeLoadAttributeMaps?: readonly unknown[] } | undefined;
-  const declared = options?.executeLoadAttributeMaps ?? [];
-  return {
-    attempt: 1,
-    flowId: "t2-parallel",
-    getAttribute: (attr: unknown, instance: string) => {
-      if (!declared.includes(attr)) {
-        throw new Error(`AttributeMap instance was not loaded: ${(attr as { name?: string }).name ?? "?"}/${instance}`);
-      }
-      return stores.get(attr)?.get(instance);
-    },
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      let store = stores.get(attr);
-      if (store === undefined) {
-        store = new Map();
-        stores.set(attr, store);
-      }
-      store.set(instance, value);
-    },
-  } as unknown as Context;
-}
-
-async function run(stores: Stores, step: StepLike, input: unknown): Promise<StepDecision> {
-  return step.execute(ctxFor(stores, step) as never, input as never);
-}
+const run = (stores: AttributeStores, step: StepLike, input: unknown) =>
+  runStep(stores, step, input, { flowId: "t2-parallel" });
 
 function nextStep(decision: StepDecision): unknown {
   if (decision.kind !== "next") throw new Error(`expected next, got ${decision.kind}`);
@@ -174,7 +144,7 @@ describe("shared per-file steps route by flow kind (parent vs child)", () => {
     configurePortHarness(stubHarness);
     const parent = new PortProjectFlow();
     const child = new PortFileFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
 
     const round1 = fileRound("/r", { round: 1 });
     expect(nextStep(await run(stores, parent.fence, round1))).toBe(parent.implementStart.constructor);
@@ -193,7 +163,7 @@ describe("shared per-file steps route by flow kind (parent vs child)", () => {
     const repo = await makeRepo();
     const parent = new PortProjectFlow();
     const child = new PortFileFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     await mkdir(join(repo, "src"), { recursive: true });
     await writeFile(join(repo, "src", "a.ts"), "export const a = 1;\n");
 
@@ -222,7 +192,7 @@ describe("ChildReleaseStep (child receipt)", () => {
     const lease: LeaseRecord = acquired.lease;
 
     const child = new PortFileFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     stores.set(ppLease, new Map([["pool", { "src/A.php": lease }]]));
     stores.set(
       ppMarker,

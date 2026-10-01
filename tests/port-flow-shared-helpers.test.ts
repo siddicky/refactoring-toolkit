@@ -43,31 +43,10 @@ import {
 } from "../src/harness/opencode.js";
 import { DIFF_HEADER_LINES, parseUnifiedDiff } from "../src/harness/runtime.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
+import { declaredLoads, stubContext, type AttributeStores, type DeclaresLoads } from "./support/dex-context.js";
 
-type Stores = Map<unknown, Map<string, unknown>>;
-
-/**
- * Minimal dex Context over in-memory attribute stores. With `loads`, reads of a map
- * outside that list throw, like dex does for a map a step did not declare.
- */
-function ctxOver(stores: Stores, loads?: readonly unknown[]): Context {
-  return {
-    attempt: 1,
-    flowId: "shared-helpers",
-    runId: "run-1",
-    getAttribute: (attr: unknown, instance: string) => {
-      if (loads !== undefined && !loads.includes(attr)) {
-        throw new Error(`AttributeMap instance was not loaded: ${String(attr)}/${instance}`);
-      }
-      return stores.get(attr)?.get(instance);
-    },
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      const store = stores.get(attr) ?? new Map<string, unknown>();
-      store.set(instance, value);
-      stores.set(attr, store);
-    },
-  } as unknown as Context;
-}
+const ctxOver = (stores: AttributeStores, loads?: readonly unknown[]) =>
+  stubContext(stores, { flowId: "shared-helpers", runId: "run-1", ...(loads === undefined ? {} : { loads }) });
 
 afterEach(() => {
   configurePortHarness(undefined as unknown as AgentSessionClient);
@@ -82,7 +61,7 @@ describe("openFencedSession", () => {
         return Promise.resolve({ id: "s-42", title: label });
       },
     } as unknown as AgentSessionClient);
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
 
     const session = await openFencedSession(ctxOver(stores), { label: "porting-kit:src/a.php#1#3", stepId: "pp-fixer", epoch: 3 });
 
@@ -96,7 +75,7 @@ describe("openFencedSession", () => {
   });
 
   test("an unconfigured harness fails before any fence is staged", async () => {
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     await expect(openFencedSession(ctxOver(stores), { label: "l", stepId: "s", epoch: 1 })).rejects.toThrow(
       "configurePortHarness() was not called by the worker",
     );
@@ -107,7 +86,7 @@ describe("openFencedSession", () => {
     configurePortHarness({
       createSession: () => Promise.reject(new Error("server down")),
     } as unknown as AgentSessionClient);
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     await expect(openFencedSession(ctxOver(stores), { label: "l", stepId: "s", epoch: 1 })).rejects.toThrow("server down");
     expect(stores.size).toBe(0);
   });
@@ -128,7 +107,7 @@ describe("recordJevUsage", () => {
   });
 
   test("real spend appends one stamped entry per call", async () => {
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     const ctx = ctxOver(stores);
     await recordJevUsage(ctx, "pp-verdict-check:src/a.php#1", 120);
     await recordJevUsage(ctx, "pp-queue-verify:vitest-triage", 30);
@@ -306,7 +285,7 @@ describe("leasePool", () => {
       holderExecutionId: "run-1",
       acquiredAtUtc: "2026-09-30T00:00:00.000Z",
     };
-    const stores: Stores = new Map([[ppLease as unknown, new Map<string, unknown>([["pool", { "src/a.php": record }]])]]);
+    const stores: AttributeStores = new Map([[ppLease as unknown, new Map<string, unknown>([["pool", { "src/a.php": record }]])]]);
     const pool = leasePool(ctxOver(stores), { repoRoot: "/r", worktreeRoot: "/w" });
     expect(pool.store().get("src/a.php")).toEqual(record);
     expect(pool.store().list()).toEqual([record]);
@@ -375,10 +354,7 @@ function replyingHarness(reply: string): AgentSessionClient {
 }
 
 /** A Context that, like dex, only serves attribute maps the step declared in executeLoadAttributeMaps. */
-function declaredCtx(stores: Stores, step: { getStepOptions?: () => unknown }): Context {
-  const options = step.getStepOptions?.() as { executeLoadAttributeMaps?: readonly unknown[] } | undefined;
-  return ctxOver(stores, options?.executeLoadAttributeMaps ?? []);
-}
+const declaredCtx = (stores: AttributeStores, step: DeclaresLoads) => ctxOver(stores, declaredLoads(step));
 
 const FRI: FileRoundInput = {
   repoRoot: "/tmp/c90",
@@ -412,7 +388,7 @@ describe("the two reviewer steps of a loop share one inner body", () => {
       configurePortHarness(replyingHarness(healthyReply(reviewerId, FILE, 1)));
       const flow = new PortFileFlow();
       const step = flow[accessor];
-      const stores: Stores = new Map([[ppDiff, new Map([[`src__Money.php#1`, diffAttr(FILE)]])]]);
+      const stores: AttributeStores = new Map([[ppDiff, new Map([[`src__Money.php#1`, diffAttr(FILE)]])]]);
 
       await step.execute(declaredCtx(stores, step) as never, FRI);
 
@@ -426,7 +402,7 @@ describe("the two reviewer steps of a loop share one inner body", () => {
       configurePortHarness(replyingHarness(healthyReply(reviewerId, PREP_FILE, 0)));
       const flow = new PortProjectFlow();
       const step = accessor === "reviewA" ? flow.prepReviewA : flow.prepReviewB;
-      const stores: Stores = new Map<unknown, Map<string, unknown>>([
+      const stores: AttributeStores = new Map<unknown, Map<string, unknown>>([
         [ppPrepDiff, new Map([["diff", { ...diffAttr(PREP_FILE), iteration: 0 }]])],
         [ppPrepState, new Map([["state", { prepIteration: 0 }]])],
       ]);
@@ -469,7 +445,7 @@ describe("prep planner turns share one session + lane helper", () => {
       abortSessionsNotTagged: () => Promise.resolve([]),
     } as unknown as AgentSessionClient);
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map<unknown, Map<string, unknown>>([
+    const stores: AttributeStores = new Map<unknown, Map<string, unknown>>([
       [ppPrepFindings, new Map([["findings", { findings: [], dropped: [] }]])],
       [ppPrepDraft, new Map([["draft", { specText: "# spec", iteration: 0 }]])],
       [ppPrepState, new Map([["state", { prepIteration: 1 }]])],

@@ -17,7 +17,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { runQueueVerifyWatcher } from "../src/watcher/queue-verify-watcher.js";
-import { DONE, START, noise, virtualWorld } from "./helpers/virtual-stream.js";
+import { DONE, START, noise, virtualWorld } from "./support/virtual-stream.js";
 
 describe("C27: catch-up reads must not absorb the DONE that closes the kill window", () => {
   // The observed queue-verify windows were ~1.1-1.6 s. START is published at

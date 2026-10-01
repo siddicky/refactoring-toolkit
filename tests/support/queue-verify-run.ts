@@ -10,7 +10,6 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AsyncContext } from "@superdurable/dex";
 
 import {
   PortProjectFlow,
@@ -21,8 +20,7 @@ import {
   type PortQueueState,
   type PortRunInput,
 } from "../../flows/port-project.js";
-
-export type Stores = Map<unknown, Map<string, unknown>>;
+import { stubContext, type AttributeStores } from "./dex-context.js";
 
 const PRODUCTION_TOOLS = { ...queueVerifyTools };
 const tempDirs: string[] = [];
@@ -48,19 +46,6 @@ async function fakeBin(path: string, stdout: string, stderr: string, exit: numbe
   return path;
 }
 
-function ctxOver(stores: Stores, flowId: string): AsyncContext {
-  return {
-    attempt: 1,
-    flowId,
-    getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      const store = stores.get(attr) ?? new Map<string, unknown>();
-      store.set(instance, value);
-      stores.set(attr, store);
-    },
-  } as unknown as AsyncContext;
-}
-
 /**
  * One done file (`test/PriceTest.php` -> `test/price.test.ts`). `tsc` replays
  * the given output/exit (default: clean). `vitest`, when given, replays a
@@ -74,7 +59,7 @@ export async function runQueueVerifyOverFakeTools(
     tscStdout?: string;
     tscExit?: number;
   } = {},
-): Promise<Stores> {
+): Promise<AttributeStores> {
   const itg = await tempDir("checkout");
   await mkdir(join(itg, "src"), { recursive: true });
   await mkdir(join(itg, "test"), { recursive: true });
@@ -91,7 +76,7 @@ export async function runQueueVerifyOverFakeTools(
     done: [{ file: "test/PriceTest.php", round: 1, commitSha: null, treeHash: null }],
     blocked: [],
   };
-  const stores: Stores = new Map();
+  const stores: AttributeStores = new Map();
   stores.set(ppQueue, new Map([["queue", queue]]));
   stores.set(ppConfig, new Map([["config", { maxRounds: 3, prepMaxRounds: 1 }]]));
   stores.set(
@@ -111,7 +96,7 @@ export async function runQueueVerifyOverFakeTools(
     maxRounds: 3,
     dispatchMode: "parallel",
   };
-  await new PortProjectFlow().queueVerify.execute(ctxOver(stores, "qv-run"), input);
+  await new PortProjectFlow().queueVerify.execute(stubContext(stores, { flowId: "qv-run" }), input);
   return stores;
 }
 

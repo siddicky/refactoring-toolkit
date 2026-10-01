@@ -32,7 +32,7 @@ import {
   ONE_FAILURE_STDERR,
   ONE_FAILURE_STDOUT,
   runQueueVerifyOverFakeTools,
-} from "./helpers/queue-verify-run.js";
+} from "./support/queue-verify-run.js";
 
 // ---------------------------------------------------------------------------
 // Doubles

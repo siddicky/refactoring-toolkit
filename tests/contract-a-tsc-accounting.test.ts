@@ -22,7 +22,8 @@ import { collectBurnDown, type StateAttribute } from "../src/metrics/collect.js"
 import { renderReport } from "../src/metrics/render.js";
 import type { QueueBurnDownEvent, TscRunAccounting as ReportTscAccounting } from "../src/metrics/types.js";
 import type { TscRunAccounting as WriterTscAccounting } from "../src/queues/tsc-queue.js";
-import { cleanupQueueVerifyRun, runQueueVerifyOverFakeTools, type Stores } from "./helpers/queue-verify-run.js";
+import type { AttributeStores } from "./support/dex-context.js";
+import { cleanupQueueVerifyRun, runQueueVerifyOverFakeTools } from "./support/queue-verify-run.js";
 
 // ---------------------------------------------------------------------------
 // Compile-time: the three declarations of the accounting are one shape. A
@@ -37,33 +38,33 @@ const reportEqualsDashboard: Mutual<ReportTscAccounting, TscAccountingSample> = 
 const flowSampleIsReportEvent: [QueueBurnDownSample] extends [QueueBurnDownEvent] ? true : never = true;
 
 // ---------------------------------------------------------------------------
-// Harness: the real QueueVerifyStep over a fake `tsc` (tests/helpers)
+// Harness: the real QueueVerifyStep over a fake `tsc` (tests/support)
 // ---------------------------------------------------------------------------
 
 afterEach(cleanupQueueVerifyRun);
 
 /** Runs the real QueueVerifyStep once and returns the attribute rows it wrote. */
-const runQueueVerify = (tscStdout: string, tscExit: number): Promise<Stores> =>
+const runQueueVerify = (tscStdout: string, tscExit: number): Promise<AttributeStores> =>
   runQueueVerifyOverFakeTools({ tscStdout, tscExit });
 
 /** The durable attributes as `dexcli flow state` lists them: `<map>/<instance>`. */
-function asStateAttributes(stores: Stores): StateAttribute[] {
+function asStateAttributes(stores: AttributeStores): StateAttribute[] {
   const rows = stores.get(ppBurndown) ?? new Map<string, unknown>();
   return [...rows.entries()].map(([instance, value]) => ({ key: `queue-burndown/${instance}`, value }));
 }
 
-function totalRow(stores: Stores): QueueBurnDownSample {
+function totalRow(stores: AttributeStores): QueueBurnDownSample {
   const row = stores.get(ppBurndown)?.get("tsc-1") as QueueBurnDownSample | undefined;
   if (row === undefined) throw new Error("QueueVerifyStep wrote no tsc total row");
   return row;
 }
 
-function report(stores: Stores) {
+function report(stores: AttributeStores) {
   const burnDown = collectBurnDown(asStateAttributes(stores));
   return renderReport({ envelopes: [], verdicts: [], burnDown });
 }
 
-function dashboardPoint(stores: Stores) {
+function dashboardPoint(stores: AttributeStores) {
   const { burnDown } = feedFromState("contract-a", { attributes: asStateAttributes(stores) } as never);
   const tsc = burnDownSeries(burnDown).find((s) => s.queue === "tsc");
   const point = tsc?.points.find((p) => p.iteration === 1);

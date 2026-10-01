@@ -19,7 +19,7 @@ import {
 import type { QueryResult } from "../src/dashboard/queries.js";
 import type { DexHistoryWire } from "../src/dashboard/types.js";
 import { PORT_FLOW_STEPS } from "../src/metrics/dispatch-anchor.js";
-import { portFlowSource } from "./helpers/port-flow-source.js";
+import { portFlowSource } from "./support/port-flow-source.js";
 
 const NOW = Date.parse("2026-09-30T12:00:00.000Z");
 const isoAgo = (ms: number): string => new Date(NOW - ms).toISOString();

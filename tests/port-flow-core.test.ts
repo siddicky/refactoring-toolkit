@@ -16,7 +16,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { Context, StepDecision } from "@superdurable/dex";
+import type { StepDecision } from "@superdurable/dex";
 
 import {
   LEASE_SLOT_CAP,
@@ -50,66 +50,14 @@ import {
   type CompletionMarker,
   type LeaseRecord,
 } from "../src/git/worktree.js";
+import { declaredLoads, peekAttribute, runStep, seedAttribute, type AttributeStores, type StepLike } from "./support/dex-context.js";
 
 // ---------------------------------------------------------------------------
 // Harness: stub dex Context with declared-load enforcement
 // ---------------------------------------------------------------------------
 
-type Stores = Map<unknown, Map<string, unknown>>;
-
-interface StepLike {
-  getStepOptions?: () => unknown;
-  execute: (context: never, input: never) => StepDecision | Promise<StepDecision>;
-}
-
-function declaredLoads(step: Pick<StepLike, "getStepOptions">): readonly unknown[] {
-  const options = step.getStepOptions?.() as { executeLoadAttributeMaps?: readonly unknown[] } | undefined;
-  return options?.executeLoadAttributeMaps ?? [];
-}
-
-/** Context stub: reads of attribute maps the step did not declare throw. */
-function stubCtx(stores: Stores, step?: Pick<StepLike, "getStepOptions">, attempt = 1): Context {
-  const declared = step === undefined ? [] : declaredLoads(step);
-  return {
-    attempt,
-    flowId: "t2-flow-core",
-    runId: "t2-run",
-    getAttribute: (attr: unknown, instance: string) => {
-      if (step !== undefined && !declared.includes(attr)) {
-        throw new Error(
-          `AttributeMap instance was not loaded: ${(attr as { name?: string }).name ?? "?"}/${instance}`,
-        );
-      }
-      return stores.get(attr)?.get(instance);
-    },
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      let store = stores.get(attr);
-      if (store === undefined) {
-        store = new Map();
-        stores.set(attr, store);
-      }
-      store.set(instance, value);
-    },
-  } as unknown as Context;
-}
-
-function seed(stores: Stores, attr: unknown, key: string, value: unknown): void {
-  let store = stores.get(attr);
-  if (store === undefined) {
-    store = new Map();
-    stores.set(attr, store);
-  }
-  store.set(key, value);
-}
-
-function peek<T>(stores: Stores, attr: unknown, key: string): T | undefined {
-  return stores.get(attr)?.get(key) as T | undefined;
-}
-
-/** Runs a step the way dex would: declared-load ctx, then execute. */
-async function run(stores: Stores, step: StepLike, input: unknown): Promise<StepDecision> {
-  return step.execute(stubCtx(stores, step) as never, input as never);
-}
+const run = (stores: AttributeStores, step: StepLike, input: unknown) =>
+  runStep(stores, step, input, { flowId: "t2-flow-core", runId: "t2-run" });
 
 function nextOf(decision: StepDecision): { step: unknown; input: Record<string, unknown> } {
   if (decision.kind !== "next") throw new Error(`expected a next decision, got ${decision.kind}`);
@@ -190,10 +138,10 @@ const OUT_PATHS: Record<string, string> = {
   "src/C.php": "src/c.ts",
 };
 
-function seedRun(stores: Stores, files: string[]): void {
-  seed(stores, ppConfig, "config", { maxRounds: 2, prepMaxRounds: 2 });
-  seed(stores, ppQueue, "queue", { pending: [...files], current: null, done: [], blocked: [] } satisfies PortQueueState);
-  seed(stores, ppPrep, "prep", {
+function seedRun(stores: AttributeStores, files: string[]): void {
+  seedAttribute(stores, ppConfig, "config", { maxRounds: 2, prepMaxRounds: 2 });
+  seedAttribute(stores, ppQueue, "queue", { pending: [...files], current: null, done: [], blocked: [] } satisfies PortQueueState);
+  seedAttribute(stores, ppPrep, "prep", {
     raw: "",
     sourceMap: Object.fromEntries(Object.entries(OUT_PATHS).map(([php, outPath]) => [php, { outPath, notes: "" }])),
     symbolTable: [],
@@ -224,8 +172,8 @@ describe("C01: dispatchMode survives Release -> Bootstrap -> Dispatch", () => {
 
   test("ReleaseStep output keeps dispatchMode, maxRounds, prepPath and files from the run input", async () => {
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
-    seed(stores, ppQueue, "queue", {
+    const stores: AttributeStores = new Map();
+    seedAttribute(stores, ppQueue, "queue", {
       pending: ["src/B.php"],
       current: { file: "src/A.php", round: 1, epoch: 3 },
       done: [],
@@ -244,9 +192,9 @@ describe("C01: dispatchMode survives Release -> Bootstrap -> Dispatch", () => {
 
   test("Dispatch on Release's output claims the NEXT file sequentially instead of routing to a parallel wave", async () => {
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
-    seed(stores, ppConfig, "config", { maxRounds: 4, prepMaxRounds: 2 });
-    seed(stores, ppQueue, "queue", {
+    const stores: AttributeStores = new Map();
+    seedAttribute(stores, ppConfig, "config", { maxRounds: 4, prepMaxRounds: 2 });
+    seedAttribute(stores, ppQueue, "queue", {
       pending: ["src/B.php"],
       current: { file: "src/A.php", round: 1, epoch: 3 },
       done: [],
@@ -259,7 +207,7 @@ describe("C01: dispatchMode survives Release -> Bootstrap -> Dispatch", () => {
 
     // Sequential: Dispatch claims B itself and hands off to LeaseStep.
     expect(next.step).toBe(flow.lease.constructor);
-    const queue = peek<PortQueueState>(stores, ppQueue, "queue");
+    const queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue");
     expect(queue?.current).toEqual({ file: "src/B.php", round: 1, epoch: 3 });
     expect(queue?.pending).toEqual([]);
     expect(next.input.dispatchMode).toBe("sequential");
@@ -267,9 +215,9 @@ describe("C01: dispatchMode survives Release -> Bootstrap -> Dispatch", () => {
 
   test("a run input without dispatchMode still defaults to parallel waves (default path unchanged)", async () => {
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
-    seed(stores, ppConfig, "config", { maxRounds: 4, prepMaxRounds: 2 });
-    seed(stores, ppQueue, "queue", { pending: ["src/B.php"], current: null, done: [], blocked: [] } satisfies PortQueueState);
+    const stores: AttributeStores = new Map();
+    seedAttribute(stores, ppConfig, "config", { maxRounds: 4, prepMaxRounds: 2 });
+    seedAttribute(stores, ppQueue, "queue", { pending: ["src/B.php"], current: null, done: [], blocked: [] } satisfies PortQueueState);
     const { dispatchMode: _dropped, ...parallelInput } = input;
     void _dropped;
 
@@ -277,7 +225,7 @@ describe("C01: dispatchMode survives Release -> Bootstrap -> Dispatch", () => {
     expect(next.step).toBe(flow.waveDispatch.constructor);
     expect(next.input.mode).toBe("port");
     // Parallel dispatch never claims a file itself: pending is consumed by the wave join.
-    expect(peek<PortQueueState>(stores, ppQueue, "queue")?.pending).toEqual(["src/B.php"]);
+    expect(peekAttribute<PortQueueState>(stores, ppQueue, "queue")?.pending).toEqual(["src/B.php"]);
   });
 });
 
@@ -294,7 +242,7 @@ describe("C02: sequential loop releases leases (3 files through a cap of 2)", ()
     const fx = await makeBootstrappedRepo();
     const files = ["src/A.php", "src/B.php", "src/C.php"];
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     seedRun(stores, files);
 
     let current: Record<string, unknown> = runInput(fx, files, { dispatchMode: "sequential" }) as unknown as Record<string, unknown>;
@@ -302,20 +250,20 @@ describe("C02: sequential loop releases leases (3 files through a cap of 2)", ()
       // Dispatch (sequential) claims the file and routes to Lease.
       const dispatched = nextOf(await run(stores, flow.dispatch, current));
       expect(dispatched.step).toBe(flow.lease.constructor);
-      expect(peek<PortQueueState>(stores, ppQueue, "queue")?.current?.file).toBe(file);
+      expect(peekAttribute<PortQueueState>(stores, ppQueue, "queue")?.current?.file).toBe(file);
 
       // Lease acquires a real worktree; one record per file at this epoch.
       const leased = nextOf(await run(stores, flow.lease, dispatched.input));
       expect(leased.step).toBe(flow.fence.constructor);
       const fri = leased.input as unknown as FileRoundInput;
       expect(fri.file).toBe(file);
-      expect(Object.keys(peek<Record<string, LeaseRecord>>(stores, ppLease, "pool") ?? {})).toEqual([file]);
+      expect(Object.keys(peekAttribute<Record<string, LeaseRecord>>(stores, ppLease, "pool") ?? {})).toEqual([file]);
 
       // The implementer's output, then the sole-committer commit + integrate.
       const outPath = OUT_PATHS[file] as string;
       await mkdir(join(fri.worktreePath, "src"), { recursive: true });
       await writeFile(join(fri.worktreePath, outPath), `export const v = "${file}";\n`);
-      seed(stores, ppOut, `${file.replace(/\//g, "__")}#1`, { outPath });
+      seedAttribute(stores, ppOut, `${file.replace(/\//g, "__")}#1`, { outPath });
       const committed = nextOf(await run(stores, flow.commit, fri));
       expect(committed.step).toBe(flow.integrate.constructor);
       const integrated = nextOf(await run(stores, flow.integrate, committed.input));
@@ -325,7 +273,7 @@ describe("C02: sequential loop releases leases (3 files through a cap of 2)", ()
       const released = nextOf(await run(stores, flow.release, integrated.input));
       expect(released.step).toBe(flow.bootstrap.constructor);
       expect(released.input.dispatchMode).toBe("sequential");
-      expect(peek<Record<string, LeaseRecord>>(stores, ppLease, "pool")).toEqual({});
+      expect(peekAttribute<Record<string, LeaseRecord>>(stores, ppLease, "pool")).toEqual({});
       await expect(stat(fri.worktreePath)).rejects.toThrow();
 
       // Bootstrap is an idempotent no-op on the pre-provisioned checkout.
@@ -337,7 +285,7 @@ describe("C02: sequential loop releases leases (3 files through a cap of 2)", ()
     // Queue exhausted: Dispatch reports done and routes to the verify queue.
     const finalDispatch = nextOf(await run(stores, flow.dispatch, current));
     expect(finalDispatch.step).toBe(flow.queueVerify.constructor);
-    const queue = peek<PortQueueState>(stores, ppQueue, "queue");
+    const queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue");
     expect(queue?.done.map((d) => d.file)).toEqual(files);
     expect(queue?.done.every((d) => d.commitSha !== null)).toBe(true);
     expect(queue?.blocked).toEqual([]);
@@ -375,13 +323,13 @@ describe("C88: diff capture uses the hardened git runner", () => {
     await writeFile(join(repo, "src", "big.ts"), big);
 
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     const fx = { repo, worktreeRoot: join(repo, ".wt"), integration: join(repo, ".wt", "i") };
     const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", repo, "main");
     const decision = await run(stores, flow.captureDiff, fri);
     expect(nextOf(decision).step).toBe(flow.reviewAStart.constructor);
 
-    const captured = peek<CapturedDiff>(stores, ppDiff, "src__A.php#1");
+    const captured = peekAttribute<CapturedDiff>(stores, ppDiff, "src__A.php#1");
     expect(captured).toBeDefined();
     expect(captured?.raw.length).toBeGreaterThan(1024 * 1024);
     expect(captured?.raw).toContain("+++ b/src/big.ts");
@@ -400,11 +348,11 @@ describe("C88: PrepDiffCapture no longer swallows failures of its diff command",
     maxRounds: 2,
   });
 
-  function prepStores(stubRaw: string, specText: string): Stores {
-    const stores: Stores = new Map();
-    seed(stores, ppPrepDraft, "draft", { specText, iteration: 0 });
-    seed(stores, ppPrepSeed, "seed", { stubRaw, symbols: [] });
-    seed(stores, ppPrepState, "state", { prepIteration: 0 });
+  function prepStores(stubRaw: string, specText: string): AttributeStores {
+    const stores: AttributeStores = new Map();
+    seedAttribute(stores, ppPrepDraft, "draft", { specText, iteration: 0 });
+    seedAttribute(stores, ppPrepSeed, "seed", { stubRaw, symbols: [] });
+    seedAttribute(stores, ppPrepState, "state", { prepIteration: 0 });
     return stores;
   }
 
@@ -413,7 +361,7 @@ describe("C88: PrepDiffCapture no longer swallows failures of its diff command",
     const stores = prepStores("# baseline\nold line\n", "# baseline\nnew line\n");
     const decision = await run(stores, flow.prepDiffCapture, prepInput());
     expect(nextOf(decision).step).toBe(flow.prepReviewAStart.constructor);
-    const diff = peek<{ raw: string; doc: { hunks: unknown[] } }>(stores, ppPrepDiff, "diff");
+    const diff = peekAttribute<{ raw: string; doc: { hunks: unknown[] } }>(stores, ppPrepDiff, "diff");
     expect(diff?.raw).toContain("-old line");
     expect(diff?.raw).toContain("+new line");
     expect(diff?.doc.hunks.length).toBe(1);
@@ -423,7 +371,7 @@ describe("C88: PrepDiffCapture no longer swallows failures of its diff command",
     const flow = new PortProjectFlow();
     const stores = prepStores("same\n", "same\n");
     await run(stores, flow.prepDiffCapture, prepInput());
-    const diff = peek<{ raw: string; doc: { hunks: unknown[] } }>(stores, ppPrepDiff, "diff");
+    const diff = peekAttribute<{ raw: string; doc: { hunks: unknown[] } }>(stores, ppPrepDiff, "diff");
     expect(diff?.raw).toBe("");
     expect(diff?.doc.hunks).toEqual([]);
   });
@@ -439,7 +387,7 @@ describe("C88: PrepDiffCapture no longer swallows failures of its diff command",
       const flow = new PortProjectFlow();
       const stores = prepStores("a\n", "b\n");
       await expect(run(stores, flow.prepDiffCapture, prepInput())).rejects.toThrow(/prep diff failed.*simulated failure/);
-      expect(peek(stores, ppPrepDiff, "diff")).toBeUndefined();
+      expect(peekAttribute(stores, ppPrepDiff, "diff")).toBeUndefined();
     } finally {
       if (originalPath === undefined) delete process.env.PATH;
       else process.env.PATH = originalPath;
@@ -451,7 +399,7 @@ describe("C88: PrepDiffCapture no longer swallows failures of its diff command",
 // C92: the remaining core steps, arm by arm
 // ---------------------------------------------------------------------------
 
-function completedEnvelope(stores: Stores): EnvelopeEvent | undefined {
+function completedEnvelope(stores: AttributeStores): EnvelopeEvent | undefined {
   return ([...(stores.get(envelopeEvents)?.values() ?? [])] as EnvelopeEvent[]).find((e) => e.ended_at !== null);
 }
 
@@ -470,10 +418,10 @@ describe("C92: DispatchStep arms", () => {
     dispatchMode: "sequential",
   };
 
-  function dispatchStores(queue: PortQueueState, maxRounds = 2): Stores {
-    const stores: Stores = new Map();
-    seed(stores, ppConfig, "config", { maxRounds, prepMaxRounds: 2 });
-    seed(stores, ppQueue, "queue", queue);
+  function dispatchStores(queue: PortQueueState, maxRounds = 2): AttributeStores {
+    const stores: AttributeStores = new Map();
+    seedAttribute(stores, ppConfig, "config", { maxRounds, prepMaxRounds: 2 });
+    seedAttribute(stores, ppQueue, "queue", queue);
     return stores;
   }
 
@@ -483,7 +431,7 @@ describe("C92: DispatchStep arms", () => {
     const next = nextOf(await run(stores, flow.dispatch, base));
     expect(next.step).toBe(flow.lease.constructor);
     expect(next.input.done).toBe(false);
-    expect(peek<PortQueueState>(stores, ppQueue, "queue")).toEqual({
+    expect(peekAttribute<PortQueueState>(stores, ppQueue, "queue")).toEqual({
       pending: ["src/B.php"],
       current: { file: "src/A.php", round: 1, epoch: 4 },
       done: [],
@@ -503,7 +451,7 @@ describe("C92: DispatchStep arms", () => {
     const stores = dispatchStores(queue);
     const next = nextOf(await run(stores, flow.dispatch, base));
     expect(next.step).toBe(flow.lease.constructor);
-    expect(peek<PortQueueState>(stores, ppQueue, "queue")).toEqual(queue);
+    expect(peekAttribute<PortQueueState>(stores, ppQueue, "queue")).toEqual(queue);
   });
 
   test("an empty queue routes to the verify queue with done=true in both modes", async () => {
@@ -524,7 +472,7 @@ describe("C92: DispatchStep arms", () => {
       2,
     );
     await run(stores, flow.dispatch, base);
-    const queue = peek<PortQueueState>(stores, ppQueue, "queue");
+    const queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue");
     expect(queue?.blocked).toEqual([{ file: "src/A.php", round: 3, reason: "round cap 2 exceeded" }]);
     expect(queue?.current).toBeNull();
     expect(completedEnvelope(stores)?.outcome).toBe("skipped");
@@ -555,8 +503,8 @@ describe("C92: LeaseStep arms", () => {
 
   test("a queue exhausted between dispatch and lease ends gracefully (skipped -> Final), not an error loop", async () => {
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
-    seed(stores, ppQueue, "queue", { pending: [], current: null, done: [], blocked: [] } satisfies PortQueueState);
+    const stores: AttributeStores = new Map();
+    seedAttribute(stores, ppQueue, "queue", { pending: [], current: null, done: [], blocked: [] } satisfies PortQueueState);
     const next = nextOf(await run(stores, flow.lease, input));
     expect(next.step).toBe(flow.final.constructor);
     expect(completedEnvelope(stores)?.outcome).toBe("skipped");
@@ -564,9 +512,9 @@ describe("C92: LeaseStep arms", () => {
 
   test("a current-epoch lease surviving a kill is reused (no git, no second acquire)", async () => {
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
-    seed(stores, ppQueue, "queue", { pending: [], current: { file: "src/A.php", round: 1, epoch: 1 }, done: [], blocked: [] } satisfies PortQueueState);
-    seed(stores, ppLease, "pool", { "src/A.php": lease("src/A.php", 1) });
+    const stores: AttributeStores = new Map();
+    seedAttribute(stores, ppQueue, "queue", { pending: [], current: { file: "src/A.php", round: 1, epoch: 1 }, done: [], blocked: [] } satisfies PortQueueState);
+    seedAttribute(stores, ppLease, "pool", { "src/A.php": lease("src/A.php", 1) });
     const next = nextOf(await run(stores, flow.lease, input));
     expect(next.step).toBe(flow.fence.constructor);
     expect(next.input.worktreePath).toBe(lease("src/A.php", 1).worktreePath);
@@ -576,27 +524,27 @@ describe("C92: LeaseStep arms", () => {
 
   test("a genuine overload still fails loudly: a third live lease at the epoch is refused by the pool cap", async () => {
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
-    seed(stores, ppQueue, "queue", { pending: [], current: { file: "src/C.php", round: 1, epoch: 1 }, done: [], blocked: [] } satisfies PortQueueState);
-    seed(stores, ppLease, "pool", { "src/A.php": lease("src/A.php", 1), "src/B.php": lease("src/B.php", 1) });
+    const stores: AttributeStores = new Map();
+    seedAttribute(stores, ppQueue, "queue", { pending: [], current: { file: "src/C.php", round: 1, epoch: 1 }, done: [], blocked: [] } satisfies PortQueueState);
+    seedAttribute(stores, ppLease, "pool", { "src/A.php": lease("src/A.php", 1), "src/B.php": lease("src/B.php", 1) });
     await expect(run(stores, flow.lease, input)).rejects.toThrow(/lease failed for src\/C\.php: worktree cap \(2\) reached/);
   });
 
   test("a stale-epoch lease (recovery bumped the epoch) is reclaimed and re-acquired at the new epoch", async () => {
     const fx = await makeBootstrappedRepo();
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     const run1 = runInput(fx, ["src/A.php"], { dispatchMode: "sequential" });
-    seed(stores, ppQueue, "queue", { pending: [], current: { file: "src/A.php", round: 1, epoch: 1 }, done: [], blocked: [] } satisfies PortQueueState);
+    seedAttribute(stores, ppQueue, "queue", { pending: [], current: { file: "src/A.php", round: 1, epoch: 1 }, done: [], blocked: [] } satisfies PortQueueState);
     const first = nextOf(await run(stores, flow.lease, run1));
     const firstPath = first.input.worktreePath as string;
     await stat(firstPath); // the epoch-1 worktree exists
 
-    seed(stores, ppQueue, "queue", { pending: [], current: { file: "src/A.php", round: 1, epoch: 2 }, done: [], blocked: [] } satisfies PortQueueState);
+    seedAttribute(stores, ppQueue, "queue", { pending: [], current: { file: "src/A.php", round: 1, epoch: 2 }, done: [], blocked: [] } satisfies PortQueueState);
     const second = nextOf(await run(stores, flow.lease, { ...run1, epoch: 2 }));
     expect(second.input.epoch).toBe(2);
     expect(second.input.branch).toContain("/2");
-    const table = peek<Record<string, LeaseRecord>>(stores, ppLease, "pool") ?? {};
+    const table = peekAttribute<Record<string, LeaseRecord>>(stores, ppLease, "pool") ?? {};
     expect(Object.values(table).map((l) => l.epoch)).toEqual([2]);
     await expect(stat(firstPath)).rejects.toThrow(); // the stale worktree was reclaimed
   }, 60_000);
@@ -606,7 +554,7 @@ describe("C92: sequential fix round re-leases a released file on its kept branch
   test("Release -> queue verify sets current round 2 -> Lease acquires a fresh worktree that already holds the round-1 commit", async () => {
     const fx = await makeBootstrappedRepo();
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     seedRun(stores, ["src/A.php"]);
 
     let current: Record<string, unknown> = runInput(fx, ["src/A.php"], { dispatchMode: "sequential" }) as unknown as Record<string, unknown>;
@@ -615,7 +563,7 @@ describe("C92: sequential fix round re-leases a released file on its kept branch
     const fri = leased.input as unknown as FileRoundInput;
     await mkdir(join(fri.worktreePath, "src"), { recursive: true });
     await writeFile(join(fri.worktreePath, "src/a.ts"), "export const a = 1;\n");
-    seed(stores, ppOut, "src__A.php#1", { outPath: "src/a.ts" });
+    seedAttribute(stores, ppOut, "src__A.php#1", { outPath: "src/a.ts" });
     const committed = nextOf(await run(stores, flow.commit, fri));
     const integrated = nextOf(await run(stores, flow.integrate, committed.input));
     const released = nextOf(await run(stores, flow.release, integrated.input));
@@ -623,8 +571,8 @@ describe("C92: sequential fix round re-leases a released file on its kept branch
     await expect(stat(fri.worktreePath)).rejects.toThrow();
 
     // What QueueVerifyStep does for a fixable file in sequential mode.
-    seed(stores, ppQueue, "queue", {
-      ...(peek<PortQueueState>(stores, ppQueue, "queue") as PortQueueState),
+    seedAttribute(stores, ppQueue, "queue", {
+      ...(peekAttribute<PortQueueState>(stores, ppQueue, "queue") as PortQueueState),
       current: { file: "src/A.php", round: 2, epoch: 1 },
     });
     const released2 = nextOf(await run(stores, flow.lease, current));
@@ -639,7 +587,7 @@ describe("C92: CommitStep", () => {
   test("a dirty worktree with no keyed commit commits the implementer's output (why reconcile() is not wired in here)", async () => {
     const fx = await makeBootstrappedRepo();
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     const pool = new WorktreePool(fx.repo, fx.worktreeRoot, new InMemoryLeaseStore(), LEASE_SLOT_CAP);
     const acquired = await pool.acquire("src/A.php", 1, "pp-1");
     if (!acquired.acquired) throw new Error(acquired.reason);
@@ -651,7 +599,7 @@ describe("C92: CommitStep", () => {
 
     const decision = await run(stores, flow.commit, fri);
     expect(nextOf(decision).step).toBe(flow.integrate.constructor);
-    const marker = peek<CompletionMarker>(stores, ppMarker, "src__A.php#1");
+    const marker = peekAttribute<CompletionMarker>(stores, ppMarker, "src__A.php#1");
     expect(marker?.disposition).toBe(`committed:${ROUND1_OPID}`);
     const head = (await git(fri.worktreePath).run(["rev-parse", "HEAD"])).trim();
     expect(marker?.sha).toBe(head);
@@ -662,10 +610,10 @@ describe("C92: CommitStep", () => {
   test("an empty diff records the no-op disposition (outcome skipped) and commits nothing", async () => {
     const fx = await makeBootstrappedRepo();
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", fx.integration, "integration");
     await run(stores, flow.commit, fri);
-    const marker = peek<CompletionMarker>(stores, ppMarker, "src__A.php#1");
+    const marker = peekAttribute<CompletionMarker>(stores, ppMarker, "src__A.php#1");
     expect(marker?.disposition).toBe("no-op-empty-diff");
     expect(marker?.sha ?? null).toBeNull();
     expect(completedEnvelope(stores)?.outcome).toBe("skipped");
@@ -688,7 +636,7 @@ describe("C92: IntegrateStep", () => {
   test("merges the round's lease branch into integration and routes to Release", async () => {
     const fx = await makeBootstrappedRepo();
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     const { branch, sha } = await committedLease(fx);
     const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", "/unused", branch);
     const next = nextOf(await run(stores, flow.integrate, fri));
@@ -704,7 +652,7 @@ describe("C92: IntegrateStep", () => {
   test("C1 guard: refuses to integrate a branch that lacks the round's keyed commit", async () => {
     const fx = await makeBootstrappedRepo();
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     await committedLease(fx); // the keyed commit lands on lease/src__A.php.../1
     await git(fx.repo).run(["branch", "lacks-the-commit", "main"]);
     const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", "/unused", "lacks-the-commit");
@@ -714,9 +662,9 @@ describe("C92: IntegrateStep", () => {
   test("no-op round: succeeds only when the integrated output already holds the ported file", async () => {
     const fx = await makeBootstrappedRepo();
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     seedRun(stores, ["src/A.php"]);
-    seed(stores, ppMarker, "src__A.php#1", { round: 1, disposition: "no-op-empty-diff", content_hash: "t" } satisfies CompletionMarker);
+    seedAttribute(stores, ppMarker, "src__A.php#1", { round: 1, disposition: "no-op-empty-diff", content_hash: "t" } satisfies CompletionMarker);
     await git(fx.repo).run(["branch", "noop-lease", "main"]);
     const fri = friOf(runInput(fx, ["src/A.php"]), "src/A.php", "/unused", "noop-lease");
 
@@ -735,12 +683,12 @@ describe("C92: BootstrapStep", () => {
   test("a provisioned checkout is a no-op: nothing written, no install, outcome skipped, input handed to Dispatch intact", async () => {
     const fx = await makeBootstrappedRepo();
     const flow = new PortProjectFlow();
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     const input = runInput(fx, ["src/A.php", "src/B.php"], { dispatchMode: "sequential" });
     const next = nextOf(await run(stores, flow.bootstrap, input));
     expect(next.step).toBe(flow.dispatch.constructor);
     expect(next.input).toEqual(input as unknown as Record<string, unknown>);
-    const record = peek<BootstrapRecord>(stores, ppBootstrap, "bootstrap");
+    const record = peekAttribute<BootstrapRecord>(stores, ppBootstrap, "bootstrap");
     expect(record).toMatchObject({ wrote: [], installRan: false, committed: false, sha: null });
     expect(completedEnvelope(stores)?.outcome).toBe("skipped");
   }, 60_000);

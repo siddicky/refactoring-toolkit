@@ -13,7 +13,6 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import type { Context } from "@superdurable/dex";
 
 import {
   markerKeyOf,
@@ -37,13 +36,13 @@ import { collectJevUsage, type StateAttribute } from "../src/metrics/collect.js"
 import { renderReport } from "../src/metrics/render.js";
 import type { DiffDocument, Finding, VerdictRecord } from "../src/metrics/types.js";
 import { createInMemoryJevClient, type JudgmentClient, type SystemOneRequest } from "../src/typesafe/client.js";
+import { declaredLoads, stubContext, type AttributeStores, type DeclaresLoads } from "./support/dex-context.js";
 import {
   cleanupQueueVerifyRun,
   ONE_FAILURE_STDERR,
   ONE_FAILURE_STDOUT,
   runQueueVerifyOverFakeTools,
-  type Stores,
-} from "./helpers/queue-verify-run.js";
+} from "./support/queue-verify-run.js";
 
 const FILE = "src/Money.php";
 const KEY = markerKeyOf(FILE, 1);
@@ -111,25 +110,8 @@ function billedClient(): JudgmentClient {
   } as unknown as JudgmentClient;
 }
 
-function ctxFor(stores: Stores, step: { getStepOptions?: () => unknown }): Context {
-  const options = step.getStepOptions?.() as { executeLoadAttributeMaps?: readonly unknown[] } | undefined;
-  const declared = options?.executeLoadAttributeMaps ?? [];
-  return {
-    attempt: 1,
-    flowId: "int8",
-    getAttribute: (attr: unknown, instance: string) => {
-      if (!declared.includes(attr)) {
-        throw new Error(`AttributeMap instance was not loaded: ${(attr as { name?: string }).name ?? "?"}/${instance}`);
-      }
-      return stores.get(attr)?.get(instance);
-    },
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      const store = stores.get(attr) ?? new Map<string, unknown>();
-      store.set(instance, value);
-      stores.set(attr, store);
-    },
-  } as unknown as Context;
-}
+const ctxFor = (stores: AttributeStores, step: DeclaresLoads) =>
+  stubContext(stores, { flowId: "int8", loads: declaredLoads(step) });
 
 function tuple(reviewer: string, findings: Finding[]): ReviewTuple {
   const metrics: VerdictRecord = { file: FILE, reviewer, round: 1, diff_id: "d1", findings, citation_check: [] };
@@ -153,8 +135,8 @@ function tuple(reviewer: string, findings: Finding[]): ReviewTuple {
 }
 
 /** One file-round's Lane-B steps (verdict-check then prioritize) under a billed client. */
-async function runLaneB(flow: Pick<PortFileFlow, "verdictCheck" | "prioritize">): Promise<Stores> {
-  const stores: Stores = new Map();
+async function runLaneB(flow: Pick<PortFileFlow, "verdictCheck" | "prioritize">): Promise<AttributeStores> {
+  const stores: AttributeStores = new Map();
   stores.set(ppDiff, new Map([[KEY, DIFF_ATTR]]));
   stores.set(
     ppVerdict,
@@ -171,7 +153,7 @@ async function runLaneB(flow: Pick<PortFileFlow, "verdictCheck" | "prioritize">)
 }
 
 /** The attribute exactly as `dexcli flow state` lists it: `<map name>/<instance>`. */
-function attributesOf(stores: Stores): StateAttribute[] {
+function attributesOf(stores: AttributeStores): StateAttribute[] {
   const name = (ppJevUsage as unknown as { name: string }).name;
   return [...(stores.get(ppJevUsage)?.entries() ?? [])].map(([instance, value]) => ({
     key: `${name}/${instance}`,

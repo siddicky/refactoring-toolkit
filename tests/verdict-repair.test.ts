@@ -63,6 +63,7 @@ import {
   lifecycleHeadline,
 } from "../src/dashboard/state.js";
 import type { DexFlowSummaryWire, DexStateWire } from "../src/dashboard/types.js";
+import { stagingContext, stubContext, type AttributeStores } from "./support/dex-context.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -417,17 +418,8 @@ function scriptedHarness(initialScript: Array<string | Error>): ScriptedHarness 
 }
 
 function fakeCtx() {
-  const staged: Array<{ attr: unknown; instance: string; value: unknown }> = [];
-  return {
-    ctx: {
-      attempt: 1,
-      flowId: "us006-flow",
-      setAttribute: (attr: unknown, value: unknown, instance: string) => {
-        staged.push({ attr, instance, value });
-      },
-    } as unknown as Context,
-    staged,
-  };
+  const { context, staged } = stagingContext({ flowId: "us006-flow" });
+  return { ctx: context, staged };
 }
 
 const DIFF_TURN = {
@@ -816,23 +808,7 @@ import { envelopeEvents } from "../flows/steps/envelope.js";
 // US-006: VerdictCheckStep tolerates tombstones (zero kept findings)
 // ---------------------------------------------------------------------------
 
-/** Context stub that answers getAttribute by AttributeMap identity. */
-function attributeCtx(stores: Map<unknown, Map<string, unknown>>, attempt = 1): Context {
-  return {
-    attempt,
-    flowId: "us006-check",
-    getAttribute: (attr: unknown, instance: string) =>
-      stores.get(attr)?.get(instance),
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      let store = stores.get(attr);
-      if (store === undefined) {
-        store = new Map();
-        stores.set(attr, store);
-      }
-      store.set(instance, value);
-    },
-  } as unknown as Context;
-}
+const attributeCtx = (stores: AttributeStores, attempt = 1) => stubContext(stores, { flowId: "us006-check", attempt });
 
 function healthyTuple(reviewer: string, round: number): ReviewTuple {
   return {

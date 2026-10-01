@@ -15,7 +15,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Context } from "@superdurable/dex";
 
 import { REVIEWER } from "../harness/agents/reviewer.js";
 import {
@@ -36,7 +35,8 @@ import { isDemotedAttempt } from "../src/harness/lanes.js";
 import { DIFF_HEADER_LINES, parseUnifiedDiff } from "../src/harness/runtime.js";
 import { buildRetryContextDiagnosis } from "../src/metrics/types.js";
 import type { TurnHealthAssessmentInput } from "../src/metrics/types.js";
-import { portFlowFiles } from "./helpers/port-flow-source.js";
+import { stubContext } from "./support/dex-context.js";
+import { portFlowFiles } from "./support/port-flow-source.js";
 
 const ROOT = join(import.meta.dir, "..");
 const FILE = "src/Money.php";
@@ -62,20 +62,7 @@ const DIFF: CapturedDiff = {
   bodyLineOffset: DIFF_HEADER_LINES,
 };
 
-/** Minimal dex context stub: attribute reads/writes against an in-memory store. */
-function ctxAt(attempt: number): Context {
-  const stores = new Map<unknown, Map<string, unknown>>();
-  return {
-    attempt,
-    flowId: "int6",
-    getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      const store = stores.get(attr) ?? new Map<string, unknown>();
-      store.set(instance, value);
-      stores.set(attr, store);
-    },
-  } as unknown as Context;
-}
+const ctxAt = (attempt: number) => stubContext(new Map(), { flowId: "int6", attempt });
 
 afterEach(() => {
   resetInStepVerdictMemo();

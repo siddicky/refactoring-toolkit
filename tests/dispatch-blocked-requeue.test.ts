@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type { AsyncContext, StepDecision } from "@superdurable/dex";
+import type { StepDecision } from "@superdurable/dex";
 
 import {
   PortProjectFlow,
@@ -23,35 +23,14 @@ import {
   type PortQueueState,
   type PortRunInput,
 } from "../flows/port-project.js";
-
-type Stores = Map<unknown, Map<string, unknown>>;
-
-interface StepLike {
-  getStepOptions?: () => unknown;
-  execute: (context: never, input: never) => StepDecision | Promise<StepDecision>;
-}
+import { declaredLoads, stubContext, type AttributeStores, type DeclaresLoads } from "./support/dex-context.js";
 
 /** dex-like context: reading an attribute map the step did not declare throws. */
-function ctxFor(stores: Stores, step: StepLike): AsyncContext {
-  const options = step.getStepOptions?.() as { executeLoadAttributeMaps?: readonly unknown[] } | undefined;
-  const declared = options?.executeLoadAttributeMaps ?? [];
-  return {
-    attempt: 1,
-    flowId: "int10-dispatch",
-    getAttribute: (attr: unknown, instance: string) => {
-      if (!declared.includes(attr)) throw new Error(`AttributeMap instance was not loaded: ${instance}`);
-      return stores.get(attr)?.get(instance);
-    },
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      const store = stores.get(attr) ?? new Map<string, unknown>();
-      store.set(instance, value);
-      stores.set(attr, store);
-    },
-  } as unknown as AsyncContext;
-}
+const ctxFor = (stores: AttributeStores, step: DeclaresLoads) =>
+  stubContext(stores, { flowId: "int10-dispatch", loads: declaredLoads(step) });
 
-function seeded(queue: PortQueueState, maxRounds: number): Stores {
-  const stores: Stores = new Map();
+function seeded(queue: PortQueueState, maxRounds: number): AttributeStores {
+  const stores: AttributeStores = new Map();
   stores.set(ppConfig, new Map([["config", { maxRounds, prepMaxRounds: 2 }]]));
   stores.set(ppQueue, new Map([["queue", queue]]));
   return stores;
@@ -76,7 +55,7 @@ function next(decision: StepDecision): { step: unknown; input: Record<string, un
   return { step: movement.step, input: movement.input as Record<string, unknown> };
 }
 
-const queueOf = (stores: Stores): PortQueueState => stores.get(ppQueue)?.get("queue") as PortQueueState;
+const queueOf = (stores: AttributeStores): PortQueueState => stores.get(ppQueue)?.get("queue") as PortQueueState;
 
 describe("INT-10: DispatchStep re-dispatches after a blocked pass", () => {
   test("an in-flight file past the cap is blocked and the NEXT pending file still gets started", async () => {

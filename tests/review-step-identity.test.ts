@@ -12,7 +12,6 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import type { Context } from "@superdurable/dex";
 
 import {
   configurePortHarness,
@@ -39,8 +38,7 @@ import {
   type SessionRef,
 } from "../src/harness/opencode.js";
 import { DIFF_HEADER_LINES, parseUnifiedDiff } from "../src/harness/runtime.js";
-
-type Stores = Map<unknown, Map<string, unknown>>;
+import { declaredLoads, stubContext, type AttributeStores, type DeclaresLoads } from "./support/dex-context.js";
 
 const SAMPLE_DIFF = `diff --git a/src/money.ts b/src/money.ts
 new file mode 100644
@@ -97,29 +95,8 @@ function harnessReplying(reply: string): AgentSessionClient {
   };
 }
 
-function ctxFor(stores: Stores, step: { getStepOptions?: () => unknown }, attempt: number): Context {
-  const options = step.getStepOptions?.() as { executeLoadAttributeMaps?: readonly unknown[] } | undefined;
-  const declared = options?.executeLoadAttributeMaps ?? [];
-  return {
-    attempt,
-    flowId: "t2-review-identity",
-    runId: "run-1",
-    getAttribute: (attr: unknown, instance: string) => {
-      if (!declared.includes(attr)) {
-        throw new Error(`AttributeMap instance was not loaded: ${(attr as { name?: string }).name ?? "?"}/${instance}`);
-      }
-      return stores.get(attr)?.get(instance);
-    },
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      let store = stores.get(attr);
-      if (store === undefined) {
-        store = new Map();
-        stores.set(attr, store);
-      }
-      store.set(instance, value);
-    },
-  } as unknown as Context;
-}
+const ctxFor = (stores: AttributeStores, step: DeclaresLoads, attempt: number) =>
+  stubContext(stores, { flowId: "t2-review-identity", runId: "run-1", attempt, loads: declaredLoads(step) });
 
 const FRI: FileRoundInput = {
   repoRoot: "/tmp/t2",
@@ -149,7 +126,7 @@ afterEach(() => {
   configurePortHarness(undefined as unknown as AgentSessionClient);
 });
 
-function fenceOf(stores: Stores, file: string, round: number): SessionFence | undefined {
+function fenceOf(stores: AttributeStores, file: string, round: number): SessionFence | undefined {
   return stores.get(sessionFenceMap)?.get(fenceLabel(file, round, 1)) as SessionFence | undefined;
 }
 
@@ -162,7 +139,7 @@ describe("port-loop review steps carry their envelope step id everywhere", () =>
       configurePortHarness(harnessReplying(healthyReply(reviewerId, FILE, 1)));
       const flow = new PortFileFlow();
       const step = accessor === "reviewA" ? flow.reviewA : flow.reviewB;
-      const stores: Stores = new Map([[ppDiff, new Map([[markerKeyOf(FILE, 1), diffAttr(FILE)]])]]);
+      const stores: AttributeStores = new Map([[ppDiff, new Map([[markerKeyOf(FILE, 1), diffAttr(FILE)]])]]);
 
       // Attempt 2 so the retry-context diagnosis (labelled with the step id) is built.
       const decision = await step.execute(ctxFor(stores, step, 2) as never, FRI);
@@ -178,7 +155,7 @@ describe("port-loop review steps carry their envelope step id everywhere", () =>
 
   test("a caller that passes no stepId still gets the envelope id, not 'pp-review-reviewer-A'", async () => {
     configurePortHarness(harnessReplying(healthyReply("reviewer-A", FILE, 1)));
-    const stores: Stores = new Map();
+    const stores: AttributeStores = new Map();
     const ctx = ctxFor(stores, {}, 2);
     const out = await runReviewTurn({
       ctx,
@@ -203,7 +180,7 @@ describe("prep-loop review steps carry their own envelope step ids", () => {
       configurePortHarness(harnessReplying(healthyReply(reviewerId, PREP_FILE, 0)));
       const flow = new PortProjectFlow();
       const step = accessor === "prepReviewA" ? flow.prepReviewA : flow.prepReviewB;
-      const stores: Stores = new Map();
+      const stores: AttributeStores = new Map();
       stores.set(ppPrepDiff, new Map([["diff", { ...diffAttr(PREP_FILE), iteration: 0 }]]));
       stores.set(ppPrepState, new Map([["state", { prepIteration: 0 }]]));
 

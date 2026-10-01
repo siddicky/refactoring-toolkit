@@ -35,7 +35,7 @@ import {
   envelopeStep,
   type EnvelopeStreamMessage,
 } from "../flows/steps/envelope.js";
-import type { Context } from "@superdurable/dex";
+import { stagingContext } from "./support/dex-context.js";
 import { clearHarnessEnv } from "./support/opencode-env.js";
 
 // The harness reads OPENCODE_PROMPT_* at call time and lane routing reads
@@ -284,21 +284,7 @@ describe("reviewer-lane demotion policy (pure f(attempt))", () => {
 // ---------------------------------------------------------------------------
 
 describe("envelope telemetry stream (US-002)", () => {
-  function fakeContext(): {
-    context: Context;
-    staged: Array<{ instance: string; value: unknown }>;
-  } {
-    const staged: Array<{ instance: string; value: unknown }> = [];
-    const context = {
-      attempt: 1,
-      flowId: "gate-outage-flow",
-      setAttribute: (attr: unknown, value: unknown, instance: string) => {
-        void attr;
-        staged.push({ instance, value });
-      },
-    } as unknown as Context;
-    return { context, staged };
-  }
+  const fakeContext = () => stagingContext({ flowId: "gate-outage-flow" });
 
   const step = envelopeStep<{ n: number }, { n: number }>({
     stepType: "ProbeStreamOutage",

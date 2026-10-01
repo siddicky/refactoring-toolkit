@@ -64,6 +64,7 @@ import {
   type LeaseRecord,
 } from "../src/git/worktree.js";
 import { parseVitestOutput, parseVitestSummary } from "../src/queues/vitest-queue.js";
+import { peekAttribute, seedAttribute, stubContext, type AttributeStores } from "./support/dex-context.js";
 
 // ---------------------------------------------------------------------------
 // Real vitest 3.2.4 output, captured with `vitest run --reporter default`
@@ -85,34 +86,11 @@ const COLLECT_STDERR = "\n⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯�
 // Harness: stub ctx + temp checkouts + fake tools
 // ---------------------------------------------------------------------------
 
-type Stores = Map<unknown, Map<string, unknown>>;
-
-function store(): Stores {
+function store(): AttributeStores {
   return new Map();
 }
 
-function put(stores: Stores, attr: unknown, key: string, value: unknown): void {
-  let s = stores.get(attr);
-  if (s === undefined) {
-    s = new Map();
-    stores.set(attr, s);
-  }
-  s.set(key, value);
-}
-
-function read<T>(stores: Stores, attr: unknown, key: string): T | undefined {
-  return stores.get(attr)?.get(key) as T | undefined;
-}
-
-/** Context stub answering attribute reads/writes by AttributeMap identity. */
-function ctxOver(stores: Stores, attempt = 1): AsyncContext {
-  return {
-    attempt,
-    flowId: "t1-flow-verify",
-    getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
-    setAttribute: (attr: unknown, value: unknown, instance: string) => put(stores, attr, instance, value),
-  } as unknown as AsyncContext;
-}
+const ctxOver = (stores: AttributeStores, attempt = 1) => stubContext(stores, { flowId: "t1-flow-verify", attempt });
 
 interface FakeChild {
   status: "completed" | "running";
@@ -124,8 +102,9 @@ interface FakeChild {
  * getFlowId run their real code) whose sub-flow results are synthetic and
  * whose attribute access is the same in-memory stub.
  */
-function subFlowCtx(stores: Stores, children: readonly FakeChild[]): AsyncContext {
+function subFlowCtx(stores: AttributeStores, children: readonly FakeChild[]): AsyncContext {
   const encoder = new TextEncoder();
+  const attributes = stubContext(stores);
   const ctx = Object.create(InvocationContext.prototype) as Record<string, unknown>;
   Object.assign(ctx, {
     method: "execute",
@@ -154,8 +133,8 @@ function subFlowCtx(stores: Stores, children: readonly FakeChild[]): AsyncContex
               ],
       })),
     },
-    getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
-    setAttribute: (attr: unknown, value: unknown, instance: string) => put(stores, attr, instance, value),
+    getAttribute: attributes.getAttribute,
+    setAttribute: attributes.setAttribute,
   });
   return ctx as unknown as AsyncContext;
 }
@@ -244,7 +223,7 @@ function prepOf(sourceMap: SourceMap): PrepArtifact {
 }
 
 function seedQueueVerify(
-  stores: Stores,
+  stores: AttributeStores,
   opts: {
     sourceMap: SourceMap;
     done: Array<{ file: string; round: number }>;
@@ -258,9 +237,9 @@ function seedQueueVerify(
     done: opts.done.map((d) => ({ ...d, commitSha: null, treeHash: null })),
     blocked: opts.blocked ?? [],
   };
-  put(stores, ppQueue, "queue", queue);
-  put(stores, ppConfig, "config", { maxRounds: opts.maxRounds, prepMaxRounds: 1 });
-  put(stores, ppPrep, "prep", prepOf(opts.sourceMap));
+  seedAttribute(stores, ppQueue, "queue", queue);
+  seedAttribute(stores, ppConfig, "config", { maxRounds: opts.maxRounds, prepMaxRounds: 1 });
+  seedAttribute(stores, ppPrep, "prep", prepOf(opts.sourceMap));
 }
 
 const projectFlow = new PortProjectFlow();
@@ -289,7 +268,7 @@ describe("QueueVerifyStep: tsc run accounting (C06)", () => {
 
     const decision = await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
 
-    const row = read<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
+    const row = peekAttribute<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
     expect(row?.file).toBeNull();
     expect(row?.error_count).toBe(0);
     expect(row?.tsc?.state).toBe("not-run");
@@ -297,7 +276,7 @@ describe("QueueVerifyStep: tsc run accounting (C06)", () => {
     expect(row?.tsc?.unlocated).toBe(1);
     expect(row?.tsc?.reason).toContain("tsc exited 2 with no located diagnostics");
     expect(row?.tsc?.reason).toContain("TS18003");
-    const verify = read<QueueVerifyState>(stores, ppVerify, "verify");
+    const verify = peekAttribute<QueueVerifyState>(stores, ppVerify, "verify");
     expect(verify?.tscRun).toEqual(row?.tsc);
     expect(routedTo(decision)).toBe(projectFlow.final.constructor);
   }, 60_000);
@@ -310,7 +289,7 @@ describe("QueueVerifyStep: tsc run accounting (C06)", () => {
 
     await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
 
-    const row = read<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
+    const row = peekAttribute<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
     expect(row?.tsc).toEqual({ state: "ran", reason: null, exit_code: 0, unlocated: 0 });
     expect(row?.error_count).toBe(0);
   }, 60_000);
@@ -324,12 +303,12 @@ describe("QueueVerifyStep: tsc run accounting (C06)", () => {
 
     await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
 
-    const row = read<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
+    const row = peekAttribute<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
     // With the fixed default globs tsc reported TS18003 here (no inputs) and
     // the run read as a vacuous pass; the derived include sees lib/.
     expect(row?.tsc?.state).toBe("ran");
     expect(row?.error_count).toBe(1);
-    const verify = read<QueueVerifyState>(stores, ppVerify, "verify");
+    const verify = peekAttribute<QueueVerifyState>(stores, ppVerify, "verify");
     expect(verify?.fixQueue).toEqual([{ file: "src/A.php", fromRound: 1 }]);
   }, 60_000);
 
@@ -341,7 +320,7 @@ describe("QueueVerifyStep: tsc run accounting (C06)", () => {
 
     await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
 
-    const row = read<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
+    const row = peekAttribute<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
     expect(row?.tsc).toEqual({ state: "not-run", reason: "tsc binary not found (ENOENT)", exit_code: null, unlocated: 0 });
     expect(row?.error_count).toBe(0);
   });
@@ -355,7 +334,7 @@ describe("QueueVerifyStep: tsc run accounting (C06)", () => {
 
     await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
 
-    const row = read<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
+    const row = peekAttribute<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
     expect(row?.tsc?.state).toBe("not-run");
     expect(row?.tsc?.reason).toBe("tsc timed out after 1s");
     expect(row?.tsc?.exit_code).toBeNull();
@@ -372,10 +351,10 @@ describe("QueueVerifyStep: tsc run accounting (C06)", () => {
 
     await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
 
-    const total = read<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
+    const total = peekAttribute<QueueBurnDownSample>(stores, ppBurndown, "tsc-1");
     expect(total?.tsc).toEqual({ state: "ran", reason: null, exit_code: 2, unlocated: 0 });
     expect(total?.error_count).toBe(3);
-    const perFile = read<QueueBurnDownSample>(stores, ppBurndown, "tsc-1-src__a.ts");
+    const perFile = peekAttribute<QueueBurnDownSample>(stores, ppBurndown, "tsc-1-src__a.ts");
     expect(perFile?.file).toBe("src/a.ts");
     expect(perFile?.tsc).toBeUndefined();
   });
@@ -404,7 +383,7 @@ describe("QueueVerifyStep: per-file error cap (C05)", () => {
 
     await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
 
-    const verify = read<QueueVerifyState>(stores, ppVerify, "verify");
+    const verify = peekAttribute<QueueVerifyState>(stores, ppVerify, "verify");
     expect(verify?.tscTotal).toBe(86); // the TRUE count stays honest
     expect(verify?.fixQueue.map((f) => f.file)).toEqual(["src/A.php", "src/B.php"]);
     // Every file selected for a fix round has something to fix (before the
@@ -445,13 +424,13 @@ describe("QueueVerifyStep: blocked dedupe across iterations (C04)", () => {
     const blockedAfter: string[][] = [];
     for (let iteration = 1; iteration <= 3; iteration++) {
       await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
-      const queue = read<PortQueueState>(stores, ppQueue, "queue");
+      const queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue");
       blockedAfter.push(queue?.blocked.map((b) => b.file) ?? []);
-      expect(read<QueueVerifyState>(stores, ppVerify, "verify")?.iteration).toBe(iteration);
+      expect(peekAttribute<QueueVerifyState>(stores, ppVerify, "verify")?.iteration).toBe(iteration);
     }
 
     expect(blockedAfter).toEqual([["src/A.php"], ["src/A.php"], ["src/A.php"]]);
-    const queue = read<PortQueueState>(stores, ppQueue, "queue");
+    const queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue");
     expect(queue?.blocked[0]?.reason).toContain("round cap reached with 1 queue error(s) remaining");
   }, 30_000);
 
@@ -474,7 +453,7 @@ describe("QueueVerifyStep: blocked dedupe across iterations (C04)", () => {
 
     await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
 
-    const queue = read<PortQueueState>(stores, ppQueue, "queue");
+    const queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue");
     expect(queue?.blocked.map((b) => b.file)).toEqual(["src/A.php", "src/C.php"]);
   });
 });
@@ -553,7 +532,7 @@ describe("vitest 3.2.4 golden output: FAIL blocks live on stderr (C26)", () => {
 
     const decision = await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
 
-    const verify = read<QueueVerifyState>(stores, ppVerify, "verify");
+    const verify = peekAttribute<QueueVerifyState>(stores, ppVerify, "verify");
     expect(verify?.vitestRun).toEqual({ kind: "ran", passed: 1, failed: 2, total: 3 });
     expect(verify?.vitestState?.failures.length).toBe(3);
     expect(verify?.vitestState?.classified.every((c) => c.classification.attributedFile !== null)).toBe(true);
@@ -563,7 +542,7 @@ describe("vitest 3.2.4 golden output: FAIL blocks live on stderr (C26)", () => {
       "test/price.test.ts > top-level tax",
     ]);
     expect(queueFixFeedForFile(verify, "test/broken.test.ts").testFailures.length).toBe(1);
-    const vitestRow = read<QueueBurnDownSample>(stores, ppBurndown, "vitest-1");
+    const vitestRow = peekAttribute<QueueBurnDownSample>(stores, ppBurndown, "vitest-1");
     expect(vitestRow?.error_count).toBe(2);
     expect(vitestRow?.vitest?.state).toBe("ran");
     // Failures exist, so the loop continues into a fix wave instead of Final.
@@ -615,12 +594,12 @@ describe("WaveDispatchStep: per-entry rounds (C03)", () => {
 
   async function dispatchFix(fixQueue: QueueVerifyState["fixQueue"]): Promise<WaveDispatchRecord> {
     const stores = store();
-    put(stores, ppQueue, "queue", { pending: [], current: null, done: [], blocked: [] } satisfies PortQueueState);
-    put(stores, ppPrep, "prep", prepOf(WAVE_MAP));
-    put(stores, ppVerify, "verify", verifyStateOf(fixQueue, [fixErr("src/a.ts"), fixErr("src/c.ts")]));
+    seedAttribute(stores, ppQueue, "queue", { pending: [], current: null, done: [], blocked: [] } satisfies PortQueueState);
+    seedAttribute(stores, ppPrep, "prep", prepOf(WAVE_MAP));
+    seedAttribute(stores, ppVerify, "verify", verifyStateOf(fixQueue, [fixErr("src/a.ts"), fixErr("src/c.ts")]));
     const decision = await projectFlow.waveDispatch.execute(ctxOver(stores), waveInput("fix"));
     expect(routedTo(decision)).toBe(projectFlow.waveJoin.constructor);
-    return read<WaveDispatchRecord>(stores, ppWave, "wave")!;
+    return peekAttribute<WaveDispatchRecord>(stores, ppWave, "wave")!;
   }
 
   test("higher-round file first (a at round 2, c at round 1): each file gets its OWN next round", async () => {
@@ -671,10 +650,10 @@ describe("WaveDispatchStep: per-entry rounds (C03)", () => {
 
   test("port wave: entries run at round 1; an empty fix queue is refused", async () => {
     const stores = store();
-    put(stores, ppQueue, "queue", { pending: ["src/a.php", "src/b.php", "src/c.php"], current: null, done: [], blocked: [] } satisfies PortQueueState);
-    put(stores, ppPrep, "prep", prepOf(WAVE_MAP));
+    seedAttribute(stores, ppQueue, "queue", { pending: ["src/a.php", "src/b.php", "src/c.php"], current: null, done: [], blocked: [] } satisfies PortQueueState);
+    seedAttribute(stores, ppPrep, "prep", prepOf(WAVE_MAP));
     await projectFlow.waveDispatch.execute(ctxOver(stores), waveInput("port"));
-    const wave = read<WaveDispatchRecord>(stores, ppWave, "wave")!;
+    const wave = peekAttribute<WaveDispatchRecord>(stores, ppWave, "wave")!;
     expect(wave.entries.map((e) => [e.file, e.round])).toEqual([
       ["src/a.php", 1],
       ["src/b.php", 1],
@@ -682,9 +661,9 @@ describe("WaveDispatchStep: per-entry rounds (C03)", () => {
     expect(wave.round).toBe(1);
 
     const empty = store();
-    put(empty, ppQueue, "queue", { pending: [], current: null, done: [], blocked: [] } satisfies PortQueueState);
-    put(empty, ppPrep, "prep", prepOf(WAVE_MAP));
-    put(empty, ppVerify, "verify", verifyStateOf([]));
+    seedAttribute(empty, ppQueue, "queue", { pending: [], current: null, done: [], blocked: [] } satisfies PortQueueState);
+    seedAttribute(empty, ppPrep, "prep", prepOf(WAVE_MAP));
+    seedAttribute(empty, ppVerify, "verify", verifyStateOf([]));
     await expect(projectFlow.waveDispatch.execute(ctxOver(empty), waveInput("fix"))).rejects.toThrow("empty fix queue");
   });
 
@@ -724,8 +703,8 @@ function waveRecord(entries: Array<{ file: string; round?: number }>, round: num
 describe("WaveJoinStep (C03)", () => {
   test("waitFor starts each child at its own entry round, with a distinct conditionId", async () => {
     const stores = store();
-    put(stores, ppPrep, "prep", prepOf(WAVE_MAP));
-    put(stores, ppWave, "wave", waveRecord([{ file: "src/a.php", round: 3 }, { file: "src/c.php", round: 2 }], 3));
+    seedAttribute(stores, ppPrep, "prep", prepOf(WAVE_MAP));
+    seedAttribute(stores, ppWave, "wave", waveRecord([{ file: "src/a.php", round: 3 }, { file: "src/c.php", round: 2 }], 3));
 
     const wait = (await projectFlow.waveJoin.waitFor!(ctxOver(stores), waveInput("fix"))) as unknown as {
       kind: string;
@@ -741,8 +720,8 @@ describe("WaveJoinStep (C03)", () => {
 
   test("waitFor on a record persisted before C03 (no per-entry round) still uses the wave round", async () => {
     const stores = store();
-    put(stores, ppPrep, "prep", prepOf(WAVE_MAP));
-    put(stores, ppWave, "wave", waveRecord([{ file: "src/a.php" }, { file: "src/b.php" }], 2));
+    seedAttribute(stores, ppPrep, "prep", prepOf(WAVE_MAP));
+    seedAttribute(stores, ppWave, "wave", waveRecord([{ file: "src/a.php" }, { file: "src/b.php" }], 2));
 
     const wait = (await projectFlow.waveJoin.waitFor!(ctxOver(stores), waveInput("fix"))) as unknown as {
       conditions: Array<{ subFlowInput: PortFileInput }>;
@@ -771,11 +750,11 @@ describe("WaveJoinStep (C03)", () => {
     }
 
     const stores = store();
-    put(stores, ppPrep, "prep", prepOf(WAVE_MAP));
-    put(stores, ppQueue, "queue", { pending: [], current: null, done: [], blocked: [] } satisfies PortQueueState);
-    put(stores, ppVerify, "verify", verifyStateOf([{ file: "src/a.php", fromRound: 2 }, { file: "src/c.php", fromRound: 1 }]));
+    seedAttribute(stores, ppPrep, "prep", prepOf(WAVE_MAP));
+    seedAttribute(stores, ppQueue, "queue", { pending: [], current: null, done: [], blocked: [] } satisfies PortQueueState);
+    seedAttribute(stores, ppVerify, "verify", verifyStateOf([{ file: "src/a.php", fromRound: 2 }, { file: "src/c.php", fromRound: 1 }]));
     // wave.round is the FIRST entry's round, exactly as WaveDispatch writes it.
-    put(stores, ppWave, "wave", waveRecord([{ file: "src/a.php", round: 3 }, { file: "src/c.php", round: 2 }], 3));
+    seedAttribute(stores, ppWave, "wave", waveRecord([{ file: "src/a.php", round: 3 }, { file: "src/c.php", round: 2 }], 3));
     const receipt = (file: string, round: number) => ({ file, round, commitSha: committed[file] ?? null, treeHash: null });
     const ctx = subFlowCtx(stores, [
       { status: "completed", receipt: receipt("src/a.php", 3) },
@@ -785,18 +764,18 @@ describe("WaveJoinStep (C03)", () => {
     const input: WaveDispatchOutput = { ...baseInput(itg, { repoRoot }), mode: "fix" };
     const decision = await projectFlow.waveJoin.execute(ctx, input);
 
-    const queue = read<PortQueueState>(stores, ppQueue, "queue");
+    const queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue");
     // Before: both entries used wave.round (3), so c's lookup of op-ID
     // `src/c.php#3` missed and the join threw "no-op round ... lacks the file".
     expect(queue?.done.map((d) => [d.file, d.round, d.commitSha ?? undefined])).toEqual([
       ["src/a.php", 3, committed["src/a.php"]],
       ["src/c.php", 2, committed["src/c.php"]],
     ]);
-    const children = read<{ children: Array<{ file: string; round: number; flowId: string }> }>(stores, ppWaveChildren, "children");
+    const children = peekAttribute<{ children: Array<{ file: string; round: number; flowId: string }> }>(stores, ppWaveChildren, "children");
     expect(children?.children.map((c) => [c.file, c.round])).toEqual([["src/a.php", 3], ["src/c.php", 2]]);
     expect(children?.children[0]?.flowId).toBe("SubFlow:t1-parent-se-1-0");
     // Fix-mode join drops the consumed fix-queue entries and re-verifies.
-    expect(read<QueueVerifyState>(stores, ppVerify, "verify")?.fixQueue).toEqual([]);
+    expect(peekAttribute<QueueVerifyState>(stores, ppVerify, "verify")?.fixQueue).toEqual([]);
     expect(routedTo(decision)).toBe(projectFlow.queueVerify.constructor);
     expect((await findCommitByOpId(repoRoot, operationId("src/c.php", 2)))?.sha).toBe(committed["src/c.php"]);
   }, 60_000);
@@ -804,9 +783,9 @@ describe("WaveJoinStep (C03)", () => {
   test("join: a no-op child (no keyed commit) needs the integrated output; a non-terminal child fails the join", async () => {
     const { repoRoot, itg } = await makeRepoFixture();
     const stores = store();
-    put(stores, ppPrep, "prep", prepOf(WAVE_MAP));
-    put(stores, ppQueue, "queue", { pending: ["src/a.php", "src/b.php"], current: null, done: [], blocked: [] } satisfies PortQueueState);
-    put(stores, ppWave, "wave", waveRecord([{ file: "src/a.php", round: 1 }], 1, "port"));
+    seedAttribute(stores, ppPrep, "prep", prepOf(WAVE_MAP));
+    seedAttribute(stores, ppQueue, "queue", { pending: ["src/a.php", "src/b.php"], current: null, done: [], blocked: [] } satisfies PortQueueState);
+    seedAttribute(stores, ppWave, "wave", waveRecord([{ file: "src/a.php", round: 1 }], 1, "port"));
 
     const input: WaveDispatchOutput = { ...baseInput(itg, { repoRoot }), mode: "port" };
     const receipt = { file: "src/a.php", round: 1, commitSha: null, treeHash: null };
@@ -828,7 +807,7 @@ describe("WaveJoinStep (C03)", () => {
     await itgGit.run(["add", "-A"]);
     await itgGit.run(["commit", "-m", "integrated a"]);
     const decision = await projectFlow.waveJoin.execute(subFlowCtx(stores, [{ status: "completed", receipt }]), input);
-    const queue = read<PortQueueState>(stores, ppQueue, "queue");
+    const queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue");
     expect(queue?.done.map((d) => [d.file, d.round])).toEqual([["src/a.php", 1]]);
     expect(queue?.pending).toEqual(["src/b.php"]); // port mode consumes the dispatched entry
     expect(routedTo(decision)).toBe(projectFlow.bootstrap.constructor);
@@ -875,14 +854,14 @@ describe("ChildLeaseStep", () => {
     expect("queueFixErrors" in fri).toBe(false);
     expect("queueFixVitest" in fri).toBe(false);
 
-    const verify = read<QueueVerifyState>(stores, ppVerify, "verify");
+    const verify = peekAttribute<QueueVerifyState>(stores, ppVerify, "verify");
     expect(verify?.errors.length).toBe(80); // per-file cap constant, was a literal
     expect(verify?.tscTotal).toBe(100);
     expect(verify?.vitestRun).toBeNull();
     expect(verify?.tscRun).toBeUndefined(); // a by-value feed makes no ran/not-run claim
     expect(queueFixFeedForFile(verify, "src/a.ts").errors.length).toBe(80);
-    expect(read<PrepArtifact>(stores, ppPrep, "prep")?.sourceMap["src/a.php"]?.outPath).toBe("src/a.ts");
-    const pool = read<Record<string, LeaseRecord>>(stores, ppLease, "pool");
+    expect(peekAttribute<PrepArtifact>(stores, ppPrep, "prep")?.sourceMap["src/a.php"]?.outPath).toBe("src/a.ts");
+    const pool = peekAttribute<Record<string, LeaseRecord>>(stores, ppLease, "pool");
     expect(Object.keys(pool ?? {})).toEqual(["src/a.php"]);
     expect(pool?.["src/a.php"]?.epoch).toBe(1);
 
@@ -936,8 +915,8 @@ describe("QueueFix is one step class in both flows (C90)", () => {
 
   test("the shared QueueFix step skips (no agent turn) when a file's feed is empty", async () => {
     const stores = store();
-    put(stores, ppPrep, "prep", prepOf(WAVE_MAP));
-    put(stores, ppVerify, "verify", verifyStateOf([], [fixErr("src/other.ts")]));
+    seedAttribute(stores, ppPrep, "prep", prepOf(WAVE_MAP));
+    seedAttribute(stores, ppVerify, "verify", verifyStateOf([], [fixErr("src/other.ts")]));
     const fri = {
       repoRoot: "/r",
       worktreeRoot: "/w",
