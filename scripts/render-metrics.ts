@@ -65,7 +65,7 @@ import type {
   VerdictRecord,
   VerdictTombstone,
 } from "../src/metrics/types.js";
-import type { DispatchHistory } from "../src/metrics/dispatch-anchor.js";
+import type { DispatchHistory, DispatchHistoryEvent } from "../src/metrics/dispatch-anchor.js";
 
 /** `dexcli flow state` wire: attributes only (run ids / status live on `flow summary`). */
 interface FlowState {
@@ -166,20 +166,47 @@ const runDexcli: DexRunner = (args) => {
   return JSON.parse(stdout);
 };
 
+/** Upper bound on the runs walked back from the current one (a malformed chain cannot loop). */
+export const MAX_RUN_CHAIN = 256;
+
 /**
- * Dispatch history of a flow's FIRST and CURRENT run (from its `flow
- * summary`). A continue-as-new flow (dex housekeeping at its event threshold)
- * accumulates envelopes across runs while `flow history` returns one run at a
- * time, so the anchor needs both runs' dispatch entries or first-run envelopes
- * fail as anchorless. `dexcli flow summary` exposes no run chain, so the
- * middle runs of a flow with three or more runs are NOT enumerable and not
- * covered. The parent and every child use this same helper.
+ * The run a continued run took over from: its history opens with a
+ * FlowStartedOrContinued event whose continued-start carries `previousRunId`
+ * (dex.d.ts FlowContinuedStart; dexcli prints the oneof as `payload.continuedStart`,
+ * the SDK form is `payload.startOrContinue`). A first run (initialStart), or a
+ * history that does not say, gives undefined.
+ */
+export function previousRunIdOf(events: readonly DispatchHistoryEvent[]): string | undefined {
+  for (const event of events) {
+    const payload = event.payload as
+      | {
+          continuedStart?: { previousRunId?: unknown } | null;
+          startOrContinue?: { $case?: string; value?: { previousRunId?: unknown } } | null;
+        }
+      | null
+      | undefined;
+    const direct = payload?.continuedStart?.previousRunId;
+    const viaCase = payload?.startOrContinue?.$case === "continuedStart" ? payload.startOrContinue.value?.previousRunId : undefined;
+    const id = direct ?? viaCase;
+    if (typeof id === "string" && id.length > 0) return id;
+  }
+  return undefined;
+}
+
+/**
+ * Dispatch history of EVERY run of a flow, oldest first. A continue-as-new
+ * flow (dex housekeeping at its event threshold) accumulates envelopes across
+ * runs while `flow history` returns one run at a time, so the anchor needs
+ * every run's dispatch entries or earlier envelopes fail as anchorless.
+ * `flow summary` names only the first and the current run, so the middle runs
+ * are found by walking back from the current one: each continued run's history
+ * opens with a continued-start carrying `previousRunId`. If the chain breaks
+ * before it reaches the first run (a history that does not name its
+ * predecessor), the first run is still fetched, so the result is never smaller
+ * than first + current. The parent and every child use this same helper.
  */
 export function mergedHistory(facts: FlowFacts, run: DexRunner = runDexcli): DispatchHistory {
-  // A summary without run ids falls back to dexcli's default (latest) run
-  // instead of silently fetching nothing.
-  const runs: Array<string | undefined> = facts.runIds.length > 0 ? facts.runIds : [undefined];
-  const events = runs.flatMap((rid) => {
+  const fetchRun = (rid: string | undefined): DispatchHistoryEvent[] => {
     const args =
       rid === undefined
         ? ["flow", "history", facts.flowId, "-all"]
@@ -189,7 +216,25 @@ export function mergedHistory(facts: FlowFacts, run: DexRunner = runDexcli): Dis
     // where each event came from or two children's `PpImplement-1` collapse.
     const historySource = `${facts.flowId}@${rid ?? "latest"}`;
     return (h.events ?? []).map((event) => ({ ...event, historySource }));
-  });
+  };
+
+  // A summary without run ids falls back to dexcli's default (latest) run
+  // instead of silently fetching nothing.
+  const currentRunId = facts.runIds[facts.runIds.length - 1];
+  const firstRunId = facts.runIds[0];
+  const newest = fetchRun(currentRunId);
+  let events = newest;
+  const visited = new Set<string>(currentRunId === undefined ? [] : [currentRunId]);
+  let previous = previousRunIdOf(newest);
+  while (previous !== undefined && !visited.has(previous) && visited.size < MAX_RUN_CHAIN) {
+    visited.add(previous);
+    const older = fetchRun(previous);
+    events = [...older, ...events];
+    previous = previousRunIdOf(older);
+  }
+  if (firstRunId !== undefined && !visited.has(firstRunId)) {
+    events = [...fetchRun(firstRunId), ...events];
+  }
   return { flowId: facts.flowId, runId: facts.runId, events };
 }
 

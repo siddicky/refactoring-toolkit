@@ -225,7 +225,11 @@ export interface FlowFacts {
   flowId: string;
   /** Current run id (falls back to the flow id when the summary has none). */
   runId: string;
-  /** firstRunId and runId, de-duplicated (the runs whose history is fetched). */
+  /**
+   * firstRunId and runId, de-duplicated: the two runs the summary names. The
+   * runs between them are found by walking `previousRunId` back from the
+   * current run (scripts/render-metrics.ts mergedHistory).
+   */
   runIds: string[];
   flowCompleted: boolean;
 }

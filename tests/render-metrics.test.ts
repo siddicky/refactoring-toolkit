@@ -149,7 +149,7 @@ describe("mergedHistory: first + current run, one helper for parent and children
     expect(h.events.map((e) => e.eventId)).toEqual(["a1", "a2", "b1"]);
     expect(h.flowId).toBe("f1");
     expect(h.runId).toBe("run-2");
-    expect(calls.map((c) => c[c.indexOf("-run-id") + 1])).toEqual(["run-1", "run-2"]);
+    expect(calls.map((c) => c[c.indexOf("-run-id") + 1]).sort()).toEqual(["run-1", "run-2"]);
   });
 
   test("a single-run flow (first == current) is fetched once", () => {
@@ -158,16 +158,60 @@ describe("mergedHistory: first + current run, one helper for parent and children
     expect(calls.length).toBe(1);
   });
 
-  test("documented limit: only the first and current run of a 3-run flow are enumerable from flow summary", () => {
+  const continuedFrom = (previousRunId: string) => ({
+    eventId: `start-from-${previousRunId}`,
+    type: "FlowStartedOrContinued",
+    payload: { continuedStart: { previousRunId } },
+  });
+  const firstStart = { eventId: "start-1", type: "FlowStartedOrContinued", payload: { initialStart: {} } };
+
+  test("C45: the middle runs of a 3-run flow are walked back from the current run via previousRunId", () => {
+    const { run, calls } = fakeDex({
+      "history:f1:run-1": { events: [firstStart, ev("a1")] },
+      "history:f1:run-2": { events: [continuedFrom("run-1"), ev("b1")] },
+      "history:f1:run-3": { events: [continuedFrom("run-2"), ev("c1")] },
+    });
+    const h = mergedHistory(flowFactsFromSummary("f1", { runId: "run-3", firstRunId: "run-1" }), run);
+    // Oldest run first, every run exactly once.
+    expect(h.events.map((e) => e.eventId)).toEqual(["start-1", "a1", "start-from-run-1", "b1", "start-from-run-2", "c1"]);
+    expect(h.events.map((e) => e.historySource)).toEqual([
+      "f1@run-1",
+      "f1@run-1",
+      "f1@run-2",
+      "f1@run-2",
+      "f1@run-3",
+      "f1@run-3",
+    ]);
+    expect(calls.map((c) => c[c.indexOf("-run-id") + 1]).sort()).toEqual(["run-1", "run-2", "run-3"]);
+  });
+
+  test("C45: a 5-run chain is followed all the way back, middle dispatch entries included", () => {
+    const table: Record<string, unknown> = {};
+    for (let n = 1; n <= 5; n++) {
+      table[`history:f1:run-${n}`] = { events: [n === 1 ? firstStart : continuedFrom(`run-${n - 1}`), ev(`e${n}`)] };
+    }
+    const { run } = fakeDex(table);
+    const h = mergedHistory(flowFactsFromSummary("f1", { runId: "run-5", firstRunId: "run-1" }), run);
+    expect(h.events.map((e) => e.eventId).filter((id) => /^e\d$/.test(id ?? ""))).toEqual(["e1", "e2", "e3", "e4", "e5"]);
+  });
+
+  test("C45: a broken chain (the current run does not name its predecessor) still yields first + current", () => {
     const { run, calls } = fakeDex({
       "history:f1:run-1": { events: [ev("a1")] },
       "history:f1:run-3": { events: [ev("c1")] },
     });
     const h = mergedHistory(flowFactsFromSummary("f1", { runId: "run-3", firstRunId: "run-1" }), run);
-    // run-2's events are not reachable (the summary exposes no run chain); the
-    // driver's comment says so rather than claiming ALL runs.
     expect(h.events.map((e) => e.eventId)).toEqual(["a1", "c1"]);
     expect(calls.some((c) => c.includes("run-2"))).toBe(false);
+  });
+
+  test("C45: a cyclic previousRunId chain terminates", () => {
+    const { run, calls } = fakeDex({
+      "history:f1:run-a": { events: [continuedFrom("run-b")] },
+      "history:f1:run-b": { events: [continuedFrom("run-a")] },
+    });
+    mergedHistory(flowFactsFromSummary("f1", { runId: "run-a", firstRunId: "run-a" }), run);
+    expect(calls.length).toBe(2);
   });
 
   test("a summary without run ids falls back to the default-run history instead of fetching nothing", () => {
