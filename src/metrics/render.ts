@@ -30,6 +30,7 @@ import {
   fileFromIdentity,
   isFiredKill,
   isModelCallingRole,
+  PREP_SPEC_FILE,
   sanitizeFileKey,
   type CitationCheckResult,
   type EnvelopeEvent,
@@ -49,16 +50,12 @@ import {
   tokenTotalOf,
 } from "./types.js";
 
-/** The fixer step id (mirror of flows/port-project.ts) for AC2 retry counts. */
-const FIXER_STEP_ID = "pp-fixer";
-
 /**
- * The prep-analysis spec (flows/port-project.ts PREP_SPEC_FILE, round 0):
- * prep reviews key their envelopes and verdicts by it. It is real review work
- * (kept in file_rounds and the token tables) but not a ported source file, so
- * it is excluded from `summary.files`.
+ * The fixer step id for AC2 retry counts: a hand-kept mirror of the flow's
+ * fixer step (the metrics layer never imports flows), pinned against the real
+ * step by tests/mirror-drift.test.ts.
  */
-const PREP_SPEC_FILE = "PORTING.spec.md";
+export const FIXER_STEP_ID = "pp-fixer";
 
 /** The single provenance failure an empty evidence stream produces. */
 const NO_EVIDENCE_FAILURE =

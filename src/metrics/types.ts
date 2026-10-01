@@ -46,6 +46,14 @@ export type EnvelopeRole =
   | "diff-capture"
   | "record";
 
+/**
+ * The prep-analysis spec, treated as a "file" at round 0: prep reviews key
+ * their envelopes and verdicts by it (flows/port/prep-steps.ts). It is real
+ * review work (kept in file_rounds and the token tables) but not a ported
+ * source file, so the renderer excludes it from `summary.files`.
+ */
+export const PREP_SPEC_FILE = "PORTING.spec.md";
+
 /** Roles that call a model and therefore MUST carry non-null `tokens`. */
 export type ModelCallingRole = "agent" | "review" | "judgment";
 
@@ -294,26 +302,29 @@ export function isStartMarker(env: EnvelopeEvent): boolean {
 
 /**
  * Normalize the envelope `tokens` field to the token TOTAL: a number passes
- * through; the SDK-shaped object sums; anything else is null. Mirrors the
- * dashboard's normalizeTokens so both surfaces agree on the contract.
+ * through; the SDK-shaped object sums; anything else is null. The ONE
+ * normalizer: the renderer calls it and the dashboard's normalizeTokens
+ * delegates to it, so both surfaces agree on the contract. It reads parsed
+ * JSON, hence `unknown`: an optional split field that is absent or not a
+ * finite number counts as 0 rather than poisoning the total.
  */
-export function tokenTotalOf(tokens: number | TokenUsage | null): number | null {
+export function tokenTotalOf(tokens: unknown): number | null {
   if (typeof tokens === "number") return tokens;
-  if (tokens !== null && typeof tokens === "object") {
-    const input = tokens.input_tokens;
-    const output = tokens.output_tokens;
-    if (typeof input !== "number" || typeof output !== "number") return null;
-    // Wave-5: the usage object may carry the full provider split; the total
-    // matches the opencode seam's tokenTotal (input+output+reasoning+cache).
-    return (
-      input +
-      output +
-      (tokens.reasoning_tokens ?? 0) +
-      (tokens.cache_read_tokens ?? 0) +
-      (tokens.cache_write_tokens ?? 0)
-    );
-  }
-  return null;
+  if (tokens === null || typeof tokens !== "object") return null;
+  const usage = tokens as Record<string, unknown>;
+  const input = usage.input_tokens;
+  const output = usage.output_tokens;
+  if (typeof input !== "number" || typeof output !== "number") return null;
+  const optional = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  // Wave-5: the usage object may carry the full provider split; the total
+  // matches the opencode seam's tokenTotal (input+output+reasoning+cache).
+  return (
+    input +
+    output +
+    optional(usage.reasoning_tokens) +
+    optional(usage.cache_read_tokens) +
+    optional(usage.cache_write_tokens)
+  );
 }
 
 // The file-key helpers (sanitizer, identity key and their inverses) live in

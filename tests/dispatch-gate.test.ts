@@ -308,14 +308,12 @@ describe("gateLine (the runner's single output line)", () => {
   });
 });
 
-describe("REVIEW_STEP_TYPES drift (hand-mirrored list, no flow imports)", () => {
+describe("REVIEW_STEP_TYPES (derived from the dispatch-anchor step table, no flow imports)", () => {
   const sorted = (xs: readonly string[]): string[] => [...xs].sort();
 
-  test("equals the review-role MODEL steps of the dispatch-anchor step table", () => {
-    const fromTable = PORT_FLOW_STEPS.filter((s) => s.role === "review" && s.kind === "model").map(
-      (s) => s.stepType,
-    );
-    expect(sorted(REVIEW_STEP_TYPES)).toEqual(sorted(fromTable));
+  test("is the review-role MODEL steps of the step table: the two prep reviewers and the two file reviewers", () => {
+    expect(sorted(REVIEW_STEP_TYPES)).toEqual(["PpPrepReviewA", "PpPrepReviewB", "PpReviewA", "PpReviewB"]);
+    expect(REVIEW_STEP_TYPES.every((t) => PORT_FLOW_STEPS.some((s) => s.stepType === t && s.kind === "model"))).toBe(true);
   });
 
   test("equals the review step types the flow itself registers (flows/port-project.ts + flows/port/*)", () => {

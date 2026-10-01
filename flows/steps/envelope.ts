@@ -46,60 +46,23 @@ import {
   sessionFenceMap,
   type SessionFence,
 } from "../../src/harness/opencode.js";
-import type {
-  TokenUsage,
-  TurnDiagnosis,
+import {
+  isModelCallingRole,
+  type EnvelopeEvent,
+  type EnvelopeOutcome,
+  type EnvelopeRole,
+  type TokenUsage,
+  type TurnDiagnosis,
 } from "../../src/metrics/types.js";
 
 // ---------------------------------------------------------------------------
 // Envelope event contract
 // ---------------------------------------------------------------------------
 
-export type EnvelopeRole =
-  | "agent"
-  | "review"
-  | "judgment"
-  | "verdict-check"
-  | "prioritize"
-  | "commit"
-  | "integration"
-  | "queue"
-  | "diff-capture"
-  | "record";
-
-export type EnvelopeOutcome =
-  "skipped" | "redone" | "interrupted" | "completed";
-
-export interface EnvelopeEvent {
-  stepId: string;
-  role: EnvelopeRole;
-  /** Lease file key; null for flow-level steps. */
-  file: string | null;
-  round: number | null;
-  /** One-based handler attempt from the dex Context (exit 0(f): SDK-exposed). */
-  attempt: number;
-  /** UTC ISO-8601 timestamps; cross-process ordering asserts UTC only. */
-  started_at: string;
-  ended_at: string | null;
-  outcome: EnvelopeOutcome;
-  /**
-   * Token TOTAL (number) or the full provider usage split (TokenUsage object,
-   * wave-5 cost honesty: cache/reasoning split + USD cost) for model-calling
-   * roles; null = not applicable. Consumers normalize via tokenTotalOf.
-   */
-  tokens: number | TokenUsage | null;
-  wall_clock_ms: number | null;
-  /** Per-target identity (sanitized file#round) appended to the event key. */
-  identity: string | null;
-  /**
-   * Turn-health diagnosis piggybacked on THIS envelope write (US-003, Stage
-   * 1b) — never a separate mini-step. Present only on envelopes whose step
-   * recorded a diagnosis (e.g. the successor attempt of a Tier-0 retry);
-   * evidence-only: no control-flow consumer may read it (AC-B2). Mirrors
-   * src/metrics/types.ts EnvelopeEvent.
-   */
-  turn_diagnosis?: TurnDiagnosis | null;
-}
+// The contract types (role, outcome, event) are defined once, in
+// src/metrics/types.ts, which the renderer and the dashboard also read; the
+// flow re-exports them so flow-side imports keep one module.
+export type { EnvelopeEvent, EnvelopeOutcome, EnvelopeRole };
 
 /**
  * Event key for one envelope execution. M2: multi-target runs (one flow,
@@ -255,13 +218,6 @@ export function publishTurnDiagnosisEvent(context: Context, diagnosis: TurnDiagn
   publishEnvelopeEvent(context, eventKey, event);
 }
 
-/** Roles whose steps call a model: tokens are REQUIRED, never null. */
-const MODEL_CALLING_ROLES: readonly EnvelopeRole[] = [
-  "agent",
-  "review",
-  "judgment",
-];
-
 /**
  * Step id of the turn-health diagnosis record event (US-003). NOT a dex step:
  * the record exists on the TELEMETRY STREAM only when an assessment fires
@@ -273,8 +229,9 @@ const MODEL_CALLING_ROLES: readonly EnvelopeRole[] = [
  */
 export const TURN_HEALTH_STEP_ID = "pp-turn-health";
 
+/** Roles whose steps call a model: tokens are REQUIRED, never null (MODEL_CALLING_ROLES, src/metrics/types.ts). */
 export function requiresTokens(role: EnvelopeRole): boolean {
-  return MODEL_CALLING_ROLES.includes(role);
+  return isModelCallingRole(role);
 }
 
 /**
@@ -488,7 +445,7 @@ export type EnvelopeStepClass<I> = (new () => Step<I>) & StepClass<I>;
 export function envelopeStepClass<I, O>(
   spec: EnvelopeSpec<I, O>,
 ): EnvelopeStepClass<I> {
-  return class EnvelopeStepClass implements Step<I> {
+  const stepClass = class EnvelopeStepClass implements Step<I> {
     getStepType(): string {
       return spec.stepType;
     }
@@ -504,6 +461,44 @@ export function envelopeStepClass<I, O>(
       return executeEnvelope(spec, context as AsyncContext, input);
     }
   };
+  stepIdentities.set(stepClass, {
+    stepType: spec.stepType,
+    stepId: spec.stepId,
+    role: spec.role,
+    marker: false,
+  });
+  return stepClass;
+}
+
+/**
+ * What a class-form step was built from. The dispatch anchor's step table
+ * (PORT_FLOW_STEPS in src/metrics/dispatch-anchor.ts) mirrors these triples by
+ * hand, because the metrics layer never imports flow code; this registry lets
+ * tests/mirror-drift.test.ts compare the mirror with the real flows. A start
+ * marker records its TARGET step's stepId and role (its own envelope is
+ * `<stepId>:start`, role record).
+ */
+export interface EnvelopeStepIdentity {
+  stepType: string;
+  stepId: string;
+  role: EnvelopeRole;
+  marker: boolean;
+}
+
+const stepIdentities = new WeakMap<object, EnvelopeStepIdentity>();
+
+/** The identity a step INSTANCE's class was built with; undefined for a step not made by the class factories. */
+export function envelopeStepIdentityOf(step: object): EnvelopeStepIdentity | undefined {
+  return stepIdentities.get(step.constructor);
+}
+
+/** Every step a flow registers, by dex step type, with its recorded identity (undefined when not factory-made). */
+export function registeredSteps(flow: Flow<any>): Map<string, EnvelopeStepIdentity | undefined> {
+  const steps = new Map<string, EnvelopeStepIdentity | undefined>();
+  for (const definition of flow.getSteps()) {
+    steps.set(definition.step.getStepType(), envelopeStepIdentityOf(definition.step));
+  }
+  return steps;
 }
 
 // ---------------------------------------------------------------------------
@@ -634,7 +629,7 @@ export interface StartMarkerSpec<I> {
 }
 
 export function envelopeStartMarker<I>(spec: StartMarkerSpec<I>): EnvelopeStepClass<I> {
-  return envelopeStepClass<I, I>({
+  const markerClass = envelopeStepClass<I, I>({
     stepType: spec.stepType,
     stepId: `${spec.targetStepId}:start`,
     role: "record",
@@ -663,6 +658,13 @@ export function envelopeStartMarker<I>(spec: StartMarkerSpec<I>): EnvelopeStepCl
     },
     route: (_ctx, input) => spec.route(input),
   });
+  stepIdentities.set(markerClass, {
+    stepType: spec.stepType,
+    stepId: spec.targetStepId,
+    role: spec.role,
+    marker: true,
+  });
+  return markerClass;
 }
 
 /** Convenience for chaining: startStep + otherSteps in registration order. */

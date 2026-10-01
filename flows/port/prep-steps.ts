@@ -33,7 +33,7 @@ import {
   renderSymbolTable,
   DIFF_HEADER_LINES,
 } from "../../src/harness/runtime.js";
-import type { DiffDocument } from "../../src/metrics/types.js";
+import { PREP_SPEC_FILE, type DiffDocument } from "../../src/metrics/types.js";
 import { naiveCitationCheck } from "../../src/typesafe/verdict-check.js";
 import { requireHarness, runAgentTurn } from "./agent-turns.js";
 import { countingJevClient, keepFindings } from "./lane-b.js";
@@ -90,8 +90,6 @@ export const PrepStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
   },
   route: (_ctx, _input, out) => goTo(SymbolStart, out),
 });
-
-const PREP_SPEC_FILE = "PORTING.spec.md";
 
 export const SymbolStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<PortRunInput>({
   stepType: "PpSymbolStart",

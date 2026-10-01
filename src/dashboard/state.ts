@@ -11,7 +11,7 @@
  * both are accepted.
  */
 
-import { fileFromSanitizedKey } from "../metrics/types.js";
+import { fileFromSanitizedKey, MODEL_CALLING_ROLES, tokenTotalOf } from "../metrics/types.js";
 import type {
   BurnDownPointView,
   BurnDownSample,
@@ -47,12 +47,12 @@ import type {
 // ---------------------------------------------------------------------------
 
 /**
- * Local mirror of the flow envelope's model-calling roles
- * (flows/steps/envelope.ts). Duplicated deliberately: importing the flow
- * module would pull the dex SDK and couple the dashboard to concurrently
- * edited flow code. If the envelope contract adds a model role, update here.
+ * The envelope's model-calling roles, from the shared contract
+ * (src/metrics/types.ts). The dashboard never imports the flow module (it would
+ * pull the dex SDK and couple the page to flow code); the flow's own
+ * requiresTokens reads the same list.
  */
-const MODEL_ROLES: ReadonlySet<string> = new Set(["agent", "review", "judgment"]);
+const MODEL_ROLES: ReadonlySet<string> = new Set(MODEL_CALLING_ROLES);
 
 export interface ParsedEnvelope {
   stepId: string;
@@ -97,24 +97,9 @@ export function parseEnvelope(value: unknown): ParsedEnvelope | null {
   };
 }
 
-/** Token TOTAL; accepts a number or the metrics TokenUsage object. */
+/** Token TOTAL; accepts a number or the metrics TokenUsage object (the one normalizer, tokenTotalOf). */
 export function normalizeTokens(raw: unknown): number | null {
-  if (typeof raw === "number") return raw;
-  if (raw !== null && typeof raw === "object") {
-    const rec = raw as Record<string, unknown>;
-    const input = rec.input_tokens;
-    const output = rec.output_tokens;
-    if (typeof input === "number" && typeof output === "number") {
-      return (
-        input +
-        output +
-        numOr(rec.reasoning_tokens, 0) +
-        numOr(rec.cache_read_tokens, 0) +
-        numOr(rec.cache_write_tokens, 0)
-      );
-    }
-  }
-  return null;
+  return tokenTotalOf(raw);
 }
 
 /** Wave-5 cost honesty: the provider usage split, when the envelope carries it. */
