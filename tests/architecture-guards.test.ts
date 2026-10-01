@@ -62,6 +62,26 @@ describe("architecture: the Jev client reaches every consumer through ONE seam",
   });
 });
 
+describe("architecture: hunk body ranges have one derivation (C5, C11)", () => {
+  // suspicion.ts once re-derived the ranges from a 0-based index while the evidence lines are 1-based, which put the
+  // `@@` line inside a hunk and the last body line outside it. It asks the parsed diff instead.
+  test("suspicion.ts reads hunk membership only through parsed.hunkIdForBodyLine", () => {
+    const code = readSource("src/metrics/suspicion.ts")
+      .split("\n")
+      .filter((line) => !/^\s*(?:\/\/|\/?\*)/.test(line))
+      .join("\n");
+    expect(code).toContain("hunkIdForBodyLine");
+    expect(code).not.toMatch(/HUNK_HEADER|new_start|new_lines|old_start|\.hunks\b|\.lines\b/);
+  });
+
+  test("only src/harness/runtime.ts computes the ranges", () => {
+    const owners = productionSources("src", "flows", "harness", "scripts").filter((rel) =>
+      /function hunkBodyRanges\b|HUNK_HEADER_RE\s*=/.test(readSource(rel)),
+    );
+    expect(owners).toEqual(["src/harness/runtime.ts"]);
+  });
+});
+
 describe("architecture: source comments carry no build-process names", () => {
   // Comments such as "owned by worker-1/lead" or "maintained by worker-1b" name a
   // person on a past build, not anything a reader of the code can find.
