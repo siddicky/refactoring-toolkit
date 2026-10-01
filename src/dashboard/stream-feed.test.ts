@@ -25,10 +25,20 @@ describe("dashboard blob-cache configuration (C61)", () => {
     expect(configFromEnv({ STATUS_BLOB_CACHE_DIR: " /var/tmp/dash " }, "/w").blobCacheDir).toBe("/var/tmp/dash");
   });
 
-  test("STATUS_STREAM_SUBSCRIBE=0 opts out; anything else leaves the subscriber on", () => {
-    expect(configFromEnv({ STATUS_STREAM_SUBSCRIBE: "0" }, "/w").streamSubscribe).toBe(false);
+  test("STATUS_STREAM_SUBSCRIBE is a switch: 0/false/no/off opt out, unset and blank leave it on", () => {
+    for (const off of ["0", "false", "FALSE", "no", " off "]) {
+      expect(configFromEnv({ STATUS_STREAM_SUBSCRIBE: off }, "/w").streamSubscribe).toBe(false);
+    }
+    for (const on of ["1", "true", "yes", "on", "", "  "]) {
+      expect(configFromEnv({ STATUS_STREAM_SUBSCRIBE: on }, "/w").streamSubscribe).toBe(true);
+    }
     expect(configFromEnv({}, "/w").streamSubscribe).toBe(true);
-    expect(configFromEnv({ STATUS_STREAM_SUBSCRIBE: "1" }, "/w").streamSubscribe).toBe(true);
+  });
+
+  test("an unrecognised STATUS_STREAM_SUBSCRIBE warns and keeps the default instead of guessing", () => {
+    const cfg = configFromEnv({ STATUS_STREAM_SUBSCRIBE: "banana" }, "/w");
+    expect(cfg.streamSubscribe).toBe(true);
+    expect(cfg.warnings.some((w) => w.includes("STATUS_STREAM_SUBSCRIBE") && w.includes("banana"))).toBe(true);
   });
 });
 

@@ -22,6 +22,7 @@
 
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { envString } from "../src/env.js";
 import {
   type CliParse,
   CLI_EXIT,
@@ -100,8 +101,8 @@ async function main(): Promise<number> {
     console.error("TYPESAFE_OFFLINE is set — refusing: the spot-check measures the LIVE path.");
     return JEV_SPOT_CHECK_EXIT.blocked;
   }
-  const key = process.env.TYPESAFE_API_KEY?.trim();
-  if (key === undefined || key === "") {
+  const key = envString("TYPESAFE_API_KEY");
+  if (key === undefined) {
     console.error("TYPESAFE_API_KEY absent — live Jev spot-check BLOCKED-pending-key.");
     return JEV_SPOT_CHECK_EXIT.blocked;
   }

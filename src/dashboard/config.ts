@@ -11,6 +11,7 @@
 
 import { DEFAULT_KILL_EVENTS_PATH } from "../metrics/kill-events.js";
 import { BLOB_CACHE_DIRS, dexcliFromEnv } from "../dex/defaults.js";
+import { parseSwitch } from "../env.js";
 import { DEFAULT_MAX_CHILD_FLOWS, DEFAULT_MAX_FLOWS } from "./flow-select.js";
 
 /**
@@ -57,7 +58,7 @@ export interface StatusConfig {
   burnDownFiles: string[];
   feedLimit: number;
   commitLimit: number;
-  /** false when STATUS_STREAM_SUBSCRIBE=0 (dexcli polling only). */
+  /** false when STATUS_STREAM_SUBSCRIBE is off (0/false/no/off): dexcli polling only. */
   streamSubscribe: boolean;
   /**
    * Blob-cache directory of the stream subscriber's read-side client. Under
@@ -105,6 +106,21 @@ function intEnv(
   return value;
 }
 
+/**
+ * A switch (src/env.ts parseSwitch): 1/true/yes/on and 0/false/no/off; blank ->
+ * fallback silently; anything else -> fallback + a warning. `=false` used to
+ * leave the subscriber ON because only the literal "0" opted out.
+ */
+function switchEnv(raw: string | undefined, name: string, fallback: boolean, warnings: string[]): boolean {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = parseSwitch(raw);
+  if (value === null) {
+    warnings.push(`${name}=${JSON.stringify(raw)} is not one of 1/true/yes/on or 0/false/no/off; using ${fallback ? "on" : "off"}`);
+    return fallback;
+  }
+  return value;
+}
+
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): StatusConfig {
   const warnings: string[] = [];
 
@@ -141,7 +157,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env, cwd: string 
     burnDownFiles: csv(env.BURN_DOWN_FILES, DEFAULT_BURN_DOWN_FILES),
     feedLimit: 80,
     commitLimit: 40,
-    streamSubscribe: env.STATUS_STREAM_SUBSCRIBE?.trim() !== "0",
+    streamSubscribe: switchEnv(env.STATUS_STREAM_SUBSCRIBE, "STATUS_STREAM_SUBSCRIBE", true, warnings),
     blobCacheDir: env.STATUS_BLOB_CACHE_DIR?.trim() || DEFAULT_BLOB_CACHE_DIR,
     warnings,
   };

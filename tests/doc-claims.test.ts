@@ -181,19 +181,12 @@ describe("doc claims: .env.example", () => {
     expect(text).toContain(`Default: ${DEFAULT_BURN_DOWN_FILES.join(",")}`);
   });
 
-  test("optional variables are commented out, so copying the file changes no default", () => {
-    // These read a blank value differently from an unset one.
-    const mustStayCommented = [
-      "OPENCODE_AGENT",
-      "GIT_AUTHOR_NAME",
-      "GIT_AUTHOR_EMAIL",
-      "GIT_COMMITTER_NAME",
-      "GIT_COMMITTER_EMAIL",
-      "RECOVER_FILE",
-      "RECOVER_ROUND",
-      "PORTING_KIT_FAULT",
-    ];
-    for (const key of mustStayCommented) expect(documented.get(key)?.commented).toBe(true);
+  test("it states the one reading rule (blank is unset), and tests/env-blank-is-unset.test.ts holds the code to it", () => {
+    // These used to read a blank value differently from an unset one, which is
+    // why the file had to keep them commented out. The code no longer does, so
+    // the file says so instead of listing exceptions.
+    expect(text).toContain("a blank value (empty or only spaces) is");
+    expect(text).not.toMatch(/is not the same as unset/);
   });
 
   test("it names no internal build jargon", () => {

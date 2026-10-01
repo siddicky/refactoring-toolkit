@@ -17,6 +17,8 @@
  *   `isTypesafeOffline()` (TYPESAFE_OFFLINE) is the switch that selects it.
  */
 
+import { envFlag, envString } from "../env.js";
+
 // ---- seam types (structural mirrors of @typesafe-ai/sdk 0.6.0) ---------------
 
 /** A JSON-compatible value. */
@@ -166,15 +168,14 @@ export const TYPESAFE_ENV_VARS = {
 } as const;
 
 /**
- * True when TYPESAFE_OFFLINE is set to anything truthy (1, true, yes...).
- * "0", "false", "" and unset count as online. Offline mode forces the
- * in-memory double so tests never touch the network. Read at call time, so a
- * test can change it between calls.
+ * True when TYPESAFE_OFFLINE is on: 1/true/yes/on (any case). 0/false/no/off,
+ * blank and unset count as online, and any other value is an EnvError (the
+ * switch rule of src/env.ts; it used to read "banana" as on). Offline mode
+ * forces the in-memory double so tests never touch the network. Read at call
+ * time, so a test can change it between calls.
  */
 export function isTypesafeOffline(): boolean {
-  const v = process.env[TYPESAFE_ENV_VARS.offline];
-  if (v === undefined || v === "" || v === "0") return false;
-  return v.toLowerCase() !== "false";
+  return envFlag(TYPESAFE_ENV_VARS.offline, false);
 }
 
 /** Raised when the real client is requested without an API key. */
@@ -257,7 +258,7 @@ export async function createRealJevClient(config?: {
   apiKey?: string;
   baseURL?: string;
 }): Promise<JudgmentClient> {
-  const apiKey = config?.apiKey ?? process.env[TYPESAFE_ENV_VARS.apiKey];
+  const apiKey = config?.apiKey ?? envString(TYPESAFE_ENV_VARS.apiKey);
   if (apiKey === undefined || apiKey === "") {
     throw new JevConfigError(
       `real TypeSafe client requires an API key via ${TYPESAFE_ENV_VARS.apiKey} (env) — refusing to proceed without credentials`,

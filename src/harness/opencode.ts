@@ -13,6 +13,7 @@
 
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { AttributeMap, jsonCodec } from "@superdurable/dex";
+import { envString } from "../env.js";
 import { sanitizeFileKey } from "../file-keys.js";
 
 // ---------------------------------------------------------------------------
@@ -156,11 +157,11 @@ export function parseWaitMs(raw: string | undefined, fallbackMs: number): number
 
 /** OPENCODE_PROMPT_WAIT_MS, read at call time; default 15 minutes. */
 export function promptWaitMs(): number {
-  return parseWaitMs(readEnvVar("OPENCODE_PROMPT_WAIT_MS"), DEFAULT_PROMPT_WAIT_MS);
+  return parseWaitMs(envString("OPENCODE_PROMPT_WAIT_MS"), DEFAULT_PROMPT_WAIT_MS);
 }
 
 /**
- * Hard ceiling on ONE SDK prompt call (live finding, worker-1c 2026-09-26):
+ * Hard ceiling on ONE SDK prompt call (a live finding, 2026-09-26):
  * opencode can hold the session.prompt HTTP call open indefinitely after the
  * assistant message has completed server-side — the turn hangs, heartbeats
  * keep the step alive, and the flow stalls. Race the call against this
@@ -168,7 +169,7 @@ export function promptWaitMs(): number {
  * OPENCODE_PROMPT_CALL_TIMEOUT_MS, read at call time; default 20 minutes.
  */
 export function promptCallTimeoutMs(): number {
-  return parseWaitMs(readEnvVar("OPENCODE_PROMPT_CALL_TIMEOUT_MS"), DEFAULT_PROMPT_CALL_TIMEOUT_MS);
+  return parseWaitMs(envString("OPENCODE_PROMPT_CALL_TIMEOUT_MS"), DEFAULT_PROMPT_CALL_TIMEOUT_MS);
 }
 
 /**
@@ -332,7 +333,9 @@ export class OpencodeHarness {
     model?: { providerID: string; modelID: string } | undefined,
   ): Promise<OpencodeHarness> {
     const client = createOpencodeClient({ baseUrl } as never);
-    const defaultAgent = readEnvVar("OPENCODE_AGENT");
+    // Blank is unset, like every other variable (src/env.ts): a blank value used to become the
+    // agent named "" and every prompt carried `agent: ""`.
+    const defaultAgent = envString("OPENCODE_AGENT");
     return new OpencodeHarness(client, model, defaultAgent, { baseUrl });
   }
 
@@ -580,12 +583,6 @@ function unwrap<T>(result: unknown): T | undefined {
   if (r === undefined || r === null) return undefined;
   if ("data" in r) return r.data;
   return result as T;
-}
-
-/** Reads one env var (kept tiny so the module stays test-friendly). */
-function readEnvVar(name: string): string | undefined {
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  return proc?.env?.[name];
 }
 
 /** Narrows the assistant message's token fields; null when not exposed. */

@@ -27,6 +27,8 @@
  * `OPENCODE_REVIEWER_MODEL_FALLBACK_VARIANT`.
  */
 
+import { envString as env } from "../env.js";
+
 export type LaneName = "planner" | "executor" | "reviewer";
 
 /** Prompt-target for one lane: explicit model ref + reasoning variant. */
@@ -46,12 +48,6 @@ export function parseModelRef(
   const slash = s.indexOf("/");
   if (slash <= 0 || slash >= s.length - 1) return undefined;
   return { providerID: s.slice(0, slash), modelID: s.slice(slash + 1) };
-}
-
-function env(name: string): string | undefined {
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  const v = proc?.env?.[name]?.trim();
-  return v === "" ? undefined : v;
 }
 
 /**

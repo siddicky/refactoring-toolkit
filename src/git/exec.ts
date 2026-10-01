@@ -4,6 +4,7 @@
  * Agents never call this module — only toolkit code does (sole-committer rule).
  */
 
+import { envString } from "../env.js";
 import { describeExecFailure, execToolResult, type ExecFailure } from "../exec.js";
 
 /** Bound applied to every git exec (see the hardening note in {@link git}). */
@@ -69,10 +70,11 @@ export function git(cwd: string, options: GitOptions = {}): GitRunner {
   // commits never fail on author/committer configuration alone.
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME ?? "porting-toolkit",
-    GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL ?? "toolkit@localhost",
-    GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? "porting-toolkit",
-    GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? "toolkit@localhost",
+    // Blank is unset (src/env.ts): the tool refuses an empty ident, so a blank value must not reach it.
+    GIT_AUTHOR_NAME: envString("GIT_AUTHOR_NAME") ?? "porting-toolkit",
+    GIT_AUTHOR_EMAIL: envString("GIT_AUTHOR_EMAIL") ?? "toolkit@localhost",
+    GIT_COMMITTER_NAME: envString("GIT_COMMITTER_NAME") ?? "porting-toolkit",
+    GIT_COMMITTER_EMAIL: envString("GIT_COMMITTER_EMAIL") ?? "toolkit@localhost",
   };
   // Tier-1 hardening (takeaways-synthesis #4): every git exec is bounded by a
   // 30s timeout so a hung git (e.g. credential prompt, locked index on a

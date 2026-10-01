@@ -11,6 +11,10 @@
  *     one is unset, whatever the reader;
  *   - a number is whole digits (`/^\d+$/`: no sign, fraction, exponent or unit
  *     suffix) inside its bounds, else {@link EnvError};
+ *   - a switch is on for 1/true/yes/on and off for 0/false/no/off (any case),
+ *     the caller's default when blank, and anything else is an error rather
+ *     than a silent default (`STATUS_STREAM_SUBSCRIBE=false` used to leave the
+ *     subscriber ON, and TYPESAFE_OFFLINE=banana turned offline mode on);
  *
  * Every reader takes the environment as an argument (default `process.env`) so
  * a test never has to mutate the process.
@@ -51,4 +55,26 @@ export function envInt(
     throw new EnvError(`${name} must be a whole number${boundsText(opts.min, opts.max)} (got ${JSON.stringify(raw)})`);
   }
   return n;
+}
+
+const ON = new Set(["1", "true", "yes", "on"]);
+const OFF = new Set(["0", "false", "no", "off"]);
+
+/** A switch's value: true, false, or null when the text is neither (the caller decides what that means). */
+export function parseSwitch(raw: string): boolean | null {
+  const v = raw.trim().toLowerCase();
+  if (ON.has(v)) return true;
+  if (OFF.has(v)) return false;
+  return null;
+}
+
+/** A switch; `fallback` when unset or blank, EnvError for a value that is neither on nor off. */
+export function envFlag(name: string, fallback: boolean, env: Env = process.env): boolean {
+  const raw = envString(name, env);
+  if (raw === undefined) return fallback;
+  const value = parseSwitch(raw);
+  if (value === null) {
+    throw new EnvError(`${name} must be one of 1/true/yes/on or 0/false/no/off (got ${JSON.stringify(raw)})`);
+  }
+  return value;
 }

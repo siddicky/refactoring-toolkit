@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { EnvError, envInt, envString } from "./env.js";
+import { EnvError, envFlag, envInt, envString, parseSwitch } from "./env.js";
 
 describe("envString", () => {
   test("a set value is trimmed", () => {
@@ -58,5 +58,32 @@ describe("envInt", () => {
 
   test("a number beyond the safe integers is rejected rather than rounded", () => {
     expect(() => read("99999999999999999999")).toThrow(EnvError);
+  });
+});
+
+describe("parseSwitch and envFlag", () => {
+  test("on for 1/true/yes/on and off for 0/false/no/off, in any case and with spaces", () => {
+    for (const on of ["1", "true", "TRUE", "Yes", " on "]) expect(parseSwitch(on)).toBe(true);
+    for (const off of ["0", "false", "False", "NO", " off "]) expect(parseSwitch(off)).toBe(false);
+  });
+
+  test("anything else is null, never a default", () => {
+    for (const other of ["", "2", "y", "banana", "tru", "on off"]) expect(parseSwitch(other)).toBeNull();
+  });
+
+  test("envFlag: unset and blank give the fallback, either way round", () => {
+    for (const env of [{}, { F: "" }, { F: "  " }]) {
+      expect(envFlag("F", true, env)).toBe(true);
+      expect(envFlag("F", false, env)).toBe(false);
+    }
+    expect(envFlag("F", true, { F: "off" })).toBe(false);
+    expect(envFlag("F", false, { F: "yes" })).toBe(true);
+  });
+
+  test("envFlag: an unrecognised value is an EnvError naming the variable and the value", () => {
+    expect(() => envFlag("F", true, { F: "banana" })).toThrow(EnvError);
+    expect(() => envFlag("F", true, { F: "banana" })).toThrow(
+      'F must be one of 1/true/yes/on or 0/false/no/off (got "banana")',
+    );
   });
 });

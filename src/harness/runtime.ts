@@ -39,6 +39,7 @@ import type {
 import type { PhpSymbol } from "../typesafe/symbol-types.js";
 import { createInMemoryJevClient, type InMemoryResponder, type JudgmentClient } from "../typesafe/client.js";
 import type { TokenUsage } from "../metrics/types.js";
+import { envString } from "../env.js";
 import { isDemotedAttempt } from "./lanes.js";
 
 // ---------------------------------------------------------------------------
@@ -133,9 +134,7 @@ export function toolPolicyBlock(
  * ignored by a future plugin merge.
  */
 export function reviewerAgentOverride(): string | undefined {
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  const v = proc?.env?.OPENCODE_REVIEWER_AGENT?.trim();
-  return v !== undefined && v !== "" ? v : undefined;
+  return envString("OPENCODE_REVIEWER_AGENT");
 }
 
 /**

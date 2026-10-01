@@ -150,19 +150,27 @@ async function pickHarness(
   name: string | undefined,
   opts: { requireReal?: boolean } = {},
 ): Promise<AgentSessionClient> {
+  const { baseUrl, model } = opencodeEnv();
   return selectHarness({
     choice: name,
     requireReal: opts.requireReal,
-    baseUrl: process.env.OPENCODE_BASE_URL?.trim() || undefined,
-    model:
-      process.env.OPENCODE_MODEL_PROVIDER && process.env.OPENCODE_MODEL_ID
-        ? {
-            providerID: process.env.OPENCODE_MODEL_PROVIDER,
-            modelID: process.env.OPENCODE_MODEL_ID,
-          }
-        : undefined,
+    baseUrl,
+    model,
     makeStub: () => new StubHarness(),
   });
+}
+
+/** OPENCODE_BASE_URL and the OPENCODE_MODEL_PROVIDER/ID pair, read with the shared rule (blank is unset). */
+export function opencodeEnv(env: NodeJS.ProcessEnv = process.env): {
+  baseUrl: string | undefined;
+  model: { providerID: string; modelID: string } | undefined;
+} {
+  const providerID = envString("OPENCODE_MODEL_PROVIDER", env);
+  const modelID = envString("OPENCODE_MODEL_ID", env);
+  return {
+    baseUrl: envString("OPENCODE_BASE_URL", env),
+    model: providerID !== undefined && modelID !== undefined ? { providerID, modelID } : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +186,7 @@ export { makeFixtureRepo };
 // ---------------------------------------------------------------------------
 
 async function gitSelftest(): Promise<number> {
-  const root = join(process.env.TMPDIR ?? "/tmp", `porting-kit-selftest-${Date.now()}`);
+  const root = join(tmpdir(), `porting-kit-selftest-${Date.now()}`);
   await makeFixtureRepo(root);
   const wtRoot = join(root, ".worktrees");
   const pool = new WorktreePool(root, wtRoot, new InMemoryLeaseStore(), 2);
@@ -980,11 +988,12 @@ const DEFAULT_STATUS_PORT = 4646;
 
 /** Dashboard port: STATUS_PORT (a dedicated name: PORT is generic and Bun auto-loads it from .env), default 4646. */
 export function dashboardPort(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.STATUS_PORT?.trim();
-  if (raw === undefined || raw === "") return DEFAULT_STATUS_PORT;
-  const n = Number(raw);
+  const raw = envString("STATUS_PORT", env);
+  if (raw === undefined) return DEFAULT_STATUS_PORT;
+  // Whole digits only (src/env.ts): Number() also accepted "0x1F6E" and "5e3".
+  const n = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
   if (!Number.isInteger(n) || n < 1 || n > 65535) {
-    throw new Error(`STATUS_PORT must be a port number 1-65535 (got ${JSON.stringify(raw)})`);
+    throw new EnvError(`STATUS_PORT must be a port number 1-65535 (got ${JSON.stringify(raw)})`);
   }
   return n;
 }
@@ -1520,16 +1529,8 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
     case "recover":
       return await orderedRecover(parsed.options);
     case "agent-roundtrip": {
-      const baseUrl = process.env.OPENCODE_BASE_URL?.trim() || undefined;
-      const harness = await OpencodeHarness.connect(
-        baseUrl,
-        process.env.OPENCODE_MODEL_PROVIDER && process.env.OPENCODE_MODEL_ID
-          ? {
-              providerID: process.env.OPENCODE_MODEL_PROVIDER,
-              modelID: process.env.OPENCODE_MODEL_ID,
-            }
-          : undefined,
-      );
+      const { baseUrl, model } = opencodeEnv();
+      const harness = await OpencodeHarness.connect(baseUrl, model);
       const session = await harness.createSession("porting-kit:agent-roundtrip");
       console.log(`[agent-roundtrip] session=${session.id}`);
       const reply = await harness.prompt(session.id, "Reply with exactly: OK");
