@@ -2,7 +2,7 @@
  * Dashboard test fixtures — wire-shaped snapshots modeled on the LIVE dex
  * JSON surface (dexcli flow search/state/history against dex 0.13.5) and on
  * the metrics fixture shapes (src/metrics/fixtures/*.json). Used by
- * state.test.ts; never imported by production code.
+ * state.test.ts and shapes.test.ts; never imported by production code.
  */
 
 import type {
@@ -13,7 +13,7 @@ import type {
   GitCommitRow,
   GitWorktreeRow,
   NormalizedKillEvent,
-} from "./types.js";
+} from "../types.js";
 
 export const FLOW_TRIAL: DexFlowSummaryWire = {
   flowId: "trial-9",

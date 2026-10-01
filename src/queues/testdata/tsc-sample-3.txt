@@ -1,3 +1,0 @@
-Reference copy of TSC_SAMPLE_3 in testdata/tsc-fixtures.ts (tests read the TS module to stay dependency-free; keep both in sync).
-
-src/models/order.ts(47,25): error TS18048: 'orders' is possibly 'undefined'.

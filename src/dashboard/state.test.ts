@@ -1,7 +1,7 @@
 /**
  * Dashboard unit tests: pure aggregation over wire-shaped fixtures
- * (testdata.ts, modeled on live dexcli JSON + metrics fixture shapes) and
- * file-reader behavior for kill-event/burn-down sources.
+ * (fixtures/wire-snapshots.ts, modeled on live dexcli JSON + metrics fixture
+ * shapes) and file-reader behavior for kill-event/burn-down sources.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -54,7 +54,7 @@ import {
   KILL_EVENT_C,
   STATE_PROBE,
   STATE_TRIAL,
-} from "./testdata.js";
+} from "./fixtures/wire-snapshots.js";
 
 const flowView = (over: Partial<FlowView> = {}): FlowView => ({
   flowId: "cx-5",

@@ -19,7 +19,7 @@ import {
   FLOW_TERMINATED_PORT,
   STREAM_REVIEW_START_AND_DONE,
   parallelRunFlows,
-} from "./testdata.js";
+} from "./fixtures/wire-snapshots.js";
 import type { DexFlowSummaryWire, DexHistoryWire, DexStateWire, StreamEventMessage } from "./types.js";
 
 const git: GitQueries = {

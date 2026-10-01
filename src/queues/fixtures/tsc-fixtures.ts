@@ -1,10 +1,6 @@
 /**
  * Raw `tsc --noEmit --pretty false` sample outputs used as test fixtures.
- *
- * These string constants are what the tests read (keeps tests free of
- * node:fs). The matching .txt files in this directory are reference copies
- * of the same content for grep-ability and cross-worker review; if you edit
- * one, edit the other.
+ * This module is the only copy; tsc-queue.test.ts imports the constants.
  */
 
 export const TSC_SAMPLE_1 = `src/services/user-service.ts(12,3): error TS2304: Cannot find name 'mysqli_query'.

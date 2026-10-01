@@ -16,7 +16,7 @@ import {
   type TscProcessRun,
   type TscQueueState,
 } from "./tsc-queue.js";
-import { TSC_SAMPLE_1, TSC_SAMPLE_2, TSC_SAMPLE_3 } from "./testdata/tsc-fixtures.js";
+import { TSC_SAMPLE_1, TSC_SAMPLE_2, TSC_SAMPLE_3 } from "./fixtures/tsc-fixtures.js";
 
 describe("tsc-queue", () => {
   test("parses sample 1: records, fields, continuation, summary ignored", () => {

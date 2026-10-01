@@ -1,7 +1,0 @@
-Reference copy of TSC_SAMPLE_2 in testdata/tsc-fixtures.ts (tests read the TS module to stay dependency-free; keep both in sync).
-
-src/pricing/discount.ts(8,15): error TS7006: Parameter 'rate' implicitly has an 'any' type.
-src/pricing/discount.ts(15,5): error TS2322: Type 'null' is not assignable to type 'number'.
-src/pricing/discount.ts(22,10): error TS7006: Parameter 'items' implicitly has an 'any' type.
-tests/discount.test.ts(4,20): error TS7006: Parameter 'calc' implicitly has an 'any' type.
-src/pricing/tax.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'.
