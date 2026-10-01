@@ -126,6 +126,7 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
         findings: findings.map((f) => ({
           finding_id: f.finding_id,
           severity: f.severity,
+          description: f.summary,
           evidence_span: { start_line: 1, end_line: 1, snippet: f.evidence.quote },
           disposition: "fix",
         })),

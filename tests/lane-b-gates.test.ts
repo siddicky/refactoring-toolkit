@@ -183,6 +183,7 @@ function tuple(reviewer: string, findings: Finding[], round = 1, file = FILE): R
       findings: findings.map((f) => ({
         finding_id: f.finding_id,
         severity: f.severity,
+        description: f.summary,
         evidence_span: { start_line: 13, end_line: 13, snippet: f.evidence?.quote ?? "" },
         disposition: "fix" as const,
       })),

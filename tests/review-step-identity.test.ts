@@ -78,6 +78,7 @@ function healthyReply(reviewer: string, file: string, round: number): string {
       {
         finding_id: "F1",
         severity: "major",
+        description: "add() drops the currency check",
         evidence_span: { start_line: DIFF_HEADER_LINES + 8, end_line: DIFF_HEADER_LINES + 8, snippet: "add(other: Money): Money {" },
         disposition: "fix",
       },
