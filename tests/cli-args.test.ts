@@ -117,6 +117,7 @@ describe("flag as value", () => {
   test("a flag where a value belongs is not swallowed as the value", () => {
     const f = failure("--flow-id", "--label", "x");
     expect(f.error).toContain("--flow-id requires a value");
+    expect(f.error).toContain("write --flow-id=<value>"); // how to pass a value that starts with "-"
     expect(f.help).toBe(false);
   });
 
@@ -311,6 +312,8 @@ describe("table validation (a malformed table throws when the script loads)", ()
     expect(bad({ a: { kind: "enum", choices: [], description: "d" } })).toThrow("no choices");
     expect(bad({ a: { kind: "int", min: 5, default: 1, description: "d" } })).toThrow("outside its range");
     expect(bad({ a: { kind: "int", min: 5, max: 1, description: "d" } })).toThrow("max < min");
+    expect(bad({ a: { kind: "int", min: -1, description: "d" } })).toThrow("negative min");
+    expect(bad({ a: { kind: "int-list", min: -1, description: "d" } })).toThrow("negative min");
     expect(bad({ a: { kind: "number", greaterThan: 0, default: 0, description: "d" } })).toThrow("not > 0");
   });
 });

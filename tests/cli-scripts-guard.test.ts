@@ -84,8 +84,8 @@ describe("every CLI script declares its options on the shared layer", () => {
 });
 
 describe("importing a script never runs it", () => {
-  test("every CLI script with a top-level run is behind import.meta.main (or the direct-run check)", () => {
-    for (const script of ["chaos-kill.ts", "jev-spot-check.ts", "render-metrics.ts", "run-demo.ts", "serve-status.ts", "watch-queue-verify.ts"]) {
+  test("every CLI script runs behind import.meta.main (or chaos-kill's direct-run check)", () => {
+    for (const script of CLI_SCRIPTS) {
       const source = read(`scripts/${script}`);
       expect(source, script).toMatch(/import\.meta\.main|isDirectRun/);
     }

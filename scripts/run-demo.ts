@@ -7,8 +7,7 @@
  * agent-roundtrip, git-selftest, gate, demo. `run-demo.ts --help` lists them and
  * `run-demo.ts <command> --help` lists a command's options, defaults and
  * constraints. Both are GENERATED from the option tables in RUN_DEMO_CLI below
- * (src/cli/args.ts), so they cannot drift from what is parsed; this header no
- * longer carries a second, hand-kept copy of the flag list.
+ * (src/cli/args.ts), so they cannot drift from what is parsed.
  *
  * Argument handling (audit C69) is strict: an unknown flag, a flag with no
  * value, a flag where a value belongs (`--epoch --max-rounds 2`), a repeated
@@ -20,8 +19,8 @@
  * Exit codes ({@link RUN_DEMO_EXIT}; demo / wait-flow / hello / long-step / round):
  * 0 ok, 1 failed/cancelled/terminated or fatal error, 3 completed with blocked
  * files or tsc/vitest failures, 4 wait elapsed while the flow is still running
- * (use wait-flow --id), 64 usage error (sysexits EX_USAGE, the same number
- * chaos-kill and watch-queue-verify use; it was 2 here before the shared layer).
+ * (use wait-flow --id), 64 usage error (sysexits EX_USAGE, the number
+ * chaos-kill and watch-queue-verify use).
  *
  * Requires a running dex server: `dexcli dev -open=false` (see BUILD_NOTES.md).
  */
@@ -482,7 +481,7 @@ async function resolveJudgment(): Promise<JudgmentClient> {
  * explicitly (an orchestrating agent keys off these):
  *   0 completed, nothing left unresolved
  *   1 failed / cancelled / terminated (also any fatal CLI error)
- *   64 usage error (was 2 before the shared CLI layer; see RUN_DEMO_EXIT)
+ *   64 usage error (sysexits EX_USAGE; see RUN_DEMO_EXIT)
  *   3 completed, but files are blocked or tsc / vitest report failures
  *   4 the wait elapsed while the flow is STILL RUNNING (healthy; keep waiting
  *     with `wait-flow --id <flowId>`, do NOT re-dispatch)
@@ -607,6 +606,16 @@ const DEMO_DEFAULT_FILES = "src/Money.php,src/Pricing/FlatRateDiscount.php";
 /** The values select.ts accepts for `--harness`; `satisfies` keeps this list a subset of its HarnessChoice. */
 const HARNESS_CHOICES = ["stub", "opencode", "auto"] as const satisfies readonly HarnessChoice[];
 
+const START_ONLY_OPTION = {
+  kind: "flag",
+  description: "start the flow and return without waiting for it",
+} as const;
+
+const INIT_FIXTURE_OPTION = {
+  kind: "flag",
+  description: "create a throwaway fixture repository when --dir does not exist (an existing directory is never touched)",
+} as const;
+
 const WAIT_MINUTES_OPTION = {
   kind: "int",
   min: 1,
@@ -655,7 +664,7 @@ export const RUN_DEMO_CLI = defineProgram({
       options: {
         ...PROBE_LONG_STEP_OPTIONS,
         flowId: { kind: "string", metavar: "id", default: "long-1", description: "flow id" },
-        startOnly: { kind: "flag", description: "start the flow and return without waiting for it" },
+        startOnly: START_ONLY_OPTION,
       },
     },
     "wait-flow": {
@@ -674,10 +683,7 @@ export const RUN_DEMO_CLI = defineProgram({
           required: true,
           description: "git repository root; must already exist unless --init-fixture creates a throwaway one",
         },
-        initFixture: {
-          kind: "flag",
-          description: "create a throwaway fixture repository when --dir does not exist (an existing directory is never touched)",
-        },
+        initFixture: INIT_FIXTURE_OPTION,
         ...PROBE_ROUND_OPTIONS,
       },
     },
@@ -761,11 +767,8 @@ export const RUN_DEMO_CLI = defineProgram({
           default: "parallel",
           description: "per-file waves as SubFlows over the 2 slots (parallel), or one file at a time",
         },
-        startOnly: { kind: "flag", description: "start the flow and return without waiting for it" },
-        initFixture: {
-          kind: "flag",
-          description: "create a throwaway fixture repository when --dir does not exist (an existing directory is never touched)",
-        },
+        startOnly: START_ONLY_OPTION,
+        initFixture: INIT_FIXTURE_OPTION,
         dashboard: {
           kind: "flag",
           description:

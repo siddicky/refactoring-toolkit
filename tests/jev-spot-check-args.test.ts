@@ -24,7 +24,7 @@ function failure(...argv: string[]) {
 
 describe("parseJevSpotCheckArgs", () => {
   test("valid: --out is optional and defaults to /tmp/jev-spot-check.json; both spellings work", () => {
-    expect(parse().ok && parse()).toEqual({ ok: true, options: { outPath: "/tmp/jev-spot-check.json" } });
+    expect(parse()).toEqual({ ok: true, options: { outPath: "/tmp/jev-spot-check.json" } });
     const spaced = parse("--out", "/tmp/x.json");
     expect(spaced.ok && spaced.options.outPath).toBe("/tmp/x.json");
     const eq = parse("--out=/tmp/y.json");

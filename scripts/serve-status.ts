@@ -27,8 +27,8 @@
  *   bun run scripts/serve-status.ts
  * It takes no command-line arguments: configuration is environment-only, and
  * any argument is a usage error (exit 64, shared layer in src/cli/args.ts;
- * `--help` prints the generated usage). A typo such as `--port 5000` used to be
- * ignored silently while the server bound the default port.
+ * `--help` prints the generated usage). An argument is never ignored: `--port
+ * 5000` would otherwise bind the default port without a word.
  * Env (numeric values are validated; an invalid one falls back to its
  * default with a startup warning):
  *   STATUS_PORT          (default 4646; the generic PORT is a deprecated

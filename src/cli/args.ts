@@ -157,7 +157,7 @@ export interface ProgramSpec<C extends { readonly [command: string]: CommandSpec
   readonly notes?: readonly string[];
 }
 
-const HELP_FLAGS = ["--help", "-h"] as const;
+const isHelpToken = (token: string): boolean => token === "--help" || token === "-h";
 
 /** `flowId` -> `flow-id`. */
 export function flagName(key: string): string {
@@ -187,10 +187,15 @@ function validateTable(owner: string, table: OptionTable): void {
     }
     if (spec.kind === "int") {
       const { min = 0, max } = spec;
+      // Values are parsed as digits only, so a negative bound could never be met.
+      if (min < 0) throw new Error(`${where} has a negative min; int options are unsigned`);
       if (max !== undefined && max < min) throw new Error(`${where} has max < min`);
       if (spec.default !== undefined && (spec.default < min || (max !== undefined && spec.default > max))) {
         throw new Error(`${where} default ${spec.default} is outside its range`);
       }
+    }
+    if (spec.kind === "int-list" && (spec.min ?? 0) < 0) {
+      throw new Error(`${where} has a negative min; int-list entries are unsigned`);
     }
     if (spec.kind === "number" && spec.default !== undefined && !(spec.default > spec.greaterThan)) {
       throw new Error(`${where} default ${spec.default} is not > ${spec.greaterThan}`);
@@ -312,7 +317,7 @@ function parseAgainst(table: OptionTable, argv: readonly string[]): RawParse {
     // `--help` after the `--` terminator is a positional, not a request).
     const end = argv.indexOf("--");
     const options = end < 0 ? argv : argv.slice(0, end);
-    if (options.some((token) => (HELP_FLAGS as readonly string[]).includes(token))) {
+    if (options.some(isHelpToken)) {
       return { ok: false, help: true, error: "" };
     }
     return { ok: false, help: false, error: describeParseArgsError(err) };
@@ -416,7 +421,7 @@ export function parseCommand<C extends { readonly [command: string]: CommandSpec
   const fail = (error: string, usage: string, help = false): CliFailure => ({ ok: false, help, error, usage });
   const first = argv[0];
   if (first === undefined) return fail("missing command", programUsageText(program));
-  if ((HELP_FLAGS as readonly string[]).includes(first)) return fail("", programUsageText(program), true);
+  if (isHelpToken(first)) return fail("", programUsageText(program), true);
   if (first.startsWith("-")) return fail(`expected a command before options, got ${first}`, programUsageText(program));
   if (!Object.hasOwn(program.commands, first)) {
     return fail(`unknown command: ${first}`, programUsageText(program));
