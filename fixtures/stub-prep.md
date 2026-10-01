@@ -36,7 +36,7 @@ read-only input; no PHP toolchain runs anywhere in the pipeline.
 | `mixed` | `unknown` | narrow at the boundary |
 | nullable (`null` return, `??`, `isset`) | `T \| null` + explicit guard | |
 | associative array as pseudo-object | named `interface` + parser at construction | each row shape gets its own type |
-| scalar coercion (`(int)`, `(float)`, arithmetic on strings) | explicit `Number()` / `parseInt` helper | document the failure mode: PHP yields 0 + warning on non-numeric; TS yields `NaN` |
+| scalar coercion (`(int)`, `(float)`, arithmetic on strings) | explicit `Number()` / `parseInt` helper | document the failure mode: an explicit `(int)`/`(float)` cast yields 0 on non-numeric input and raises no warning on any version (arithmetic on a non-numeric string warns or throws, by PHP version); TS `Number()` yields `NaN` |
 | loose `==` | decide intended semantics per site; default `===` | flag every replaced site in the per-symbol table |
 | late static binding (`new static`, `static::`) | class-token factory or per-class static factory | see §4 item 4 |
 | magic methods (`__get`, `__isset`, `__toString`) | explicit accessors / `toString()` | no dynamic property surface in the port |

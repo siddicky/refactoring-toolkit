@@ -39,7 +39,7 @@ Current digests:
 
 ```
 php-sample:            0e16824ab8b5c28a1cde62400d9c6c7bd8e824e148db6664c55dbc2603800541
-creatorex-middleware:  cd23d2f8d373715472bc5a487a6f5f1badfe580de33759bb100f91f0b4116c16
+creatorex-middleware:  72b8f99b60711d9d6cd6d72d9e40f42ed946ec6eae97733cd316d994597bc7dc
 ```
 
 Verified on 2026-09-30: for each fixture, two consecutive runs produced

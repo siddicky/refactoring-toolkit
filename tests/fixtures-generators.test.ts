@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { parsePrepSourceMap } from "../flows/port-project.js";
+import { parsePrepSourceMap, parsePrepSourceMapRows } from "../flows/port-project.js";
 
 import { REPO_ROOT } from "./support/paths.js";
 
@@ -229,6 +229,48 @@ describe("fixture documentation claims about PHP behaviour (audit C74)", () => {
     const map = parsePrepSourceMap(stubPrep);
     expect(Object.keys(map).filter((php) => php.startsWith("tests/"))).toEqual([]);
     expect(Object.keys(map).filter((php) => php.startsWith("src/")).length).toBe(10);
+  });
+});
+
+describe("B26: the stub preps' source-map Notes make no claim their PHP source contradicts", () => {
+  // The creatorex Notes are delivered to implementers and fixers as the AUTHORITATIVE user contract.
+  // They once described feature flags, plan tiers and strike counters that no source file contains.
+  const TS_SIDE_WORDS = new Set(["number", "string", "boolean", "unknown", "null", "expect"]);
+  const stubs: ReadonlyArray<{ label: string; prep: string; spec: FixtureSpec }> = [
+    { label: "fixtures/stub-prep.md", prep: join(REPO_ROOT, "fixtures/stub-prep.md"), spec: PHP_SAMPLE },
+    { label: "fixtures/creatorex-middleware/prep-stub.md", prep: join(CREATOREX.committed, "prep-stub.md"), spec: CREATOREX },
+  ];
+
+  for (const { label, prep, spec } of stubs) {
+    test(`${label}: every code token a Notes cell names appears in that row's PHP file`, () => {
+      const unmatched: string[] = [];
+      for (const row of parsePrepSourceMapRows(readFileSync(prep, "utf8"))) {
+        if (!row.source.startsWith("src/")) continue;
+        const php = readFixture(spec, row.source);
+        for (const m of row.notes.matchAll(/`([^`]+)`/g)) {
+          const token = (m[1] ?? "").replace(/\*$/, ""); // `preg_*`, `require*`: a prefix
+          if (TS_SIDE_WORDS.has(token)) continue; // a suggested TypeScript spelling, not a claim about the PHP
+          if (token !== "" && !php.includes(token)) unmatched.push(`${row.source}: \`${m[1]}\``);
+        }
+      }
+      expect(unmatched).toEqual([]);
+    });
+  }
+
+  test("the creatorex Notes name none of the features that were never in the source", () => {
+    const notes = parsePrepSourceMapRows(readFileSync(join(CREATOREX.committed, "prep-stub.md"), "utf8"))
+      .filter((row) => row.source.startsWith("src/"))
+      .map((row) => row.notes)
+      .join("\n");
+    expect(notes).not.toMatch(/feature-flag|plan-tier|\btiers?\b|strike/i);
+    const php = ["src/Access/EntitlementChecker.php", "src/Moderation/ChatSentinel.php"].map((f) => readFixture(CREATOREX, f)).join("\n");
+    for (const absent of ["tier", "strike", "feature_flag", "featureFlag"]) expect(php.toLowerCase()).not.toContain(absent);
+  });
+
+  test("the scalar-coercion rule does not contradict the trap list: an explicit cast raises no warning", () => {
+    const stub = readFileSync(join(REPO_ROOT, "fixtures/stub-prep.md"), "utf8");
+    expect(stub).not.toContain("yields 0 + warning");
+    expect(stub.match(/raises no warning/g)?.length).toBeGreaterThanOrEqual(2);
   });
 });
 
