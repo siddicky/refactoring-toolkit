@@ -85,7 +85,7 @@ export const JUDGMENT_REGISTRY: readonly JudgmentRegistryEntry[] = [
     threshold: `naive checker: p_cited < ${CITATION_MIN_P_NAIVE} drops; live Jev checker: p_cited < ${CITATION_MIN_P_JEV} drops`,
     effect: "uncited findings are dropped from the kept set (never reach the fix loop or report)",
     provenance:
-      "pp-kept gate records: citationGate (checker + p_cited per finding) and dropped[].p_cited; the reviewer verdict records carry only the reviewer's self-reported p_cited",
+      "pp-kept gate records: citationGate (checker + p_cited per finding) and dropped[].p_cited, which the report prints as the citation gate; the reviewer verdict records carry the deterministic check stamped at review time (the report's review-time line), never the gate's score, and the model's self-reported p_cited stays on the agent record, advisory",
     failOpen:
       "live Jev failure or missing answer -> naive citation check (checker 'naive-fallback' + reason recorded on pp-kept); missing check record -> p_cited defaults to 0 (finding dropped; drop reason recorded)",
     seamModule:

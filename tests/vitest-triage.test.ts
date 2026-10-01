@@ -311,6 +311,5 @@ describe("judgment registry (Lane-B declarations)", () => {
   test("citation-check declares the fixed p_cited threshold", () => {
     const entry = JUDGMENT_REGISTRY.find((e) => e.name === "citation-check")!;
     expect(entry.threshold).toContain("p_cited < 1");
-    expect(entry.provenance).toContain("verdict records");
   });
 });

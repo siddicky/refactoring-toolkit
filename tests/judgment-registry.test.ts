@@ -17,6 +17,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 import { citationKept } from "../flows/port-project.js";
+import { DIFF_HEADER_LINES, mapVerdictToMetrics, parseUnifiedDiff } from "../src/harness/runtime.js";
 import {
   CITATION_MIN_P_JEV,
   CITATION_MIN_P_NAIVE,
@@ -202,6 +203,45 @@ describe("registry thresholds are the thresholds the code applies", () => {
     const floor = thresholds.get("uncertain_band");
     expect(floor).toBe(0.9);
     expect(threshold).toContain(String(floor));
+  });
+
+  test("C17: citation-check provenance says what the code records, not what it used to", () => {
+    const { provenance } = judgmentRegistryEntry("citation-check");
+    // Where the gate's own score lives, and what the verdict records carry instead.
+    expect(provenance).toContain("pp-kept");
+    expect(provenance).toContain("citationGate");
+    expect(provenance).toContain("deterministic check stamped at review time");
+    // The clause that stopped being true: the verdict record is NOT the reviewer's self-report.
+    expect(provenance).not.toContain("carry only the reviewer's self-reported p_cited");
+    expect(provenance).toContain("self-reported p_cited stays on the agent record, advisory");
+
+    // ...and the code behaves as the entry now says: the mapped verdict record holds the deterministic
+    // score, the model's 0.9 survives only on the agent record.
+    const diff = "diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+export const a = 1;\n+export const b = 2;";
+    const mapped = mapVerdictToMetrics({
+      raw: {
+        findings: [
+          {
+            finding_id: "F1",
+            severity: "minor",
+            description: "x",
+            evidence_span: { start_line: 1, end_line: 1, snippet: "export const a = 1;" },
+            disposition: "fix",
+          },
+        ],
+        citation_check: [{ finding_id: "F1", p_cited: 0.9 }],
+      },
+      file: "src/a.ts",
+      reviewer: "reviewer-A",
+      round: 1,
+      diffId: "d1",
+      parsedDiff: parseUnifiedDiff(diff),
+      bodyLineOffset: DIFF_HEADER_LINES,
+      naiveCited: () => 0.42,
+    });
+    if (!mapped.ok) throw new Error(mapped.errors.join("; "));
+    expect(mapped.record.citation_check[0]?.p_cited).toBe(0.42);
+    expect(mapped.agentRecord.citation_check[0]?.p_cited).toBe(0.9);
   });
 
   test("symbol-table-selection is declared NOT fail-open (the header rule names the exception)", () => {
