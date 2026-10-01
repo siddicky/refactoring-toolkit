@@ -47,9 +47,31 @@ export function err<T = never>(error: string): QueryResult<T> {
   return { ok: false, error };
 }
 
-/** Normalizes any throw into a short message (spawn ENOENT, non-zero exit...). */
+/**
+ * Normalizes any throw into a short, actionable message (spawn ENOENT,
+ * non-zero exit, timeout...). For a failed child process it reports the cause
+ * (first non-empty stderr line, exit code / signal / timeout) and never echoes
+ * the full argv: execFile's own message is `Command failed: <argv>\n<stderr>`,
+ * and the argv can carry control characters (git log separators).
+ */
 export function describeError(e: unknown): string {
   if (e instanceof Error) {
+    const x = e as Error & { cmd?: unknown; code?: unknown; killed?: unknown; signal?: unknown; stderr?: unknown };
+    const exitFailure = typeof x.code === "number" || x.killed === true || typeof x.signal === "string";
+    if (typeof x.cmd === "string" && exitFailure) {
+      const stderrLine =
+        typeof x.stderr === "string"
+          ? x.stderr.split("\n").map((l) => l.trim()).find((l) => l.length > 0)
+          : undefined;
+      const cause =
+        x.killed === true
+          ? `command timed out or was killed${typeof x.signal === "string" ? ` (${x.signal})` : ""}`
+          : typeof x.code === "number"
+            ? `command exited ${x.code}`
+            : `command killed by ${String(x.signal)}`;
+      const msg = stderrLine === undefined ? cause : `${cause}: ${stderrLine}`;
+      return msg.length > 300 ? `${msg.slice(0, 300)}...` : msg;
+    }
     const msg = e.message.split("\n")[0] ?? e.message;
     return msg.length > 300 ? `${msg.slice(0, 300)}...` : msg;
   }

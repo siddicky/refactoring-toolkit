@@ -16,7 +16,10 @@
  *   past a keyed commit.
  */
 
-import { git, type GitRunner } from "./exec.js";
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
+
+import { GitError, git, gitPredicate, type GitRunner, type TryRunResult } from "./exec.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -180,7 +183,11 @@ export interface LeaseRecord {
   /** Lease branch name: `lease/<file>/<epoch>`. */
   branch: string;
   epoch: number;
-  /** SHA the lease branch was created from (used only when no keyed commit exists). */
+  /**
+   * SHA the lease worktree starts from: the lease branch tip at acquire, after
+   * an already-integrated branch was fast-forwarded to the integration tip
+   * (used only when no keyed commit exists).
+   */
   baseSha: string;
   /** Identity of the execution holding the lease (dex run ID). */
   holderExecutionId: string;
@@ -255,7 +262,6 @@ export class WorktreePool {
     epoch: number,
     holderExecutionId: string,
     now: () => Date = () => new Date(),
-    baseRef?: string | undefined,
   ): Promise<AcquireResult> {
     const existing = this.#store.get(file);
     if (existing !== undefined) {
@@ -281,29 +287,31 @@ export class WorktreePool {
     const branch = `lease/${safeFile}/${epoch}`;
     const worktreePath = `${this.#worktreeRoot}/${safeFile}-${epoch}`;
 
-    // M6: new lease branches base on the INTEGRATION tip when it exists (the
-    // one output project) so re-rounds of the same path fast-forward into
+    // M6: lease branches base on the INTEGRATION tip when it exists (the one
+    // output project) so re-rounds of the same path fast-forward into
     // integration; only a baseless first round falls back to HEAD.
-    const resolvedBase =
-      baseRef ??
-      ((
-        await runner.tryRun(["rev-parse", "--verify", "refs/heads/integration"])
-      ).ok
-        ? "integration"
-        : "HEAD");
+    const resolvedBase = (await refExists(runner, "refs/heads/integration")) ? "integration" : "HEAD";
 
     const headSha = (await runner.run(["rev-parse", resolvedBase])).trim();
     // Create the lease branch at the resolved base if absent, then add the worktree.
-    const branchExists = (
-      await runner.tryRun(["rev-parse", "--verify", `refs/heads/${branch}`])
-    ).ok;
+    const branchExists = await refExists(runner, `refs/heads/${branch}`);
     if (!branchExists) {
       await runner.run(["branch", branch, headSha]);
     }
-    const wtExists = (
-      await runner.tryRun(["-C", worktreePath, "rev-parse", "--is-inside-work-tree"])
-    ).ok;
-    if (!wtExists) {
+    // `rev-parse --is-inside-work-tree` is true for ANY directory under the main
+    // checkout (worktreeRoot is `<repo>/.worktrees`), so a leftover plain
+    // directory used to become the lease and commits landed on the main branch.
+    // Only a directory that IS a worktree root is reused; anything else goes to
+    // `worktree add` (an empty directory is adopted, a non-empty one fails loudly).
+    const registered = await isWorktreeRoot(runner, worktreePath);
+    if (branchExists) {
+      // The flow keeps ONE epoch across all rounds, so a re-round reuses the
+      // round-1 branch. When everything on it is already integrated, move it up
+      // to the integration tip so the round-2 merge is a fast-forward (M6); a
+      // branch holding unintegrated commits is never touched.
+      await fastForwardIntegratedBranch(runner, branch, headSha, registered ? worktreePath : undefined);
+    }
+    if (!registered) {
       await runner.run(["worktree", "add", worktreePath, branch]);
     }
 
@@ -312,7 +320,9 @@ export class WorktreePool {
       worktreePath,
       branch,
       epoch,
-      baseSha: headSha,
+      // The base the worktree really starts from (the branch tip), which is the
+      // integration tip only for a new or fast-forwarded branch.
+      baseSha: (await runner.run(["rev-parse", `refs/heads/${branch}`])).trim(),
       holderExecutionId,
       acquiredAtUtc: now().toISOString(),
     };
@@ -331,7 +341,26 @@ export class WorktreePool {
     // worktree prune` is NEVER used (blanket prune can sweep registrations of
     // live concurrent worktrees), and lease branches are deliberately kept
     // for keyed-commit reachability (quarantine/dedup scans all branches).
-    await runner.tryRun(["worktree", "remove", "--force", lease.worktreePath]);
+    //
+    // The result is inspected (C32): "is not a working tree" means it is
+    // already gone (idempotent release); a LOCKED worktree is retried with
+    // `--force --force`; any other failure (timeout, busy directory) keeps the
+    // lease record and surfaces git's message instead of leaking the worktree
+    // while the store claims it was released.
+    const removeArgs = ["worktree", "remove", "--force", lease.worktreePath];
+    let removed = await runner.tryRun(removeArgs);
+    if (!removed.ok && /locked/i.test(removed.stderr)) {
+      removed = await runner.tryRun([
+        "worktree",
+        "remove",
+        "--force",
+        "--force",
+        lease.worktreePath,
+      ]);
+    }
+    if (!removed.ok && !/is not a working tree|does not exist/i.test(removed.stderr)) {
+      throw new GitError(removeArgs, removed.failure ?? removed.stderr);
+    }
     // The branch is kept: keyed-commit lookup scans all branches (shared
     // object store), and quarantined-lease commits must remain reachable.
     this.#store.remove(file);
@@ -362,9 +391,11 @@ export async function commitLeaseChanges(
 ): Promise<{ disposition: CommitDisposition; sha: string | null; contentHash: string }> {
   const runner = git(worktreePath);
   await runner.run(["add", "-A"]);
-  const empty = (await runner.tryRun(["diff", "--cached", "--quiet"])).ok;
+  // diff --quiet: exit 0 = nothing staged, exit 1 = staged changes; any other
+  // outcome (timeout, fatal) throws rather than reading as "has changes".
+  const empty = await gitPredicate(runner, ["diff", "--cached", "--quiet"]);
   if (empty) {
-    const headTree = (await runner.tryRun(["rev-parse", "HEAD^{tree}"])).stdout.trim();
+    const headTree = (await runner.run(["rev-parse", "HEAD^{tree}"])).trim();
     return {
       disposition: "no-op-empty-diff",
       sha: null,
@@ -396,41 +427,69 @@ export function roundOfOpId(opId: OperationId): number {
 }
 
 /**
+ * Picks the branch to report for a commit from its `%D` decoration string.
+ * `%D` lists HEAD first as `HEAD -> <branch>` when the main checkout's branch
+ * sits on the commit - that is not a ref name (`rev-parse "HEAD -> main"`
+ * fails), so the prefix is stripped. A `lease/*` branch is preferred because
+ * it is the one the round was committed on; otherwise the first branch wins.
+ * Returns undefined when no branch decorates the commit (caller falls back to
+ * the sha).
+ */
+export function keyedBranchFromDecoration(decoration: string): string | undefined {
+  const names = decoration
+    .split(",")
+    .map((r) => r.trim().replace(/^HEAD\s*->\s*/, ""))
+    .filter((r) => r.length > 0 && r !== "HEAD" && !r.startsWith("tag: "));
+  return names.find((n) => n.startsWith("lease/")) ?? names[0];
+}
+
+/**
  * Scans ALL branches (shared object store) for a commit carrying the
  * operation-ID trailer, so a redo on a spare or reclaimed worktree still
  * finds a commit landed elsewhere.
+ *
+ * When several commits carry the same op-ID (a naive replay on a spare
+ * worktree after a quarantine), the ORIGINAL - the one with the oldest commit
+ * time - is returned. `git log` lists newest first, so taking the first match
+ * returned the replay whenever the two commits fell in different seconds; ties
+ * within one second keep log order.
  */
 export async function findCommitByOpId(
   repoRoot: string,
   opId: OperationId,
 ): Promise<KeyedCommit | undefined> {
   const runner = git(repoRoot);
-  const out = await runner.run(["log", "--all", "--format=%H%x1f%D%x1f%b%x1e"]);
+  // --decorate-refs=refs/heads/: decorations (%D) name only local branches, so
+  // remote-tracking refs and notes never show up as the keyed "branch".
+  const out = await runner.run([
+    "log",
+    "--all",
+    "--decorate-refs=refs/heads/",
+    "--format=%H%x1f%ct%x1f%D%x1f%b%x1e",
+  ]);
   const records = out.split("\x1e").map((r) => r.trim()).filter(Boolean);
+  const trailerLine = `${OP_ID_TRAILER} ${opId}`;
+  let oldest: { commitTime: number; keyed: KeyedCommit } | undefined;
   for (const record of records) {
     const fields = record.split("\x1f").map((p) => p.trim());
+    const bodyLines = (fields[3] ?? "").split("\n").map((l) => l.trim());
+    if (!bodyLines.includes(trailerLine)) continue;
+    const commitTime = Number.parseInt(fields[1] ?? "", 10);
+    if (oldest !== undefined && !(commitTime < oldest.commitTime)) continue;
     const sha = fields[0] ?? "";
-    const refs = fields[1] ?? "";
-    const body = fields[2] ?? "";
-    const trailerLine = `${OP_ID_TRAILER} ${opId}`;
-    const bodyLines = body.split("\n").map((l) => l.trim());
-    if (bodyLines.includes(trailerLine)) {
-      const hashLine = bodyLines.find((l) => l.startsWith(`${CONTENT_HASH_TRAILER} `));
-      const branch =
-        refs
-          .split(",")
-          .map((r) => r.trim().replace(/^->\s*/, ""))
-          .find((r) => r.length > 0 && r !== "HEAD" && !r.startsWith("tag: ")) ?? sha;
-      return {
+    const hashLine = bodyLines.find((l) => l.startsWith(`${CONTENT_HASH_TRAILER} `));
+    oldest = {
+      commitTime,
+      keyed: {
         opId,
         sha,
         contentHash: hashLine ? hashLine.slice(CONTENT_HASH_TRAILER.length + 1) : null,
-        branch,
+        branch: keyedBranchFromDecoration(fields[2] ?? "") ?? sha,
         round: roundOfOpId(opId),
-      };
-    }
+      },
+    };
   }
-  return undefined;
+  return oldest?.keyed;
 }
 
 /**
@@ -448,15 +507,17 @@ export async function makeCommitReachable(
   keyed: KeyedCommit,
 ): Promise<"already" | "fast-forward" | "merge"> {
   const runner = git(worktreePath);
-  if ((await runner.tryRun(["merge-base", "--is-ancestor", keyed.sha, "HEAD"])).ok) {
+  if (await isAncestor(runner, keyed.sha, "HEAD")) {
     return "already";
   }
   // Completed round: keyed commit authoritative; drop divergent replay state.
   await runner.run(["reset", "--hard"]);
   await runner.run(["clean", "-fd"]);
-  const ff = await runner.tryRun(["merge", "--ff-only", keyed.sha]);
+  const ffArgs = ["merge", "--ff-only", keyed.sha];
+  const ff = await runner.tryRun(ffArgs);
   if (ff.ok) return "fast-forward";
-  await runner.run(["merge", "--no-ff", "--no-edit", keyed.sha]);
+  throwIfInfraFailure(ffArgs, ff);
+  await mergeOrAbort(runner, ["--no-ff", "--no-edit", keyed.sha]);
   return "merge";
 }
 
@@ -469,7 +530,110 @@ export async function keyedCommitIntegrated(
   integrationWorktreePath: string,
   keyed: KeyedCommit,
 ): Promise<boolean> {
-  return (await git(integrationWorktreePath).tryRun(["merge-base", "--is-ancestor", keyed.sha, "HEAD"])).ok;
+  // Exit 1 = not an ancestor, 128 = the commit object is missing (also "not
+  // integrated"); a timeout or spawn failure is an error, not a "no".
+  return gitPredicate(
+    git(integrationWorktreePath),
+    ["merge-base", "--is-ancestor", keyed.sha, "HEAD"],
+    [1, 128],
+  );
+}
+
+/**
+ * `rev-parse --verify --quiet <ref>`: exit 0 = present, exit 1 = absent.
+ * Any other outcome (timeout, exit 128) throws instead of reading as "absent".
+ */
+async function refExists(runner: GitRunner, ref: string): Promise<boolean> {
+  return gitPredicate(runner, ["rev-parse", "--verify", "--quiet", ref]);
+}
+
+/**
+ * Moves an existing lease branch up to `base` when its tip is an ancestor of
+ * `base` (every commit on it is already integrated), so a same-epoch re-round
+ * starts on the integration tip. With a live worktree the branch is advanced
+ * inside it (`merge --ff-only`; refused, and so left alone, if local changes
+ * would be overwritten); without one via `branch -f`, which itself refuses a
+ * branch checked out elsewhere. A branch with commits not in `base` holds
+ * unintegrated work and is left exactly as it is.
+ */
+async function fastForwardIntegratedBranch(
+  runner: GitRunner,
+  branch: string,
+  base: string,
+  worktreePath: string | undefined,
+): Promise<void> {
+  const tip = (await runner.run(["rev-parse", `refs/heads/${branch}`])).trim();
+  if (tip === base) return;
+  if (!(await isAncestor(runner, tip, base))) return;
+  const args =
+    worktreePath !== undefined ? ["-C", worktreePath, "merge", "--ff-only", base] : ["branch", "-f", branch, base];
+  const moved = await runner.tryRun(args);
+  if (!moved.ok) throwIfInfraFailure(args, moved);
+}
+
+/**
+ * True only when `path` is the root of a worktree (linked or main): the
+ * realpath of `rev-parse --show-toplevel` run inside it must equal the
+ * realpath of the path itself. A plain directory nested in a checkout reports
+ * that checkout's root instead, and a missing directory fails the probe.
+ */
+async function isWorktreeRoot(runner: GitRunner, path: string): Promise<boolean> {
+  const args = ["-C", path, "rev-parse", "--show-toplevel"];
+  const top = await runner.tryRun(args);
+  if (!top.ok) {
+    throwIfInfraFailure(args, top);
+    return false;
+  }
+  try {
+    // `-C <path>` resolves against the runner's cwd, so do the same here.
+    return (await realpath(top.stdout.trim())) === (await realpath(resolve(runner.cwd, path)));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * For a tryRun whose plain non-zero exit is an expected outcome (e.g. a
+ * non-fast-forwardable `merge --ff-only`): a timeout or spawn failure is not
+ * that outcome and must surface instead of silently steering the caller down
+ * its fallback path.
+ */
+function throwIfInfraFailure(args: readonly string[], r: TryRunResult): void {
+  if ((r.timedOut || r.spawnError !== null) && r.failure !== null) {
+    throw new GitError(args, r.failure);
+  }
+}
+
+/**
+ * Runs `git merge <args>` and, when it fails (conflict, refusal, timeout),
+ * restores the worktree to a clean pre-merge state before rethrowing: `merge
+ * --abort`, falling back to `reset --merge` when git reports no merge to abort
+ * or the abort itself fails. Without this a conflict leaves MERGE_HEAD and
+ * unmerged paths behind, and every later merge in that worktree fails with
+ * "Merging is not possible because you have unmerged files".
+ */
+async function mergeOrAbort(runner: GitRunner, args: readonly string[]): Promise<void> {
+  try {
+    await runner.run(["merge", ...args]);
+  } catch (mergeErr) {
+    const abort = await runner.tryRun(["merge", "--abort"]);
+    if (!abort.ok) {
+      const reset = await runner.tryRun(["reset", "--merge"]);
+      if (!reset.ok) {
+        const base = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
+        throw new Error(
+          `${base}; additionally could not restore a clean worktree (merge --abort: ${abort.stderr.trim()}; reset --merge: ${reset.stderr.trim()})`,
+          { cause: mergeErr },
+        );
+      }
+    }
+    throw mergeErr;
+  }
+}
+
+/** `merge-base --is-ancestor`: exit 0 = yes, exit 1 = no; anything else throws. */
+async function isAncestor(runner: GitRunner, ancestor: string, descendant: string): Promise<boolean> {
+  return gitPredicate(runner, ["merge-base", "--is-ancestor", ancestor, descendant]);
 }
 
 /** Reads the worktree status (clean/dirty) without touching the index lock. */
@@ -484,7 +648,8 @@ export async function commitObjectReadable(
   sha: string,
 ): Promise<boolean> {
   const runner = git(repoRoot);
-  return (await runner.tryRun(["cat-file", "-e", `${sha}^{commit}`])).ok;
+  // 1/128 = absent or not a repo; a timeout must not read as "unreadable".
+  return gitPredicate(runner, ["cat-file", "-e", `${sha}^{commit}`], [1, 128]);
 }
 
 /**
@@ -522,8 +687,10 @@ export interface IntegrationResult {
 /**
  * Durable integration step body: merges the lease branch into the single
  * `integration` branch — the one output project. One active file per lease
- * keeps merges conflict-free by construction (disjoint paths). Uses a
- * dedicated worktree so the main checkout is never disturbed.
+ * keeps merges conflict-free by construction (disjoint paths) - but nothing
+ * enforces disjointness, so a conflicting merge is aborted and rethrown,
+ * leaving the shared integration worktree clean. Uses a dedicated worktree so
+ * the main checkout is never disturbed.
  */
 export async function mergeLeaseIntoIntegration(
   repoRoot: string,
@@ -535,26 +702,20 @@ export async function mergeLeaseIntoIntegration(
   const tip = (await git(repoRoot).run(["rev-parse", leaseBranch])).trim();
 
   // Ensure the integration branch exists (created from current default HEAD).
-  const hasIntegration = (
-    await root.tryRun(["rev-parse", "--verify", `refs/heads/${integrationBranch}`])
-  ).ok;
+  const hasIntegration = await refExists(root, `refs/heads/${integrationBranch}`);
   if (!hasIntegration) {
     const head = (await root.run(["rev-parse", "HEAD"])).trim();
     await root.run(["branch", integrationBranch, head]);
   }
 
   // Ensure the integration worktree exists.
-  const hasWt = (
-    await root.tryRun(["-C", integrationWorktreePath, "rev-parse", "--is-inside-work-tree"])
-  ).ok;
-  if (!hasWt) {
+  if (!(await isWorktreeRoot(root, integrationWorktreePath))) {
     await root.run(["worktree", "add", integrationWorktreePath, integrationBranch]);
   }
 
   const integ = git(integrationWorktreePath);
   // Idempotency: if the lease tip is already an ancestor, nothing to do.
-  const ancestor = await integ.tryRun(["merge-base", "--is-ancestor", tip, "HEAD"]);
-  if (ancestor.ok) {
+  if (await isAncestor(integ, tip, "HEAD")) {
     const sha = (await integ.run(["rev-parse", "HEAD"])).trim();
     return { alreadyIntegrated: true, fastForward: false, sha };
   }
@@ -564,17 +725,18 @@ export async function mergeLeaseIntoIntegration(
   // re-round merges as a pure FAST-FORWARD; a genuinely divergent lease (its
   // branch has own commits while integration moved) falls back to --no-ff,
   // which is the only sanctioned merge-commit shape in the toolkit.
-  const headBefore = (await integ.run(["rev-parse", "HEAD"])).trim();
-  const ff = await integ.tryRun(["merge", "--ff-only", leaseBranch]);
+  const ffArgs = ["merge", "--ff-only", leaseBranch];
+  const ff = await integ.tryRun(ffArgs);
   if (ff.ok) {
     const sha = (await integ.run(["rev-parse", "HEAD"])).trim();
     return { alreadyIntegrated: false, fastForward: true, sha };
   }
-  await integ.run(["merge", "--no-ff", "--no-edit", leaseBranch]);
+  throwIfInfraFailure(ffArgs, ff);
+  // A conflicting merge is aborted (see mergeOrAbort) so the SHARED integration
+  // worktree is never left holding MERGE_HEAD / unmerged paths that would wedge
+  // the step retry and every later merge, including unrelated files.
+  await mergeOrAbort(integ, ["--no-ff", "--no-edit", leaseBranch]);
   const sha = (await integ.run(["rev-parse", "HEAD"])).trim();
-  if (sha === headBefore) {
-    throw new Error(`integration merge produced no change for ${leaseBranch}`);
-  }
   return { alreadyIntegrated: false, fastForward: false, sha };
 }
 
@@ -584,12 +746,23 @@ export async function integratedContentExists(
   path: string,
 ): Promise<boolean> {
   const runner = git(integrationWorktreePath);
-  const result = await runner.tryRun(["cat-file", "-e", `HEAD:${path}`]);
-  return result.ok;
+  return gitPredicate(runner, ["cat-file", "-e", `HEAD:${path}`], [1, 128]);
 }
 
-function sanitizePathSegment(input: string): string {
-  const safe = input.replace(/[^a-zA-Z0-9._-]+/g, "__");
+/**
+ * One path/ref-safe segment for a file: the lease branch is
+ * `lease/<segment>/<epoch>` and the worktree directory `<segment>-<epoch>`.
+ * Beyond the character whitelist the segment must also be a valid ref
+ * component (`git check-ref-format`): no leading `.`, no `..`, no trailing
+ * `.lock` - those are rewritten, which forces the hash suffix below. Names
+ * that were already valid are returned unchanged.
+ */
+export function sanitizePathSegment(input: string): string {
+  const safe = input
+    .replace(/[^a-zA-Z0-9._-]+/g, "__")
+    .replace(/\.{2,}/g, "__")
+    .replace(/^\./, "_")
+    .replace(/\.lock$/, "_lock");
   if (safe.length === 0 || safe.length > 96) return `seg-${hashOf(input)}`;
   // m3: inputs differing only in sanitized-away characters (e.g. `a/b` vs
   // `a.b`) would otherwise collide; suffix the hash whenever sanitizing

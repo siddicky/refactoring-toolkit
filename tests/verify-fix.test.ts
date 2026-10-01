@@ -28,6 +28,7 @@ import {
   roundOfOpId,
 } from "../src/git/worktree.js";
 import { git } from "../src/git/exec.js";
+import { makeFixtureRepo } from "../src/git/fixture.js";
 import {
   DIFF_HEADER_LINES,
   renderDiffForReview,
@@ -44,16 +45,6 @@ afterEach(async () => {
   if (root !== undefined) await rm(root, { recursive: true, force: true });
   root = undefined;
 });
-
-async function makeFixtureRepo(dir: string): Promise<void> {
-  await rm(dir, { recursive: true, force: true });
-  await mkdir(dir, { recursive: true });
-  const runner = git(dir);
-  await runner.run(["init", "-b", "main"]);
-  await writeFile(join(dir, "README.md"), "fixture repo\n");
-  await runner.run(["add", "-A"]);
-  await runner.run(["commit", "-m", "fixture init"]);
-}
 
 describe("C1: cross-branch dedup must ship the committed round to integration", () => {
   test("keyed commit on quarantined branch reaches integration via makeCommitReachable", async () => {
