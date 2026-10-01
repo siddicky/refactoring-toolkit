@@ -39,3 +39,12 @@ describe("tsconfig coverage (audit C85)", () => {
     expect(missing, `tracked .ts files tsc never checks: ${missing.join(", ")}`).toEqual([]);
   });
 });
+
+describe("tsconfig gates dead code (audit C50)", () => {
+  test("noUnusedLocals and noUnusedParameters are on, so an unused import, local or parameter fails typecheck", () => {
+    const read = ts.readConfigFile(join(REPO_ROOT, "tsconfig.json"), ts.sys.readFile);
+    const options = ts.parseJsonConfigFileContent(read.config, ts.sys, REPO_ROOT).options;
+    expect(options.noUnusedLocals).toBe(true);
+    expect(options.noUnusedParameters).toBe(true);
+  });
+});
