@@ -12,10 +12,9 @@
     "exactOptionalPropertyTypes": true,
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
-    "allowImportingTsExtensions": true,
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "harness/**/*.ts", "flows/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["node_modules", "dist", ".worktrees", ".worktree", "fixtures/php-sample"]
+  "include": ["src/**/*.ts", "harness/**/*.ts", "flows/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts", "fixtures/*.ts"],
+  "exclude": ["node_modules"]
 }

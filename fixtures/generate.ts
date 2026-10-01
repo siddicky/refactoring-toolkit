@@ -15,18 +15,52 @@
  *   - fixed file order, LF endings, exactly one trailing newline per file;
  *   - two consecutive runs are byte-identical (compare the printed DIGEST).
  *
- * Run:  bun run fixtures/generate.ts     (or: npx tsx fixtures/generate.ts)
+ * Run:  bun run fixtures/generate.ts [--out <dir>]
+ *       (or: npx tsx fixtures/generate.ts [--out <dir>])
  *
  * Standalone by design: zero imports beyond node: builtins, so this script
  * does not depend on the repo's package.json, tsconfig, or node_modules.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const outRoot = join(here, "php-sample");
+
+/** Marker file every generated tree carries; `main()` only wipes trees that have it. */
+const MARKER = "GENERATED.txt";
+
+/**
+ * Output directory: `--out <dir>` (used by tests to regenerate into a temp
+ * dir) or the committed fixtures/php-sample.
+ */
+function resolveOutRoot(): string {
+  const i = process.argv.indexOf("--out");
+  if (i < 0) return join(here, "php-sample");
+  const value = process.argv[i + 1];
+  if (value === undefined || value === "" || value.startsWith("--")) {
+    throw new Error("--out requires a directory argument");
+  }
+  return resolve(value);
+}
+
+/**
+ * Clears the output directory before regeneration. A missing or empty
+ * directory is fine; a non-empty one must carry GENERATED.txt, so a stray
+ * `--out <dir>` can never wipe a directory this generator does not own.
+ */
+function clearOutRoot(dir: string): void {
+  if (existsSync(dir)) {
+    const entries = readdirSync(dir);
+    if (entries.length > 0 && !entries.includes(MARKER)) {
+      throw new Error(`refusing to wipe ${dir}: it is not empty and has no ${MARKER} marker`);
+    }
+  }
+  rmSync(dir, { recursive: true, force: true });
+}
+
+const outRoot = resolveOutRoot();
 
 type FixtureFile = { readonly path: string; readonly content: string };
 
@@ -908,8 +942,10 @@ final class MoneyTest extends TestCase
         $this->assertSame('10.00 USD', (string) (new Money(4))->multiply('2.5'));
     }
 
-    public function testEqualsUsesLooseAmountComparison(): void
+    public function testEqualsComparesAmountsAfterFloatCoercion(): void
     {
+        // The constructor casts both amounts to float, so 10 and '10.0' are
+        // equal under == and under ===: the loose compare is not observable.
         $this->assertTrue((new Money(10))->equals(new Money('10.0')));
         $this->assertFalse((new Money(10, 'USD'))->equals(new Money(10, 'EUR')));
     }
@@ -945,6 +981,7 @@ declare(strict_types=1);
 
 namespace Acme\Billing\Tests;
 
+use Acme\Billing\Money;
 use Acme\Billing\Product;
 use Acme\Billing\Pricing\FlatRateDiscount;
 use Acme\Billing\Pricing\PercentageDiscount;
@@ -1044,9 +1081,14 @@ final class InvoiceTest extends TestCase
         $invoice = new Invoice('INV-3', $this->customer());
         $invoice->addLine(['product' => $numericSkuProduct, 'quantity' => 2]);
 
-        // '9001' == 9001 is true under PHP loose comparison.
+        // '9001' == 9001 is true under PHP loose comparison, and so is
+        // '9001' == '9001.0' (two numeric strings compare as numbers). A
+        // leading-numeric but non-numeric string such as '9001abc' compares as
+        // a string and does not match. Trailing-whitespace SKUs ('9001 ') are
+        // deliberately not asserted: their result differs between PHP 7 and 8.
         $this->assertSame(2, $invoice->quantityForSku(9001));
-        $this->assertSame(0, $invoice->quantityForSku('9001 '));
+        $this->assertSame(2, $invoice->quantityForSku('9001.0'));
+        $this->assertSame(0, $invoice->quantityForSku('9001abc'));
     }
 
     public function testToStringRendersInvoice(): void
@@ -1071,7 +1113,9 @@ final class InvoiceTest extends TestCase
 
         $this->assertSame('19.99 USD', $row['total']);
         $this->assertSame(7, $row['customer_id']);
-        $this->assertSame(['hardware', 'sale'], $row['tags']);
+        // toArray() reports the invoice's own tags; addLine() never copies the
+        // product's tags ('hardware', 'sale') onto the invoice.
+        $this->assertSame([], $row['tags']);
     }
 }
 `,
@@ -1204,7 +1248,7 @@ function countLines(content: string): { physical: number; nonBlank: number; code
 }
 
 function main(): void {
-  rmSync(outRoot, { recursive: true, force: true });
+  clearOutRoot(outRoot);
 
   const digest = createHash("sha256");
   const width = Math.max(...FILES.map((f) => f.path.length));
