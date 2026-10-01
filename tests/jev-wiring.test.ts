@@ -25,6 +25,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { configurePortJudgment } from "../flows/runtime-hooks.js";
+import { portFlowSource } from "./helpers/port-flow-source.js";
 import {
   liveJevClient,
   markerKeyOf,
@@ -190,7 +191,7 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
     // the call site is pinned narrowly. The dead second seam is GONE (the
     // drift cannot regrow silently) — code-shape checks: comments may still
     // recount the history.
-    const src = readFileSync(join(ROOT, "flows", "port-project.ts"), "utf8");
+    const src = portFlowSource();
     const callSites = src.split("\n").filter((l) => /\bclassifyVitestRecords\(/.test(l) && !l.includes("function classifyVitestRecords"));
     expect(callSites.length).toBe(1);
     expect(callSites[0]).toContain("liveJevClient()");

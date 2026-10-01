@@ -6,8 +6,6 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { Context } from "@superdurable/dex";
 
 import { FIXER } from "../harness/agents/fixer.js";
@@ -30,6 +28,7 @@ import {
 } from "../flows/port-project.js";
 import type { AgentSessionClient, PromptOptions } from "../src/harness/opencode.js";
 import { evaluateSuspicion } from "../src/metrics/suspicion.js";
+import { portFlowSource } from "./helpers/port-flow-source.js";
 import type { Finding, VerdictRecord } from "../src/metrics/types.js";
 import {
   composeFixerTurn,
@@ -638,7 +637,7 @@ describe("C75: user contract by value in implement/fix turns", () => {
   });
 
   test("every implement/fix call site in the port flow passes the stored contract", () => {
-    const src = readFileSync(join(import.meta.dir, "..", "flows", "port-project.ts"), "utf8");
+    const src = portFlowSource();
     for (const fn of ["composeImplementerTurn", "composeFixerTurn", "composeQueueFixTurn"]) {
       const calls = [...src.matchAll(new RegExp(`${fn}\\(\\{[\\s\\S]*?\\n\\s*\\}\\);`, "g"))];
       expect(calls.length).toBeGreaterThan(0);
