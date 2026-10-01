@@ -155,6 +155,47 @@ export function selectFixableFiles(
   return { fixable, capped };
 }
 
+/** Start of the `blocked[].reason` the verify step writes for a file at the round cap with queue errors left. */
+const CAPPED_WITH_ERRORS_REASON = "round cap reached with ";
+
+/**
+ * The blocked list after one verify iteration. A cap-with-errors entry is
+ * derived state: it says "this file still has queue errors and no round left",
+ * and `capped` is recomputed from the whole done set every iteration. So the
+ * previous iteration's cap entries are re-derived rather than kept forever (C04
+ * kept them from duplicating; B3: a file whose errors another file's fix cleared
+ * is no longer blocked, and must not stay on the result with a reason that is
+ * no longer true). Entries blocked by dispatch (a pending file past the round
+ * cap, never run) are facts, not derived, and stay.
+ */
+export function blockedAfterVerify(
+  prior: PortQueueState["blocked"],
+  capped: ReadonlyArray<{ file: string; round: number; count: number }>,
+): PortQueueState["blocked"] {
+  const entryOf = (c: { file: string; round: number; count: number }): PortQueueState["blocked"][number] => ({
+    file: c.file,
+    round: c.round,
+    reason: `${CAPPED_WITH_ERRORS_REASON}${c.count} queue error(s) remaining`,
+  });
+  const stillCapped = new Map(capped.map((c) => [c.file, c]));
+  const kept: PortQueueState["blocked"] = [];
+  const seen = new Set<string>();
+  for (const entry of prior) {
+    if (seen.has(entry.file)) continue;
+    seen.add(entry.file);
+    if (!entry.reason.startsWith(CAPPED_WITH_ERRORS_REASON)) {
+      kept.push(entry);
+      continue;
+    }
+    const current = stillCapped.get(entry.file);
+    if (current !== undefined) kept.push(entryOf(current));
+  }
+  for (const c of capped) {
+    if (!seen.has(c.file)) kept.push(entryOf(c));
+  }
+  return kept;
+}
+
 /**
  * US-010: ported output roots derived from the prep source map — the fix
  * loop's classification must know which output trees are PORTED (including

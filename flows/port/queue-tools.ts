@@ -12,6 +12,7 @@ import { execToolResult } from "../../src/exec.js";
 import {
   parseVitestOutput,
   parseVitestSummary,
+  unhandledErrorRecord,
   type VitestFailureRecord,
   type VitestRunState,
 } from "../../src/queues/vitest-queue.js";
@@ -101,11 +102,20 @@ export async function findVitestTestFiles(integrationWorktreePath: string): Prom
  * carries both streams. They are read as stdout-then-stderr; the parsers
  * anchor the summary lines and start records on `FAIL` only, so the merge
  * neither doubles records nor lets the `Failed Tests N` banner win.
+ *
+ * B2: the process exit code is evidence too. Vitest exits non-zero over
+ * unhandled errors (`Errors  1 error`), thresholds and the like while every
+ * test passes and no `FAIL` block exists; a ran with 0 failures there was a
+ * vacuous green. A non-zero exit with nothing failing in the summary or the
+ * records is therefore recorded as a failed run (one synthetic record, see
+ * unhandledErrorRecord), the same way tsc treats a non-zero exit with no
+ * located error as untrustworthy. An unknown exit code (omitted, or null for a
+ * killed process) changes nothing.
  */
 export function vitestOutcomeFromRun(
   binExists: boolean,
   testFiles: readonly string[],
-  run: { stdout: string; stderr?: string } | null,
+  run: { stdout: string; stderr?: string; exitCode?: number | null } | null,
 ): { vitestRun: VitestRunState; records: VitestFailureRecord[] } {
   if (!binExists) {
     return {
@@ -136,6 +146,19 @@ export function vitestOutcomeFromRun(
       records: [],
     };
   }
+  const records = parseVitestOutput(text);
+  const exitCode = run.exitCode;
+  if (typeof exitCode === "number" && exitCode !== 0 && summary.tests.failed === 0 && records.length === 0) {
+    return {
+      vitestRun: {
+        kind: "ran",
+        passed: summary.tests.passed,
+        failed: Math.max(summary.unhandledErrors, 1),
+        total: summary.tests.total,
+      },
+      records: [unhandledErrorRecord(text, exitCode, summary.unhandledErrors)],
+    };
+  }
   return {
     vitestRun: {
       kind: "ran",
@@ -143,6 +166,6 @@ export function vitestOutcomeFromRun(
       failed: summary.tests.failed,
       total: summary.tests.total,
     },
-    records: parseVitestOutput(text),
+    records,
   };
 }

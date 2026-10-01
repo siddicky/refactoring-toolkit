@@ -102,7 +102,12 @@ export type VitestRunState =
       kind: "ran";
       /** Tests that passed (vitest summary "Tests" line). */
       passed: number;
-      /** Tests that failed (= the fix-loop feed's failure universe). */
+      /**
+       * Tests that failed (= the fix-loop feed's failure universe). When the
+       * run exited non-zero with no failing test (unhandled errors, a
+       * threshold) this is the number of such run-level failures instead, and
+       * the feed carries one synthetic record: a ran 0 never hides a red run.
+       */
       failed: number;
       /** Total tests executed (passed + failed + skipped as reported). */
       total: number;
@@ -124,6 +129,12 @@ export interface VitestSummaryCounts {
 export interface VitestSummary {
   testFiles: VitestSummaryCounts | null;
   tests: VitestSummaryCounts;
+  /**
+   * The `Errors  N error(s)` line: unhandled errors vitest caught while every
+   * test passed (a leaked rejection, a throw after the test ended). 0 when the
+   * line is absent. Vitest exits non-zero over them.
+   */
+  unhandledErrors: number;
 }
 
 /**
@@ -150,6 +161,7 @@ export interface VitestSummary {
 export function parseVitestSummary(output: string): VitestSummary | null {
   let testFiles: VitestSummaryCounts | null = null;
   let tests: VitestSummaryCounts | null = null;
+  let unhandledErrors = 0;
   for (const line of output.replace(ANSI_ESCAPE, "").split("\n")) {
     const files = parseSummaryLine(line, TEST_FILES_LABEL);
     if (files !== null) {
@@ -157,12 +169,17 @@ export function parseVitestSummary(output: string): VitestSummary | null {
       continue;
     }
     const t = parseSummaryLine(line, TESTS_LABEL);
-    if (t !== null) tests = t;
+    if (t !== null) {
+      tests = t;
+      continue;
+    }
+    const errors = ERRORS_LINE.exec(line);
+    if (errors !== null) unhandledErrors = Number(errors[1]);
   }
   if (tests === null) {
     if (testFiles !== null && testFiles.failed > 0) {
       // Collection failure: no test executed, every failing file is a failure.
-      return { testFiles, tests: { passed: 0, failed: testFiles.failed, total: testFiles.total } };
+      return { testFiles, tests: { passed: 0, failed: testFiles.failed, total: testFiles.total }, unhandledErrors };
     }
     return null;
   }
@@ -175,13 +192,14 @@ export function parseVitestSummary(output: string): VitestSummary | null {
     testFiles !== null &&
     (testFiles.failed > 0 || testFiles.total === 0)
   ) {
-    return { testFiles, tests: { passed: 0, failed: testFiles.failed, total: testFiles.total } };
+    return { testFiles, tests: { passed: 0, failed: testFiles.failed, total: testFiles.total }, unhandledErrors };
   }
-  return { testFiles, tests };
+  return { testFiles, tests, unhandledErrors };
 }
 
 const TEST_FILES_LABEL = /^\s*Test Files\s/;
 const TESTS_LABEL = /^\s*Tests\s/;
+const ERRORS_LINE = /^\s*Errors\s+(\d+)\s+errors?\b/;
 
 /**
  * `Tests  4 failed | 41 passed (45)` → {passed: 41, failed: 4, total: 45}.
@@ -332,6 +350,55 @@ function parseStackFrame(line: string): StackFrame | null {
     file: rawFile,
     line: Number(rawLine),
     column: Number(rawColumn),
+  };
+}
+
+const UNHANDLED_BANNER = /^\s*⎯+\s*Unhandled Errors\s*⎯+\s*$/;
+const UNHANDLED_ERROR_BANNER = /^\s*⎯+\s*Unhandled (?:Rejection|Error)\s*⎯+\s*$/;
+const ORIGIN_LINE = /This error originated in "([^"]+)" test file/;
+/** Evidence kept on a synthetic record (vitest prints a long stack per unhandled error). */
+const RAW_EVIDENCE_CAP = 4_000;
+
+/**
+ * One synthetic failure record for a vitest run that exited non-zero although
+ * no test failed: vitest fails the run over unhandled errors (a leaked
+ * rejection, a throw after the test ended) and over thresholds, and prints no
+ * `FAIL` block for either. Without a record such a run read as a clean pass.
+ *
+ * The record names the exit code and the first unhandled error, carries the
+ * frames of the `Unhandled Errors` section (dependencies filtered out) so the
+ * triage can route it to the ported file it points at, and is attributed to the
+ * test file vitest says the error originated in. A run that printed no
+ * unhandled-error section still yields a record, with no frames.
+ */
+export function unhandledErrorRecord(output: string, exitCode: number, unhandledErrors: number): VitestFailureRecord {
+  const lines = output.replace(ANSI_ESCAPE, "").replace(/file:\/\//g, "").split(/\r?\n/);
+  const start = lines.findIndex((l) => UNHANDLED_BANNER.test(l));
+  const block: string[] = [];
+  if (start >= 0) {
+    for (const line of lines.slice(start + 1)) {
+      if (SUMMARY_START.test(line)) break;
+      block.push(line);
+    }
+  }
+  const frames: StackFrame[] = [];
+  for (const line of block) {
+    const frame = isStackFrameLine(line) ? parseStackFrame(line) : null;
+    if (frame !== null && !frame.file.includes("node_modules/")) frames.push(frame);
+  }
+  const bannerAt = block.findIndex((l) => UNHANDLED_ERROR_BANNER.test(l));
+  const firstError = bannerAt >= 0 ? block.slice(bannerAt + 1).find((l) => l.trim() !== "") : undefined;
+  const origin = ORIGIN_LINE.exec(block.join("\n"))?.[1];
+  const what =
+    unhandledErrors > 0
+      ? `${unhandledErrors} unhandled error(s)${firstError !== undefined ? `, the first: ${firstError.trim()}` : ""}`
+      : "no unhandled error reported (a coverage threshold or another run-level check?)";
+  return {
+    testFile: origin ?? "",
+    testName: "",
+    errorMessage: `vitest exited with code ${exitCode} although no test failed: ${what}`,
+    frames,
+    raw: block.join("\n").trim().slice(0, RAW_EVIDENCE_CAP),
   };
 }
 

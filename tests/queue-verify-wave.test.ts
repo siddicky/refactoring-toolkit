@@ -52,6 +52,7 @@ import {
   type WaveDispatchOutput,
   type WaveDispatchRecord,
 } from "../flows/port-project.js";
+import { blockedAfterVerify } from "../flows/port/queue-logic.js";
 import { envelopeEvents, envelopeStepIdentityOf } from "../flows/steps/envelope.js";
 import { sessionFenceMap, type AgentSessionClient } from "../src/harness/opencode.js";
 import { git } from "../src/git/exec.js";
@@ -456,6 +457,73 @@ describe("QueueVerifyStep: blocked dedupe across iterations (C04)", () => {
     const queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue");
     expect(queue?.blocked.map((b) => b.file)).toEqual(["src/A.php", "src/C.php"]);
   });
+
+  test("B3: a file blocked at the cap is unblocked once its errors are gone (another file's fix cleared them)", async () => {
+    const itg = await makeCheckout();
+    queueVerifyTools.tscBin = await writeFakeBin(join(await tempDir("tsc"), "tsc"), {
+      stdout: `${tscErrorLines("src/a.ts", 1)}\n${tscErrorLines("src/b.ts", 1)}\n`,
+      exit: 2,
+    });
+    const stores = store();
+    seedQueueVerify(stores, {
+      sourceMap: sourceMapOf({ "src/A.php": "src/a.ts", "src/B.php": "src/b.ts" }),
+      // A's errors are B's fault: A is at the cap, B still has a round left.
+      done: [
+        { file: "src/A.php", round: 2 },
+        { file: "src/B.php", round: 1 },
+      ],
+      maxRounds: 2,
+    });
+
+    await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
+    let queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue");
+    expect(queue?.blocked).toEqual([{ file: "src/A.php", round: 2, reason: "round cap reached with 1 queue error(s) remaining" }]);
+    expect(peekAttribute<QueueVerifyState>(stores, ppVerify, "verify")?.fixQueue.map((f) => f.file)).toEqual(["src/B.php"]);
+
+    // B's fix round lands and the typecheck is clean: nothing is left to block A.
+    queueVerifyTools.tscBin = await writeFakeBin(join(await tempDir("tsc"), "tsc"), { exit: 0 });
+    queue = peekAttribute<PortQueueState>(stores, ppQueue, "queue") as PortQueueState;
+    seedAttribute(stores, ppQueue, "queue", { ...queue, done: [...queue.done, { file: "src/B.php", round: 2, commitSha: null, treeHash: null }] });
+    await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
+
+    expect(peekAttribute<QueueVerifyState>(stores, ppVerify, "verify")?.tscTotal).toBe(0);
+    expect(peekAttribute<QueueVerifyState>(stores, ppVerify, "verify")?.fixQueue).toEqual([]);
+    expect(peekAttribute<PortQueueState>(stores, ppQueue, "queue")?.blocked).toEqual([]);
+  }, 30_000);
+
+  test("B3: a file blocked by DISPATCH (never run) stays blocked whatever the verify run finds", async () => {
+    const itg = await makeCheckout();
+    queueVerifyTools.tscBin = await writeFakeBin(join(await tempDir("tsc"), "tsc"), { exit: 0 });
+    const stores = store();
+    seedQueueVerify(stores, {
+      sourceMap: sourceMapOf({ "src/A.php": "src/a.ts" }),
+      done: [{ file: "src/A.php", round: 1 }],
+      maxRounds: 2,
+      blocked: [{ file: "src/Z.php", round: 1, reason: "round cap 0 exceeded" }],
+    });
+
+    await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
+
+    expect(peekAttribute<PortQueueState>(stores, ppQueue, "queue")?.blocked.map((b) => b.file)).toEqual(["src/Z.php"]);
+  });
+
+  test("blockedAfterVerify: re-derives cap entries (fresh count and round), keeps dispatch entries, appends new caps once", () => {
+    const prior = [
+      { file: "src/Z.php", round: 1, reason: "round cap 0 exceeded" },
+      { file: "src/A.php", round: 2, reason: "round cap reached with 3 queue error(s) remaining" },
+      { file: "src/A.php", round: 2, reason: "round cap reached with 3 queue error(s) remaining" },
+      { file: "src/G.php", round: 2, reason: "round cap reached with 1 queue error(s) remaining" },
+    ];
+    const capped = [
+      { file: "src/A.php", round: 2, count: 1 },
+      { file: "src/N.php", round: 3, count: 2 },
+    ];
+    expect(blockedAfterVerify(prior, capped)).toEqual([
+      { file: "src/Z.php", round: 1, reason: "round cap 0 exceeded" },
+      { file: "src/A.php", round: 2, reason: "round cap reached with 1 queue error(s) remaining" },
+      { file: "src/N.php", round: 3, reason: "round cap reached with 2 queue error(s) remaining" },
+    ]);
+  });
 });
 
 // ===========================================================================
@@ -546,6 +614,94 @@ describe("vitest 3.2.4 golden output: FAIL blocks live on stderr (C26)", () => {
     expect(vitestRow?.error_count).toBe(2);
     expect(vitestRow?.vitest?.state).toBe("ran");
     // Failures exist, so the loop continues into a fix wave instead of Final.
+    expect(routedTo(decision)).toBe(projectFlow.waveDispatch.constructor);
+  }, 30_000);
+});
+
+// ===========================================================================
+// B2: a non-zero vitest exit with no failing test is not a clean ran
+// ===========================================================================
+
+// Real vitest 3.2.4 output of a project whose two tests pass while one of them
+// leaks a rejected promise (`void Promise.reject(...)`): exit code 1, every test
+// green, no FAIL block. Captured with stdout and stderr separate; the scratch
+// project paths are rewritten to /itg and the dependency frames shortened.
+const UNHANDLED_STDOUT =
+  "\n RUN  v3.2.4 /itg\n\n ✓ test/a.test.ts (2 tests) 1ms\n\n Test Files  1 passed (1)\n      Tests  2 passed (2)\n     Errors  1 error\n   Start at  00:00:00\n   Duration  193ms\n\n";
+
+const UNHANDLED_STDERR =
+  "\n⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯\n\nVitest caught 1 unhandled error during the test run.\nThis might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.\n\n⎯⎯⎯⎯⎯ Unhandled Rejection ⎯⎯⎯⎯⎯⎯\nError: boom\n ❯ boom src/x.ts:2:23\n      1| export function boom(): void {\n      2|   void Promise.reject(new Error(\"boom\"));\n       |                       ^\n      3| }\n      4| \n ❯ test/a.test.ts:3:19\n ❯ node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n ❯ runWithTimeout node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10\n\nThis error originated in \"test/a.test.ts\" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n";
+
+describe("vitest exit code vs the summary (B2)", () => {
+  test("parser: the `Errors  N error` line is read", () => {
+    expect(parseVitestSummary(UNHANDLED_STDOUT)?.unhandledErrors).toBe(1);
+    expect(parseVitestSummary(FULL_STDOUT)?.unhandledErrors).toBe(0);
+  });
+
+  test("exit 1 with every test passing is a failed run with one attributable record, not 'ran 2/2, 0 failed'", () => {
+    const out = vitestOutcomeFromRun(true, ["test/a.test.ts"], { stdout: UNHANDLED_STDOUT, stderr: UNHANDLED_STDERR, exitCode: 1 });
+    expect(out.vitestRun).toEqual({ kind: "ran", passed: 2, failed: 1, total: 2 });
+    expect(out.records.length).toBe(1);
+    const record = out.records[0];
+    expect(record?.errorMessage).toContain("vitest exited with code 1 although no test failed");
+    expect(record?.errorMessage).toContain("1 unhandled error(s), the first: Error: boom");
+    expect(record?.testFile).toBe("test/a.test.ts");
+    // The frames that can route it to a ported file survive; dependency frames do not.
+    expect(record?.frames).toEqual([
+      { file: "src/x.ts", line: 2, column: 23 },
+      { file: "test/a.test.ts", line: 3, column: 19 },
+    ]);
+  });
+
+  test("the exit code is what makes it a failure: the same output with no exit code (or exit 0) reads as before", () => {
+    const streams = { stdout: UNHANDLED_STDOUT, stderr: UNHANDLED_STDERR };
+    for (const run of [streams, { ...streams, exitCode: null }, { ...streams, exitCode: 0 }]) {
+      const out = vitestOutcomeFromRun(true, ["test/a.test.ts"], run);
+      expect(out.vitestRun).toEqual({ kind: "ran", passed: 2, failed: 0, total: 2 });
+      expect(out.records).toEqual([]);
+    }
+  });
+
+  test("a non-zero exit with no `Errors` line (a threshold, say) is still a failed run, and says so", () => {
+    const out = vitestOutcomeFromRun(true, ["test/a.test.ts"], {
+      stdout: " Test Files  1 passed (1)\n      Tests  2 passed (2)\n",
+      exitCode: 1,
+    });
+    expect(out.vitestRun).toEqual({ kind: "ran", passed: 2, failed: 1, total: 2 });
+    expect(out.records[0]?.errorMessage).toContain("no unhandled error reported");
+    expect(out.records[0]?.frames).toEqual([]);
+  });
+
+  test("failing tests keep their own accounting: a non-zero exit adds nothing on top of parsed failures", () => {
+    const out = vitestOutcomeFromRun(true, ["test/price.test.ts"], { stdout: FULL_STDOUT, stderr: FULL_STDERR, exitCode: 1 });
+    expect(out.vitestRun).toEqual({ kind: "ran", passed: 1, failed: 2, total: 3 });
+    expect(out.records.length).toBe(3);
+  });
+
+  test("QueueVerifyStep end to end (fake vitest replays the real streams, exit 1): the run is unresolved and the ported file is queued for a fix", async () => {
+    const itg = await makeCheckout();
+    await mkdir(join(itg, "test"), { recursive: true });
+    await writeFile(join(itg, "src", "x.ts"), "export function boom(): void {}\n");
+    await writeFile(join(itg, "test", "a.test.ts"), "// ported test\n");
+    await writeFakeBin(join(itg, "node_modules", ".bin", "vitest"), { stdout: UNHANDLED_STDOUT, stderr: UNHANDLED_STDERR, exit: 1 });
+    queueVerifyTools.tscBin = await writeFakeBin(join(await tempDir("tsc"), "tsc"), { exit: 0 });
+    const stores = store();
+    seedQueueVerify(stores, {
+      sourceMap: sourceMapOf({ "src/X.php": "src/x.ts", "test/ATest.php": "test/a.test.ts" }),
+      done: [
+        { file: "src/X.php", round: 1 },
+        { file: "test/ATest.php", round: 1 },
+      ],
+      maxRounds: 3,
+    });
+
+    const decision = await projectFlow.queueVerify.execute(ctxOver(stores), baseInput(itg));
+
+    const verify = peekAttribute<QueueVerifyState>(stores, ppVerify, "verify");
+    expect(verify?.vitestRun).toEqual({ kind: "ran", passed: 2, failed: 1, total: 2 });
+    expect(verify?.vitestTotal).toBe(1);
+    expect(verify?.fixQueue.map((f) => f.file)).toEqual(["src/X.php"]);
+    expect(peekAttribute<QueueBurnDownSample>(stores, ppBurndown, "vitest-1")?.error_count).toBe(1);
     expect(routedTo(decision)).toBe(projectFlow.waveDispatch.constructor);
   }, 30_000);
 });

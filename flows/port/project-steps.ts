@@ -34,6 +34,7 @@ import { leasePool } from "./leases.js";
 import {
   baseInput,
   baseInputOf,
+  blockedAfterVerify,
   childInputOf,
   deriveNext,
   errorCountsByOutput,
@@ -338,12 +339,14 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
     const vitestBin = join(itg, "node_modules", ".bin", "vitest");
     const binExists = await pathExists(vitestBin);
     const testFiles = await findVitestTestFiles(itg);
-    let vitestIo: { stdout: string; stderr: string } | null = null;
+    let vitestIo: { stdout: string; stderr: string; exitCode: number | null } | null = null;
     if (binExists && testFiles.length > 0) {
       // C26: vitest 3.x writes every `FAIL` block (message, diff, frames) to
       // STDERR and only the summary + per-file bullets to stdout — both
-      // streams are captured. A non-zero exit = failing tests (still ran —
-      // the output carries counts); no output at all on a failed spawn = null.
+      // streams are captured. A non-zero exit is usually failing tests (still
+      // ran — the output carries counts); no output at all on a failed spawn =
+      // null. B2: the exit code travels with the output, because vitest also
+      // exits non-zero over unhandled errors while every test passes.
       const vitestProc = await runCaptured(vitestBin, ["run", "--reporter", "default"], {
         cwd: itg,
         timeoutMs: queueVerifyTools.vitestTimeoutMs,
@@ -352,7 +355,7 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
       vitestIo =
         silent && vitestProc.exitCode !== 0
           ? null
-          : { stdout: vitestProc.stdout, stderr: vitestProc.stderr };
+          : { stdout: vitestProc.stdout, stderr: vitestProc.stderr, exitCode: vitestProc.exitCode };
     }
     const { vitestRun, records: vitestRecords } = vitestOutcomeFromRun(binExists, testFiles, vitestIo);
     const vitestNote = vitestRun.kind === "not-run" ? vitestRun.reason : null;
@@ -417,21 +420,10 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
       errorCountByFile,
       config?.maxRounds ?? input.maxRounds,
     );
-    // `capped` is recomputed from the WHOLE done set every iteration, so a
-    // file capped earlier shows up again: append only files not already
-    // blocked (C04 — else PortRunResult.blocked and the dashboard counts
-    // inflate with every further iteration).
-    const alreadyBlocked = new Set(queue.blocked.map((b) => b.file));
-    const blocked = [
-      ...queue.blocked,
-      ...capped
-        .filter((c) => !alreadyBlocked.has(c.file))
-        .map((c) => ({
-          file: c.file,
-          round: c.round,
-          reason: `round cap reached with ${c.count} queue error(s) remaining`,
-        })),
-    ];
+    // `capped` is recomputed from the WHOLE done set every iteration, so the
+    // cap entries are re-derived from it (C04: a file capped earlier is not
+    // appended again; B3: one whose errors have since cleared drops out).
+    const blocked = blockedAfterVerify(queue.blocked, capped);
 
     ppVerify.set(ctx, "verify", {
       iteration,
