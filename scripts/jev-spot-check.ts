@@ -14,10 +14,22 @@
  * Usage: bun run scripts/jev-spot-check.ts [--out /tmp/jev-spot-check.json]
  * Requires TYPESAFE_API_KEY (real billed System One calls) — refuses to run
  * offline so the measured path is the live path.
+ *
+ * Argument handling is the shared layer in src/cli/args.ts (option table:
+ * JEV_SPOT_CHECK_CLI, `--help` prints the generated usage). A bad argument is
+ * a usage error (exit 64), distinct from the BLOCKED exit 2.
  */
 
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  type CliParse,
+  CLI_EXIT,
+  defineCli,
+  exitCodesNote,
+  parseOptions,
+  reportParseFailure,
+} from "../src/cli/args.js";
 import { harvestPhpSymbols } from "../src/harness/runtime.js";
 import { selectSymbolType, type PhpSymbol } from "../src/typesafe/symbol-types.js";
 import { createRealJevClient, isTypesafeOffline } from "../src/typesafe/client.js";
@@ -30,6 +42,42 @@ import {
 } from "../src/typesafe/spot-check.js";
 
 const SRC_ROOT = join(import.meta.dir, "..", "fixtures", "php-sample", "src");
+
+const DEFAULT_OUT_PATH = "/tmp/jev-spot-check.json";
+
+/** Exit codes of jev-spot-check. */
+export const JEV_SPOT_CHECK_EXIT = {
+  pass: 0,
+  /** The measured accuracy missed the gate, or a fatal error. */
+  fail: 1,
+  /** Offline, no API key, or fewer than 30 graded symbols: nothing was measured. */
+  blocked: 2,
+  usage: CLI_EXIT.usage,
+} as const;
+
+/** The CLI's option table: parsing, validation and the usage text all come from it. */
+export const JEV_SPOT_CHECK_CLI = defineCli({
+  name: "jev-spot-check.ts",
+  summary:
+    "Grades live Jev type selection against the fixture's ground truth (needs TYPESAFE_API_KEY; real billed calls).",
+  options: {
+    out: { kind: "string", metavar: "path", default: DEFAULT_OUT_PATH, description: "where to write the JSON rows" },
+  },
+  notes: [
+    exitCodesNote(JEV_SPOT_CHECK_EXIT, {
+      pass: "spot-check passed",
+      fail: "spot-check failed, or fatal error",
+      blocked: "BLOCKED: offline, no API key, or < 30 graded symbols",
+      usage: "usage error",
+    }),
+  ],
+});
+
+/** Strict parse of jev-spot-check's argv (without the `bun run script` prefix). */
+export function parseJevSpotCheckArgs(argv: readonly string[]): CliParse<{ outPath: string }> {
+  const parsed = parseOptions(JEV_SPOT_CHECK_CLI, argv);
+  return parsed.ok ? { ok: true, options: { outPath: parsed.options.out } } : parsed;
+}
 
 function listPhpFiles(dir: string): string[] {
   const out: string[] = [];
@@ -45,14 +93,17 @@ function listPhpFiles(dir: string): string[] {
 }
 
 async function main(): Promise<number> {
+  const parsed = parseJevSpotCheckArgs(process.argv.slice(2));
+  if (!parsed.ok) return reportParseFailure("jev-spot-check", parsed);
+  const { outPath } = parsed.options;
   if (isTypesafeOffline()) {
     console.error("TYPESAFE_OFFLINE is set — refusing: the spot-check measures the LIVE path.");
-    return 2;
+    return JEV_SPOT_CHECK_EXIT.blocked;
   }
   const key = process.env.TYPESAFE_API_KEY?.trim();
   if (key === undefined || key === "") {
     console.error("TYPESAFE_API_KEY absent — live Jev spot-check BLOCKED-pending-key.");
-    return 2;
+    return JEV_SPOT_CHECK_EXIT.blocked;
   }
   const client = await createRealJevClient({ apiKey: key });
 
@@ -65,7 +116,7 @@ async function main(): Promise<number> {
   console.log(`harvested ${symbols.length} symbols; ${graded.length} graded (ground truth available)`);
   if (graded.length < 30) {
     console.error(`BLOCKED: only ${graded.length} graded symbols (need >= 30)`);
-    return 2;
+    return JEV_SPOT_CHECK_EXIT.blocked;
   }
 
   // Deterministic first-candidate baseline over the SAME graded set (no model,
@@ -138,20 +189,20 @@ async function main(): Promise<number> {
       return acc;
     }, {}),
   };
-  const outPath = process.argv.includes("--out")
-    ? process.argv[process.argv.indexOf("--out") + 1] ?? "/tmp/jev-spot-check.json"
-    : "/tmp/jev-spot-check.json";
   writeFileSync(outPath, JSON.stringify({ summary, rows }, null, 2));
   console.log(
     `SPOT-CHECK: ${correct}/${rows.length} = ${(score * 100).toFixed(1)}% (required ${(verdict.required * 100).toFixed(1)}%: >= ${(SPOT_CHECK_TARGET * 100).toFixed(0)}% and baseline + ${(BASELINE_MARGIN * 100).toFixed(0)} pts) → ${summary.pass ? "PASS" : "FAIL"}; rows → ${outPath}`,
   );
   for (const reason of verdict.reasons) console.log(`  FAIL: ${reason}`);
-  return summary.pass ? 0 : 1;
+  return summary.pass ? JEV_SPOT_CHECK_EXIT.pass : JEV_SPOT_CHECK_EXIT.fail;
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
-    console.error("[jev-spot-check] fatal:", err);
-    process.exit(1);
-  });
+// Only run when executed directly: importing this module (tests) must not start a live, billed run.
+if (import.meta.main) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      console.error("[jev-spot-check] fatal:", err);
+      process.exit(JEV_SPOT_CHECK_EXIT.fail);
+    });
+}

@@ -11,12 +11,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  argValueFrom,
   dexcliInvocation,
   type DexRunner,
   mergedHistory,
   mergedHistoryOf,
+  parseRenderMetricsArgs,
+  RENDER_METRICS_CLI,
+  RENDER_METRICS_EXIT,
 } from "../scripts/render-metrics.js";
+import { CLI_EXIT, usageText } from "../src/cli/args.js";
 import { discoverChildFlowIds, flowFactsFromSummary } from "../src/metrics/collect.js";
 import eventStreamRaw from "../src/metrics/fixtures/event-stream-run-a.json" with { type: "json" };
 import historyRaw from "../src/metrics/fixtures/dex-history-run-a.json" with { type: "json" };
@@ -48,15 +51,71 @@ describe("dexcli invocation honours DEXCLI_BIN and DEX_SERVER_ADDRESS (C36)", ()
   });
 });
 
-describe("render-metrics flag parsing (C36)", () => {
-  test("returns the value, or undefined when the flag is absent", () => {
-    expect(argValueFrom(["--flow-id", "f1", "--out-dir", "o"], "--flow-id")).toBe("f1");
-    expect(argValueFrom(["--flow-id", "f1"], "--out-dir")).toBeUndefined();
+describe("render-metrics flag parsing (C36, shared layer C69)", () => {
+  const parse = (...argv: string[]) => parseRenderMetricsArgs(argv);
+  const failure = (...argv: string[]) => {
+    const parsed = parse(...argv);
+    if (parsed.ok) throw new Error("expected a failure");
+    return parsed;
+  };
+
+  test("valid: defaults, both spellings of every flag, --events as the alias of --kill-events", () => {
+    const minimal = parse("--flow-id", "f1");
+    expect(minimal.ok && minimal.options).toEqual({
+      flowId: "f1",
+      killEventsPath: undefined,
+      allRuns: false,
+      legacyFlowKeyedEnvelopes: false,
+      outDir: "metrics",
+      generatedAt: undefined,
+    });
+    const full = parse(
+      "--flow-id=f1", "--events", "e.jsonl", "--all-runs", "--legacy-flow-keyed-envelopes",
+      "--out-dir=o", "--generated-at", "2026-09-30T00:00:00Z",
+    );
+    expect(full.ok && full.options).toEqual({
+      flowId: "f1",
+      killEventsPath: "e.jsonl",
+      allRuns: true,
+      legacyFlowKeyedEnvelopes: true,
+      outDir: "o",
+      generatedAt: "2026-09-30T00:00:00Z",
+    });
+    const both = parse("--flow-id", "f1", "--events", "b.jsonl", "--kill-events", "a.jsonl");
+    expect(both.ok && both.options.killEventsPath).toBe("a.jsonl"); // --kill-events wins, as before
+  });
+
+  test("missing value: a flag at the end of the line, and --flow-id absent, are usage errors", () => {
+    expect(failure("--flow-id").error).toBe("--flow-id requires a value");
+    expect(failure("--flow-id", "f1", "--out-dir").error).toBe("--out-dir requires a value");
+    expect(failure("--out-dir", "o").error).toBe("--flow-id is required");
   });
 
   test("a flag given where a value belongs is rejected instead of being swallowed as the value", () => {
-    expect(() => argValueFrom(["--flow-id", "--out-dir", "x"], "--flow-id")).toThrow(/requires a value/);
-    expect(() => argValueFrom(["--flow-id"], "--flow-id")).toThrow(/requires a value/);
+    expect(failure("--flow-id", "--out-dir", "x").error).toContain("--flow-id requires a value");
+    expect(failure("--flow-id", "f1", "--out-dir", "--all-runs").error).toContain("--out-dir requires a value");
+    expect(parse("--flow-id=--weird").ok).toBe(true);
+  });
+
+  test("unknown flags, stray positionals, repeats and a value on a switch are rejected", () => {
+    expect(failure("--flow-id", "f1", "--out", "x").error).toBe("unknown argument: --out");
+    expect(failure("--flow-id", "f1", "stray").error).toBe("unexpected argument: stray");
+    expect(failure("--flow-id", "a", "--flow-id", "b").error).toContain("more than once");
+    expect(failure("--flow-id", "f1", "--all-runs=yes").error).toBe("--all-runs does not take a value");
+  });
+
+  test("--help is not an error and the usage lists every flag from the table", () => {
+    const help = failure("--help");
+    expect(help.help).toBe(true);
+    expect(help.usage).toBe(usageText(RENDER_METRICS_CLI));
+    for (const flag of ["--flow-id", "--kill-events", "--events", "--all-runs", "--legacy-flow-keyed-envelopes", "--out-dir", "--generated-at"]) {
+      expect(help.usage).toContain(flag);
+    }
+    expect(help.usage).toContain("usage: render-metrics.ts --flow-id <id>");
+  });
+
+  test("exit codes: usage is the shared 64; 1 and 2 keep their old meanings", () => {
+    expect(RENDER_METRICS_EXIT).toEqual({ ok: 0, failed: 1, sidecarMissing: 2, usage: CLI_EXIT.usage });
   });
 });
 
@@ -174,10 +233,27 @@ async function runDriver(
 }
 
 describe("render-metrics usage errors (C36)", () => {
-  test("`--flow-id --out-dir x` is a usage error (exit 2), not flow id '--out-dir'", async () => {
+  test("`--flow-id --out-dir x` is a usage error (exit 64), not flow id '--out-dir'", async () => {
     const r = await runDriver(["--flow-id", "--out-dir", "x"]);
-    expect(r.code).toBe(2);
+    expect(r.code).toBe(64);
     expect(r.stderr).toContain("--flow-id requires a value");
+    expect(r.stderr).toContain("usage: render-metrics.ts");
+  });
+
+  test("a missing --flow-id and an unknown flag exit 64 before dex is contacted", async () => {
+    const missing = await runDriver([]);
+    expect(missing.code).toBe(64);
+    expect(missing.stderr).toContain("--flow-id is required");
+    const unknown = await runDriver(["--flow-id", "f", "--bogus"]);
+    expect(unknown.code).toBe(64);
+    expect(unknown.stderr).toContain("unknown argument: --bogus");
+  });
+
+  test("--help exits 0 and prints the generated usage", async () => {
+    const r = await runDriver(["--help"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("usage: render-metrics.ts --flow-id <id>");
+    expect(r.stdout).toContain("exit codes: 0 report written, provenance ok; 1");
   });
 });
 
