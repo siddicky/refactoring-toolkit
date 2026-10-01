@@ -9,6 +9,7 @@
  * used to blank the whole view (`STATUS_MAX_FLOWS=abc` -> zero flows).
  */
 
+import { DEFAULT_KILL_EVENTS_PATH } from "../metrics/kill-events.js";
 import { DEFAULT_MAX_CHILD_FLOWS, DEFAULT_MAX_FLOWS } from "./flow-select.js";
 
 /**
@@ -31,7 +32,7 @@ const DEFAULT_BLOB_CACHE_DIR = ".dex-cache/dashboard";
  * skipped silently.
  */
 export const DEFAULT_KILL_EVENT_FILES: readonly string[] = [
-  "metrics/kill-events.jsonl",
+  DEFAULT_KILL_EVENTS_PATH,
   "metrics/kill-events.json",
   "kill-events.json",
 ];

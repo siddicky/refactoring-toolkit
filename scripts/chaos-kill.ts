@@ -40,14 +40,17 @@
 import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { DEFAULT_KILL_EVENTS_PATH } from "../src/metrics/kill-events.js";
 import { WATCHER_EXIT, parseFlagValues } from "../src/watcher/cli-args.js";
 
 /**
  * Default kill-event sidecar path (Contract B): JSON Lines, relative to the
  * cwd, inside the gitignored /metrics/ run-output directory. Explicit
- * `--events` flags still win.
+ * `--events` flags still win. Re-exported from the READER's module
+ * (src/metrics/kill-events.ts): writer and reader share ONE constant, so a
+ * default can never drift between chaos-kill and render-metrics.
  */
-export const DEFAULT_KILL_EVENTS_PATH = "metrics/kill-events.jsonl";
+export { DEFAULT_KILL_EVENTS_PATH };
 
 /**
  * Exit codes of the chaos-kill CLI: a subset of watch-queue-verify's table
