@@ -37,7 +37,7 @@ import { PREP_SPEC_FILE, type DiffDocument } from "../../src/metrics/types.js";
 import { naiveCitationCheck } from "../../src/typesafe/verdict-check.js";
 import { requireHarness, runAgentTurn } from "./agent-turns.js";
 import { countingJevClient, keepFindings } from "./lane-b.js";
-import { parsePrepSourceMap, verdictKeyOf } from "./queue-logic.js";
+import { parsePrepSourceMap, parsePrepSourceMapRows, sourceMapProblems, verdictKeyOf } from "./queue-logic.js";
 import { runReviewTurn } from "./review-turn.js";
 import { DispatchStep } from "./project-steps.js";
 import {
@@ -68,6 +68,12 @@ export const PrepStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const missing = input.files.filter((f) => sourceMap[f] === undefined);
     if (missing.length > 0) {
       throw new Error(`prep source map lacks rows for: ${missing.join(", ")}`);
+    }
+    // B4: every output must stay inside its lease worktree and be unique to its
+    // source, or the run fails (or writes outside the lease) after the model spend.
+    const problems = sourceMapProblems(parsePrepSourceMapRows(raw), input.files);
+    if (problems.length > 0) {
+      throw new Error(`prep source map is unusable: ${problems.join("; ")}`);
     }
     // Phase 3: harvest symbols (code-only, deterministic) for the per-symbol
     // table; the stub baseline is what the generated spec map supersedes.

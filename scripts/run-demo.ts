@@ -83,6 +83,8 @@ import {
   PortFileFlowInstance,
   configurePortHarness,
   parsePrepSourceMap,
+  parsePrepSourceMapRows,
+  sourceMapProblems,
   type PortRunInput,
   type PortRunResult,
 } from "../flows/port-project.js";
@@ -863,6 +865,9 @@ export async function preflightDemoInputs(
     const missing = inputs.files.filter((f) => sourceMap[f] === undefined);
     if (missing.length > 0) {
       problems.push(`prep artifact ${inputs.prepPath} has no source-map row for: ${missing.join(", ")}`);
+    }
+    for (const problem of sourceMapProblems(parsePrepSourceMapRows(prep), inputs.files)) {
+      problems.push(`prep artifact ${inputs.prepPath}: ${problem}`);
     }
   }
 

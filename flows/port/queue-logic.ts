@@ -5,6 +5,8 @@
  * and the input rebuilders. No I/O, no step classes.
  */
 
+import { posix } from "node:path";
+
 import { identityKeyOf, stripDotSlash } from "../../src/file-keys.js";
 import type { ClassifiedVitestFailure } from "../../src/queues/vitest-queue.js";
 import type {
@@ -54,15 +56,72 @@ export function outPathOf(
  */
 export function parsePrepSourceMap(raw: string): Record<string, { outPath: string; notes: string }> {
   const map: Record<string, { outPath: string; notes: string }> = {};
+  // A repeated source is last-wins here; sourceMapProblems reports it.
+  for (const row of parsePrepSourceMapRows(raw)) map[row.source] = { outPath: row.outPath, notes: row.notes };
+  return map;
+}
+
+/** One exact source-map row, in file order (a source can appear twice; the map keeps the last). */
+export interface PrepSourceMapRow {
+  source: string;
+  outPath: string;
+  notes: string;
+}
+
+export function parsePrepSourceMapRows(raw: string): PrepSourceMapRow[] {
+  const rows: PrepSourceMapRow[] = [];
   for (const line of raw.split("\n")) {
     const m = /^\|\s*`([^`]+\.php)`\s*\|\s*`([^`]+)`\s*\|\s*(.*?)\s*\|?\s*$/.exec(line.trim());
     if (m === null) continue;
     const php = m[1];
     if (php === undefined || m[2] === undefined) continue;
     if (php.includes("*")) continue; // glob rows are not exact seeds
-    map[php] = { outPath: m[2], notes: m[3] ?? "" };
+    rows.push({ source: php, outPath: m[2], notes: m[3] ?? "" });
   }
-  return map;
+  return rows;
+}
+
+/** An output path that stays inside the checkout: relative, no `..` segment, not empty. */
+function outPathProblem(outPath: string): string | null {
+  const rel = stripDotSlash(outPath).trim();
+  if (rel === "") return "is empty";
+  if (rel.includes("\0")) return "contains a NUL byte";
+  if (rel.startsWith("/") || rel.startsWith("\\") || /^[A-Za-z]:/.test(rel)) return "is absolute";
+  if (rel.split(/[\\/]/).includes("..")) return "leaves the checkout (`..`)";
+  return null;
+}
+
+/**
+ * What is wrong with the source-map rows of the files a run will port: an
+ * output path that is absolute or climbs out of the lease worktree (the
+ * toolkit writes model-generated text there), a source mapped twice to
+ * different outputs (the parse silently keeps the last), and two sources mapped
+ * to the same output (the second lease's add/add conflicts at the wave join,
+ * after the model spend). Files without a row are the caller's separate error.
+ */
+export function sourceMapProblems(rows: readonly PrepSourceMapRow[], files: readonly string[]): string[] {
+  const problems: string[] = [];
+  const bySource = new Map<string, PrepSourceMapRow[]>();
+  for (const row of rows) bySource.set(row.source, [...(bySource.get(row.source) ?? []), row]);
+  const owners = new Map<string, string>();
+  for (const file of files) {
+    const mine = bySource.get(file);
+    if (mine === undefined) continue;
+    const outs = [...new Set(mine.map((r) => r.outPath))];
+    if (outs.length > 1) problems.push(`${file} is mapped to ${outs.map((o) => `\`${o}\``).join(" and ")}`);
+    const outPath = mine[mine.length - 1]?.outPath;
+    if (outPath === undefined) continue;
+    const bad = outPathProblem(outPath);
+    if (bad !== null) {
+      problems.push(`${file} -> \`${outPath}\` ${bad}`);
+      continue;
+    }
+    const key = posix.normalize(stripDotSlash(outPath).replaceAll("\\", "/"));
+    const other = owners.get(key);
+    if (other !== undefined && other !== file) problems.push(`${other} and ${file} both map to \`${key}\``);
+    else owners.set(key, file);
+  }
+  return problems;
 }
 
 export type NextAction =

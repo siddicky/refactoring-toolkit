@@ -5,7 +5,7 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type { Context } from "@superdurable/dex";
 
 import {
@@ -74,8 +74,18 @@ export async function gitDiffStaged(worktreePath: string): Promise<string> {
   return runner.run(["diff", "--cached"]);
 }
 
+/**
+ * Writes the model's file at `outPath` under the lease worktree. The path comes
+ * from the source map: it must resolve INSIDE the worktree, never beside it or
+ * above it (`../x.ts`, an absolute path).
+ */
 export async function writeOutFile(worktreePath: string, outPath: string, content: string): Promise<void> {
-  const target = join(worktreePath, outPath);
+  const root = resolve(worktreePath);
+  const target = resolve(root, outPath);
+  const within = relative(root, target);
+  if (within === "" || within.startsWith("..") || isAbsolute(within)) {
+    throw new Error(`refusing to write ${JSON.stringify(outPath)}: it resolves outside the lease worktree ${root}`);
+  }
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, content, "utf8");
 }
