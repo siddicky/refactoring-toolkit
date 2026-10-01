@@ -231,7 +231,7 @@ export function recallCandidates(symbol: PhpSymbol): RecallResult {
 
 export type VerificationCheck = "type_mismatch" | "hallucinated" | "unreasonable" | "absence_wrong";
 
-export const VERIFICATION_CHECKS: readonly VerificationCheck[] = [
+const VERIFICATION_CHECKS: readonly VerificationCheck[] = [
   "type_mismatch",
   "hallucinated",
   "unreasonable",

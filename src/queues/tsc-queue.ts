@@ -354,48 +354,6 @@ export function capErrorsPerFile<T extends { file: string }>(
 }
 
 // ---------------------------------------------------------------------------
-// Burn-down series (plan §Metrics: "typecheck-queue error-count burn-down
-// across iterations" is an AC2 field; recorded as durable attributes).
-// ---------------------------------------------------------------------------
-
-export interface BurnDownEntry {
-  /** Loop iteration the count was taken at. */
-  iteration: number;
-  errorCount: number;
-}
-
-export interface BurnDownSeries {
-  kind: "tsc-burndown";
-  /** Entries in ascending iteration order (append/replace keeps order). */
-  entries: BurnDownEntry[];
-}
-
-export function emptyBurnDown(): BurnDownSeries {
-  return { kind: "tsc-burndown", entries: [] };
-}
-
-/**
- * Pure recorder: returns a NEW series with the count appended, or replacing
- * the entry for an already-recorded iteration (re-running a queue step for
- * the same iteration must not duplicate entries).
- */
-export function recordBurnDown(
-  series: BurnDownSeries,
-  iteration: number,
-  errorCount: number,
-): BurnDownSeries {
-  const existing = series.entries.findIndex((e) => e.iteration === iteration);
-  const entries = [...series.entries];
-  if (existing >= 0) {
-    entries[existing] = { iteration, errorCount };
-  } else {
-    entries.push({ iteration, errorCount });
-    entries.sort((a, b) => a.iteration - b.iteration);
-  }
-  return { kind: "tsc-burndown", entries };
-}
-
-// ---------------------------------------------------------------------------
 // helpers (local, deterministic; no deps)
 // ---------------------------------------------------------------------------
 

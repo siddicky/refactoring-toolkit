@@ -17,7 +17,7 @@ import {
 } from "@superdurable/dex";
 import type { BlobCache, Flow } from "@superdurable/dex";
 
-export const DEFAULT_DEX_SERVER_ADDRESS = "127.0.0.1:8801";
+const DEFAULT_DEX_SERVER_ADDRESS = "127.0.0.1:8801";
 
 export interface DexConfig {
   serverAddress: string;

@@ -344,12 +344,10 @@ export const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
     executeLoadAttributeMaps: [ppKept, ppOut, ppPrep],
   },
   inner: async (ctx, fri) => {
+    // Reached only with findings: VerdictCheckStep routes a clean round (keptCount 0)
+    // straight to CommitStep, and prioritize keeps every finding.
     const kept = ppKept.get(ctx, keptKeyOf(fri.file, fri.round));
     if (kept === undefined) throw new Error(`kept findings missing for ${fri.file}#${fri.round}`);
-    if (kept.findings.length === 0) {
-      // Clean review (verdict-check kept nothing): skip the fixer entirely.
-      return { output: fri, tokens: null, outcome: "skipped" as EnvelopeOutcome };
-    }
     // Fix rounds (round >= 2) enter via the queue-fix path which does NOT
     // run the implement step, so ppOut is never set for them — resolve the
     // output path with the prep source-map fallback exactly like the
@@ -458,12 +456,7 @@ export const IntegrateStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClas
   identityOf: fileRoundIdentity,
   stepOptions: { executeLoadAttributeMaps: [ppMarker, ppOut, ppPrep] },
   inner: async (ctx, fri) => {
-    const result = await mergeLeaseIntoIntegration(
-      fri.repoRoot,
-      fri.integrationWorktreePath,
-      fri.branch,
-      "integration",
-    );
+    await mergeLeaseIntoIntegration(fri.repoRoot, fri.integrationWorktreePath, fri.branch, "integration");
 
     // C1 guard: when a keyed commit exists for this round it MUST be
     // reachable from integration HEAD — a no-op merge of a branch lacking
@@ -494,7 +487,6 @@ export const IntegrateStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClas
         );
       }
     }
-    void result;
     return { output: fri, tokens: null };
   },
   route: (_ctx, _input, fri) => goTo(releaseStepLink.get(), fri),

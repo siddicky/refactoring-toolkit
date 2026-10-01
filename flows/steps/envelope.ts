@@ -1,8 +1,8 @@
 /**
  * The ONLY step factory in the toolkit (plan §Metrics event contract).
- * Every durable step is created through {@link envelopeStep} or
- * {@link recordStep}; raw step creation elsewhere is forbidden and policed by
- * the Phase 1 module-boundary lint check.
+ * Every durable step is created through {@link envelopeStepClass} (or its
+ * start-marker form {@link envelopeStartMarker}); raw step creation elsewhere
+ * is forbidden and policed by the Phase 1 module-boundary lint check.
  *
  * Each execution emits an envelope event:
  *   {stepId, role, file, round, attempt, started_at, ended_at, outcome,
@@ -12,21 +12,19 @@
  * judgment) and null-as-not-applicable for non-model roles (commit, queue,
  * diff-capture, integration, record, and the verdict-check / prioritize
  * roles, whose live Jev spend is reported via pp-jev-usage, not the
- * envelope — see NAIVE_JUDGMENT_ROLES). A missing required token value is a
+ * envelope — see {@link requiresTokens}). A missing required token value is a
  * provenance failure, never zero.
  *
- * Phase 0(g) note: attribute writes are staged with a step's decision. Whether
- * they survive SIGKILL inside an uncompleted step is decided empirically in
- * Phase 0; the pre-decided fallback — persisting session-ID and envelope-start
- * writes via a preceding durable mini-step (role `record`) — is provided by
- * {@link recordStep} so 0(g)'s outcome cannot force a later redesign.
+ * Phase 0(g) note: attribute writes are staged with a step's decision. Staged
+ * writes inside an uncompleted step do NOT survive a SIGKILL, so the
+ * envelope-start write that must survive is made by a preceding durable
+ * mini-step: {@link envelopeStartMarker}.
  */
 
 import {
   AttributeMap,
   DexServiceError,
   jsonCodec,
-  StepList,
   Stream,
   Wait,
   gracefulComplete,
@@ -226,25 +224,23 @@ export function publishTurnDiagnosisEvent(context: Context, diagnosis: TurnDiagn
  * src/metrics/dispatch-anchor.ts's step table on purpose: the stream event
  * never enters the durable attribute store, so AC2 anchoring never sees it.
  */
-export const TURN_HEALTH_STEP_ID = "pp-turn-health";
+const TURN_HEALTH_STEP_ID = "pp-turn-health";
 
-/** Roles whose steps call a model: tokens are REQUIRED, never null (MODEL_CALLING_ROLES, src/metrics/types.ts). */
+/**
+ * Roles whose steps call a model: tokens are REQUIRED, never null
+ * (MODEL_CALLING_ROLES, src/metrics/types.ts).
+ *
+ * The TypeSafe integration roles `verdict-check` and `prioritize` are NOT
+ * model-calling: the naive defaults call no model, and their envelopes keep
+ * `tokens: null` EVEN WHEN a live Jev client is configured. Their live Jev
+ * spend, and that of vitest triage, is recorded in the write-only
+ * `pp-jev-usage` attribute (flows/port/lane-b.ts recordJevUsage) and reported
+ * separately by render-metrics as Jev (judgment) tokens; it is NOT part of the
+ * envelope token totals, so `validateProvenance` cannot flag it.
+ */
 export function requiresTokens(role: EnvelopeRole): boolean {
   return isModelCallingRole(role);
 }
-
-/**
- * Roles at TypeSafe integration points that keep a NON-model role: the naive
- * verdict-check / prioritize defaults call no model, and their envelopes keep
- * `tokens: null` EVEN WHEN a live Jev client is configured. The live Jev
- * swap-in did not move these steps to the model-calling `judgment` role (an
- * earlier plan said it would). Their live Jev spend — and that of vitest
- * triage — is recorded in the write-only `pp-jev-usage` attribute
- * (flows/port/lane-b.ts recordJevUsage) and is reported separately by
- * render-metrics as Jev (judgment) tokens; it is NOT part of the envelope
- * token totals, so `validateProvenance` cannot flag it.
- */
-export const NAIVE_JUDGMENT_ROLES: readonly EnvelopeRole[] = ["verdict-check", "prioritize"];
 
 /**
  * Persistence schema fragment that every flow must return from
@@ -258,7 +254,7 @@ export function persistenceAttributes(): [
 }
 
 // ---------------------------------------------------------------------------
-// envelopeStep — the single wrapped step factory
+// envelopeStepClass — the single wrapped step factory
 // ---------------------------------------------------------------------------
 
 export interface EnvelopeSpec<I, O> {
@@ -267,8 +263,6 @@ export interface EnvelopeSpec<I, O> {
   /** Envelope step identity used as the event key prefix. */
   stepId: string;
   role: EnvelopeRole;
-  file?: string | undefined;
-  round?: number | undefined;
   /**
    * Static dex Step options (heartbeats, retries, timeouts). When omitted the
    * server defaults apply, including the 60s heartbeat timeout.
@@ -361,8 +355,9 @@ async function executeEnvelope<I, O>(
   const base: EnvelopeEvent = {
     stepId: spec.stepId,
     role: spec.role,
-    file: spec.file ?? null,
-    round: spec.round ?? null,
+    // The target is identified by `identity` (file#round); file/round stay null.
+    file: null,
+    round: null,
     attempt,
     started_at: startedAt,
     ended_at: null,
@@ -407,27 +402,6 @@ async function executeEnvelope<I, O>(
 }
 
 /**
- * Wraps an inner handler in the envelope contract and returns a dex Step.
- * This is the only sanctioned way to produce a Step in the toolkit.
- */
-export function envelopeStep<I, O>(spec: EnvelopeSpec<I, O>): Step<I> {
-  return {
-    getStepType(): string {
-      return spec.stepType;
-    },
-    getStepOptions(): StepOptions | undefined {
-      return spec.stepOptions;
-    },
-    waitFor(): Wait {
-      return Wait.skipImmediately();
-    },
-    execute(context: Context, input: I): Promise<StepDecision> {
-      return executeEnvelope(spec, context as AsyncContext, input);
-    },
-  };
-}
-
-/**
  * What a class-form step was built from. The dispatch anchor's step table
  * (PORT_FLOW_STEPS in src/metrics/dispatch-anchor.ts) mirrors these triples by
  * hand, because the metrics layer never imports flow code; this registry lets
@@ -459,12 +433,6 @@ export function registeredSteps(flow: Flow<any>): Map<string, EnvelopeStepIdenti
 }
 
 /**
- * Class form of {@link envelopeStep}: dex step movement (goTo) identifies
- * steps by their runtime CLASS, so chained flows use this variant and route
- * with `goTo(NextStepClass, input)`. The returned constructor is concrete so
- * flows can instantiate it; it remains assignable to dex's StepClass.
- */
-/**
  * Annotated type for class-form envelope steps. Flows with routing CYCLES
  * (the per-file loop in flows/port/file-steps.ts and flows/port/project-steps.ts) must annotate their step
  * constants with this type — circular implicit inference through route
@@ -472,6 +440,14 @@ export function registeredSteps(flow: Flow<any>): Map<string, EnvelopeStepIdenti
  */
 export type EnvelopeStepClass<I> = (new () => Step<I>) & StepClass<I>;
 
+/**
+ * Wraps an inner handler in the envelope contract and returns a dex step
+ * CLASS: dex step movement (goTo) identifies steps by their runtime class, so
+ * chained flows route with `goTo(NextStepClass, input)`. The returned
+ * constructor is concrete so flows can instantiate it; it remains assignable
+ * to dex's StepClass. This is the only sanctioned way to produce a Step in
+ * the toolkit.
+ */
 export function envelopeStepClass<I, O>(
   spec: EnvelopeSpec<I, O>,
 ): EnvelopeStepClass<I> {
@@ -498,100 +474,6 @@ export function envelopeStepClass<I, O>(
     marker: false,
   });
   return stepClass;
-}
-
-// ---------------------------------------------------------------------------
-// recordStep — durable mini-step (role `record`, pre-decided 0(g) fallback)
-// ---------------------------------------------------------------------------
-
-/** Shared writer for record-role mini-steps (fold m7: single code path). */
-function writeRecordEvent(
-  context: Context,
-  stepId: string,
-  attempt: number,
-  identity?: string,
-): void {
-  const startedAt = new Date().toISOString();
-  const eventKey = envelopeEventKey(stepId, attempt, identity);
-  const recordEvent: EnvelopeEvent = {
-    stepId,
-    role: "record",
-    file: null,
-    round: null,
-    attempt,
-    started_at: startedAt,
-    ended_at: startedAt,
-    outcome: "completed",
-    tokens: null,
-    wall_clock_ms: 0,
-    identity: identity ?? null,
-  };
-  envelopeEvents.set(context, eventKey, recordEvent);
-  publishEnvelopeEvent(context, eventKey, recordEvent);
-}
-
-function writeFence(context: Context, fence: Omit<SessionFence, "persistedAtUtc"> | undefined): void {
-  if (fence === undefined) return;
-  sessionFenceMap.set(context, fence.label, {
-    ...fence,
-    persistedAtUtc: new Date().toISOString(),
-  });
-}
-
-/**
- * A minimal durable step that only persists a record envelope with the given
- * payload events. Used to make session-ID (fence) and envelope-start writes
- * durable BEFORE the main step runs: the mini-step's decision lands
- * independently, so a SIGKILL inside the later step cannot erase the fence.
- */
-export function recordStep(spec: {
-  stepType: string;
-  stepId: string;
-  /** Session fence to persist before a dependent agent step runs. */
-  fence?: Omit<SessionFence, "persistedAtUtc"> | undefined;
-  /** Optional per-target identity for the event key. */
-  identity?: string | undefined;
-  /** Optional routing decision; defaults to gracefulComplete. */
-  route?: (context: Context) => StepDecision;
-}): Step<void> {
-  return {
-    getStepType(): string {
-      return spec.stepType;
-    },
-    waitFor(): Wait {
-      return Wait.skipImmediately();
-    },
-    execute(context: Context): StepDecision {
-      writeFence(context, spec.fence);
-      writeRecordEvent(context, spec.stepId, context.attempt, spec.identity);
-      if (spec.route !== undefined) return spec.route(context);
-      return gracefulComplete(undefined);
-    },
-  };
-}
-
-/** Class form of {@link recordStep} for chained flows. */
-export function recordStepClass(spec: {
-  stepType: string;
-  stepId: string;
-  fence?: Omit<SessionFence, "persistedAtUtc"> | undefined;
-  identity?: string | undefined;
-  route?: (context: Context) => StepDecision;
-}): StepClass<void> {
-  return class RecordStepClass implements Step<void> {
-    getStepType(): string {
-      return spec.stepType;
-    }
-    waitFor(): Wait {
-      return Wait.skipImmediately();
-    }
-    execute(context: Context): StepDecision {
-      writeFence(context, spec.fence);
-      writeRecordEvent(context, spec.stepId, context.attempt, spec.identity);
-      if (spec.route !== undefined) return spec.route(context);
-      return gracefulComplete(undefined);
-    }
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -667,14 +549,3 @@ export function envelopeStartMarker<I>(spec: StartMarkerSpec<I>): EnvelopeStepCl
   });
   return markerClass;
 }
-
-/** Convenience for chaining: startStep + otherSteps in registration order. */
-export function stepListOf<I>(
-  start: Step<I>,
-  ...others: ReadonlyArray<Step<any>>
-): StepList<I> {
-  return StepList.startStep(start).otherSteps(...others);
-}
-
-/** Type-only helper so flows can implement Flow<I> without importing dex. */
-export type { Step, StepClass, StepList };

@@ -30,6 +30,7 @@ import {
   fileFromIdentity,
   isFiredKill,
   isModelCallingRole,
+  isStartMarker,
   PREP_SPEC_FILE,
   sanitizeFileKey,
   type CitationCheckResult,
@@ -96,18 +97,6 @@ export interface MetricsRenderInput {
   legacyFlowKeyedEnvelopes?: boolean;
   /** Optional UTC ISO-8601 stamp for the report header (supplied by the caller). */
   generatedAt?: string;
-}
-
-export interface DispatchAnchorSummary {
-  ok: boolean;
-  failures: string[];
-  envelopes_anchored: number;
-  /** Distinct step execution attempts (history events of one execution collapse). */
-  dispatch_entries_total: number;
-  non_agent_dispatch_entries: number;
-  unexplained_dispatch_entries: number;
-  model_steps_missing_start_marker: number;
-  groups: DispatchAnchorResult["groups"];
 }
 
 export interface ReportJson {
@@ -242,7 +231,7 @@ export interface ReportJson {
   /** Malformed sidecar lines / events excluded as another run's; null = clean or no sidecar. */
   kill_event_diagnostics: KillEventDiagnostics | null;
   /** Present only when `history` was supplied to the renderer. */
-  dispatch_anchor: DispatchAnchorSummary | null;
+  dispatch_anchor: DispatchAnchorResult | null;
 }
 
 export interface RenderedReport {
@@ -267,7 +256,7 @@ export function validateProvenance(envelopes: readonly EnvelopeEvent[]): string[
       failures.push(`envelope ${env.stepId} has attempt ${env.attempt} < 0`);
       continue;
     }
-    if (env.attempt === 0) {
+    if (isStartMarker(env)) {
       if (tokens !== null) {
         failures.push(`envelope ${env.stepId} is an attempt-0 start marker but carries token usage`);
       }
@@ -404,19 +393,6 @@ function summarizeJevUsage(entries: readonly JevUsageEntry[]): ReportJson["jev_u
   };
 }
 
-function summarizeAnchor(anchor: DispatchAnchorResult): DispatchAnchorSummary {
-  return {
-    ok: anchor.ok,
-    failures: anchor.failures,
-    envelopes_anchored: anchor.envelopes_anchored,
-    dispatch_entries_total: anchor.dispatch_entries_total,
-    non_agent_dispatch_entries: anchor.non_agent_dispatch_entries,
-    unexplained_dispatch_entries: anchor.unexplained_dispatch_entries,
-    model_steps_missing_start_marker: anchor.model_steps_missing_start_marker,
-    groups: anchor.groups,
-  };
-}
-
 function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck | null): ReportJson {
   const { envelopes, verdicts, burnDown } = input;
   const noEvidence = envelopes.length === 0;
@@ -511,7 +487,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   }
   const fileRoleAggs = new Map<string, FileRoleAgg>();
   for (const env of envelopes) {
-    if (env.attempt === 0) continue; // M4 start markers are not step work
+    if (isStartMarker(env)) continue; // M4 start markers are not step work
     const file = envelopeTarget(env, canonicalFile)?.file ?? "(flow)";
     const key = `${file}\u0000${env.role}`;
     let agg = fileRoleAggs.get(key);
@@ -556,7 +532,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   }
   const usageAggs = new Map<EnvelopeRole, UsageAgg>();
   for (const env of envelopes) {
-    if (env.attempt === 0 || !isModelCallingRole(env.role)) continue;
+    if (isStartMarker(env) || !isModelCallingRole(env.role)) continue;
     let agg = usageAggs.get(env.role);
     if (!agg) {
       agg = {
@@ -630,7 +606,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     if (!Number.isNaN(startedAt)) spanStart = spanStart === null ? startedAt : Math.min(spanStart, startedAt);
     const endedAt = env.ended_at === null ? Number.NaN : Date.parse(env.ended_at);
     if (!Number.isNaN(endedAt)) spanEnd = spanEnd === null ? endedAt : Math.max(spanEnd, endedAt);
-    if (env.attempt === 0) {
+    if (isStartMarker(env)) {
       startMarkerCount++;
       continue;
     }
@@ -647,7 +623,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   // envelope of a fixer that succeeded on attempt 3 is attempt 3 alone.
   const maxAttemptByTarget = new Map<string, Map<string, number>>();
   for (const env of envelopes) {
-    if (env.stepId !== FIXER_STEP_ID || env.attempt === 0) continue;
+    if (env.stepId !== FIXER_STEP_ID || isStartMarker(env)) continue;
     const file = envelopeTarget(env, canonicalFile)?.file;
     if (file === undefined) continue;
     const targets = maxAttemptByTarget.get(file) ?? new Map<string, number>();
@@ -779,7 +755,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     queue_burn_down: burnDownJson,
     kill_events: input.killEvents ?? null,
     kill_event_diagnostics: input.killEventDiagnostics ?? null,
-    dispatch_anchor: cross === null ? null : summarizeAnchor(cross.anchor),
+    dispatch_anchor: cross === null ? null : cross.anchor,
   };
 }
 

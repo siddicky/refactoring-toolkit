@@ -274,6 +274,5 @@ export function waveEntryRound(wave: Pick<WaveDispatchRecord, "round">, entry: P
 
 export function baseInputOf(out: WaveDispatchOutput): PortRunInput {
   const { mode: _mode, ...rest } = out;
-  void _mode;
   return rest;
 }

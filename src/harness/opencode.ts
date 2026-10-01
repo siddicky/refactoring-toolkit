@@ -276,7 +276,7 @@ export interface SessionRef {
   title: string;
 }
 
-export const DEFAULT_OPENCODE_BASE_URL = "http://127.0.0.1:4096";
+const DEFAULT_OPENCODE_BASE_URL = "http://127.0.0.1:4096";
 
 /** How long probe() waits for the server to answer `session.list`. */
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;

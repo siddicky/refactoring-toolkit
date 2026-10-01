@@ -103,7 +103,7 @@ export function normalizeTokens(raw: unknown): number | null {
 }
 
 /** Wave-5 cost honesty: the provider usage split, when the envelope carries it. */
-export function parseUsageSplit(raw: unknown): UsageSplitView | null {
+function parseUsageSplit(raw: unknown): UsageSplitView | null {
   if (raw === null || typeof raw !== "object") return null;
   const rec = raw as Record<string, unknown>;
   const input = rec.input_tokens;
@@ -465,7 +465,7 @@ export interface ParsedLease {
 }
 
 /** Parses the pp-lease/pool record table ({[file]: LeaseRecord}). */
-export function parseLeases(value: unknown): ParsedLease[] {
+function parseLeases(value: unknown): ParsedLease[] {
   if (value === null || typeof value !== "object") return [];
   const out: ParsedLease[] = [];
   for (const rec of Object.values(value as Record<string, unknown>)) {
@@ -528,7 +528,7 @@ function worktreeName(path: string): string {
  * Path identity across sources: lease records say `/tmp/x` while macOS git
  * reports the resolved `/private/tmp/x`. Compare on the stripped form.
  */
-export function normPath(path: string): string {
+function normPath(path: string): string {
   let p = path.replace(/\/+$/, "");
   if (p.startsWith("/private/")) p = p.slice("/private".length);
   return p;
@@ -911,7 +911,7 @@ export interface DashboardInput {
   commitLimit: number;
 }
 
-export function statusOf(available: boolean, error: string | null, detail: string | null): SourceStatus {
+function statusOf(available: boolean, error: string | null, detail: string | null): SourceStatus {
   return { available, error, detail };
 }
 

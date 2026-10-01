@@ -25,7 +25,7 @@ export function portFlowFiles(): string[] {
 }
 
 /** The text of each port-flow module, keyed by repo-relative path. */
-export function portFlowSources(): Record<string, string> {
+function portFlowSources(): Record<string, string> {
   return Object.fromEntries(portFlowFiles().map((rel) => [rel, readFileSync(join(REPO_ROOT, rel), "utf8")]));
 }
 

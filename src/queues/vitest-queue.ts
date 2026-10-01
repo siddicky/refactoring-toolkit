@@ -458,14 +458,14 @@ export interface NaiveClassifierOptions extends ClassifierRoots {
   unknown?: FailureClass;
 }
 
-export const DEFAULT_PORTED_ROOTS: readonly string[] = ["src"];
+const DEFAULT_PORTED_ROOTS: readonly string[] = ["src"];
 /**
  * US-010: empty by default (legacy behavior — test dirs belong to the fixture
  * bucket). The flow passes the ported test roots derived from the prep source
  * map so failures limited to a PORTED test file route to that file's fix round.
  */
-export const DEFAULT_PORTED_TEST_ROOTS: readonly string[] = [];
-export const DEFAULT_FIXTURE_ROOTS: readonly string[] = [
+const DEFAULT_PORTED_TEST_ROOTS: readonly string[] = [];
+const DEFAULT_FIXTURE_ROOTS: readonly string[] = [
   "tests",
   "test",
   "__tests__",

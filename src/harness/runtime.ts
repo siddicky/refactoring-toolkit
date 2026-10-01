@@ -251,7 +251,7 @@ export interface HunkBodyRange {
  * header line itself is therefore OUTSIDE every range and a hunk's last body
  * line is INSIDE it. Hunk ids are `h1..hN` in header order.
  */
-export function hunkBodyRanges(lines: readonly string[]): HunkBodyRange[] {
+function hunkBodyRanges(lines: readonly string[]): HunkBodyRange[] {
   const ranges: HunkBodyRange[] = [];
   let open: { id: string; from: number } | undefined;
   for (let i = 0; i < lines.length; i++) {
@@ -516,7 +516,7 @@ export function extractCodeFence(text: string, hint = ""): string {
  * without a complete outer block throws (dex retries) instead of yielding a
  * nested code block or a truncated spec.
  */
-export function extractMarkdownFence(text: string): string {
+function extractMarkdownFence(text: string): string {
   const lines = text.split("\n").map((l) => l.replace(/\r$/, ""));
   const openers: Array<{ index: number; fence: string; lang: string }> = [];
   lines.forEach((line, index) => {

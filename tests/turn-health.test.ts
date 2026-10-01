@@ -32,7 +32,7 @@ import { isDemotedAttempt } from "../src/harness/lanes.js";
 import { demoteReviewerLane } from "../src/harness/runtime.js";
 import {
   configureEnvelopeStreamPublisher,
-  envelopeStep,
+  envelopeStepClass,
   type EnvelopeStreamMessage,
 } from "../flows/steps/envelope.js";
 import { stagingContext } from "./support/dex-context.js";
@@ -286,12 +286,12 @@ describe("reviewer-lane demotion policy (pure f(attempt))", () => {
 describe("envelope telemetry stream (US-002)", () => {
   const fakeContext = () => stagingContext({ flowId: "gate-outage-flow" });
 
-  const step = envelopeStep<{ n: number }, { n: number }>({
+  const step = new (envelopeStepClass<{ n: number }, { n: number }>({
     stepType: "ProbeStreamOutage",
     stepId: "pp-stream-outage",
     role: "record",
     inner: async (_ctx, input) => ({ output: { n: input.n }, tokens: null }),
-  });
+  }))();
 
   afterEach(() => {
     configureEnvelopeStreamPublisher(undefined);

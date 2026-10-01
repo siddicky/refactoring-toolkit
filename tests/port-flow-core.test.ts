@@ -219,7 +219,6 @@ describe("C01: dispatchMode survives Release -> Bootstrap -> Dispatch", () => {
     seedAttribute(stores, ppConfig, "config", { maxRounds: 4, prepMaxRounds: 2 });
     seedAttribute(stores, ppQueue, "queue", { pending: ["src/B.php"], current: null, done: [], blocked: [] } satisfies PortQueueState);
     const { dispatchMode: _dropped, ...parallelInput } = input;
-    void _dropped;
 
     const next = nextOf(await run(stores, flow.dispatch, parallelInput));
     expect(next.step).toBe(flow.waveDispatch.constructor);

@@ -202,7 +202,7 @@ export function readKillEventsFile(
 }
 
 /** The renderer's KillEventsFile for a parse result, or null when no event survived. */
-export function killEventsFileOf(result: KillEventsParseResult, runId: string): KillEventsFile | null {
+function killEventsFileOf(result: KillEventsParseResult, runId: string): KillEventsFile | null {
   return result.events.length > 0 ? { run_id: runId, events: result.events } : null;
 }
 

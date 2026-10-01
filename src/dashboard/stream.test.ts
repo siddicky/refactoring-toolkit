@@ -93,8 +93,7 @@ function deferredReader(): {
     if (queue !== undefined && queue.length === 0) pending.delete(flowId);
     return entry;
   };
-  const read: EnvelopeStreamReader = (flowId, resumeToken, timeoutMs) => {
-    void resumeToken;
+  const read: EnvelopeStreamReader = (flowId, _resumeToken, timeoutMs) => {
     (timeouts[flowId] ??= []).push(timeoutMs);
     return new Promise((resolve, reject) => {
       pending.set(flowId, [...(pending.get(flowId) ?? []), { resolve, reject }]);

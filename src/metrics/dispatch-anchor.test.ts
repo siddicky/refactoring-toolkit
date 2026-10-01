@@ -52,7 +52,7 @@ function entry(
 }
 
 /** A minimal consistent per-file model execution: marker + attempt-N envelope. */
-function modelExecution(stepId: string, stepType: string, identity: string, attempt: number): EnvelopeEvent[] {
+function modelExecution(stepId: string, identity: string, attempt: number): EnvelopeEvent[] {
   const role = stepId === "pp-review-a" || stepId === "pp-review-b" ? "review" : "agent";
   const out: EnvelopeEvent[] = [
     envelope({ stepId, role, attempt: 0, outcome: "interrupted", ended_at: null, tokens: null, wall_clock_ms: null, identity }),
@@ -156,7 +156,7 @@ describe("identity + step table helpers", () => {
 
 describe("anchorDispatch — clean mappings", () => {
   test("retry fan-out: 1 envelope (final attempt) : N dispatch entries anchors clean", () => {
-    const envelopes = modelExecution("pp-implement", "PpImplement", "src__X.php#1", 2);
+    const envelopes = modelExecution("pp-implement", "src__X.php#1", 2);
     const entries = [
       entry("PpImplementStart", 1, "src__X.php#1"),
       entry("PpImplement", 1, "src__X.php#1"),
@@ -227,7 +227,7 @@ describe("anchorDispatch — clean mappings", () => {
 
 describe("anchorDispatch — failures", () => {
   test("envelope without a dispatch entry of matching type fails", () => {
-    const envelopes = modelExecution("pp-implement", "PpImplement", "src__X.php#1", 1);
+    const envelopes = modelExecution("pp-implement", "src__X.php#1", 1);
     const result = anchorDispatch(envelopes, [entry("PpImplementStart", 1, "src__X.php#1")]);
     expect(result.ok).toBe(false);
     expect(
@@ -248,7 +248,7 @@ describe("anchorDispatch — failures", () => {
   });
 
   test("dispatch finalAttempt beyond the envelope attempt fails (lost envelope for the final attempt)", () => {
-    const envelopes = modelExecution("pp-review-a", "PpReviewA", "src__Y.php#1", 1);
+    const envelopes = modelExecution("pp-review-a", "src__Y.php#1", 1);
     const entries = [
       entry("PpReviewAStart", 1, "src__Y.php#1"),
       entry("PpReviewA", 2, "src__Y.php#1"),
@@ -263,7 +263,7 @@ describe("anchorDispatch — failures", () => {
   });
 
   test("envelope attempt exceeding every dispatched finalAttempt fails", () => {
-    const envelopes = modelExecution("pp-fixer", "PpFixer", "src__Z.php#1", 3);
+    const envelopes = modelExecution("pp-fixer", "src__Z.php#1", 3);
     const entries = [
       entry("PpFixerStart", 1, "src__Z.php#1"),
       entry("PpFixer", 1, "src__Z.php#1"),
@@ -280,8 +280,8 @@ describe("anchorDispatch — failures", () => {
 
   test("identity-keyed reconciliation across files: a missing dispatch for one file fails only that identity", () => {
     const envelopes = [
-      ...modelExecution("pp-implement", "PpImplement", "src__A.php#1", 1),
-      ...modelExecution("pp-implement", "PpImplement", "src__B.php#1", 1),
+      ...modelExecution("pp-implement", "src__A.php#1", 1),
+      ...modelExecution("pp-implement", "src__B.php#1", 1),
     ];
     const entries = [
       entry("PpImplementStart", 1, "src__A.php#1"),
@@ -316,7 +316,7 @@ describe("anchorDispatch — failures", () => {
 
   test("marker dispatch entry without its attempt-0 marker envelope fails (presence, not equality)", () => {
     const result = anchorDispatch(
-      modelExecution("pp-implement", "PpImplement", "src__X.php#1", 1),
+      modelExecution("pp-implement", "src__X.php#1", 1),
       [
         entry("PpImplement", 1, "src__X.php#1"),
         entry("PpImplementStart", 1, "src__W.php#9"), // marker dispatched for another identity

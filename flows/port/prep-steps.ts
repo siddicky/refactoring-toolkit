@@ -373,8 +373,6 @@ export const PrepVerdictCheckStep: EnvelopeStepClass<PortRunInput> = envelopeSte
     ppPrepFindings.set(ctx, "findings", kept);
     // Counter ownership lives in PrepLoopDecision (single place decides a
     // revision; the increment rides with that decision — no double-count).
-    void state;
-    void config;
     return { output: input, tokens: null, outcome: kept.findings.length > 0 ? "completed" : "skipped" };
   },
   route: (_ctx, _input, input) => goTo(PrepLoopDecisionStep, input),

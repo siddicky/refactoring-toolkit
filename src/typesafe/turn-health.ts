@@ -3,7 +3,7 @@
  *
  * When a turn's shape is AMBIGUOUS (parseable-length output that fails verdict
  * extraction — the 885-token unparseable case from BUILD_NOTES §WAVE-4 p4-10 —
- * or, once US-006 lands, a discarded verdict), ONE Jev systemOne call runs a
+ * or a discarded verdict), ONE Jev systemOne call runs a
  * four-noul battery over the observed shape and the result is recorded as
  * evidence. The battery NEVER fires on shape-trivial turns: healthy parsed
  * verdicts, the US-002 Tier-0 degenerate no-text signature, and aborted turns
@@ -40,31 +40,22 @@ import {
   type TurnDiagnosis,
   type TurnHealthAssessmentInput,
   type TurnHealthAssessor,
-  type TurnObservation,
 } from "../metrics/types.js";
 
-// Import-boundary sentinel (US-003 AC): the boundary test spawns a fresh
-// process that imports the control-flow modules and asserts this module was
-// NEVER loaded (flag false), plus a positive control importing this file.
-const BOUNDARY_GLOBAL = globalThis as { __turnHealthModuleLoaded?: boolean };
-BOUNDARY_GLOBAL.__turnHealthModuleLoaded = true;
-
 /** The four Tier-1 questions (noul battery; one systemOne call, no more). */
-export const TURN_HEALTH_QUESTION_NAMES = [
+const TURN_HEALTH_QUESTION_NAMES = [
   "degenerate_output",
   "reasoning_without_text",
   "truncation_risk",
   "provider_flap_signature",
 ] as const;
 
-export type TurnHealthQuestionName = (typeof TURN_HEALTH_QUESTION_NAMES)[number];
-
 /**
  * The noul battery. Each question asks for the probability that the named
  * failure mode explains/characterizes the observed turn — evidence for the
  * report's §Turn-diagnosis table, never a routing input.
  */
-export function turnHealthQuestions(): Questions {
+function turnHealthQuestions(): Questions {
   return {
     degenerate_output: {
       type: "noul",
@@ -106,46 +97,12 @@ export function turnHealthQuestions(): Questions {
 }
 
 /**
- * Pure shape classifier over the OBSERVED reply (zero Jev, zero I/O). The
- * classification order mirrors the harness seam: abort first (recovery path),
- * then missing usage (provenance), then the Tier-0 degenerate signature
- * (usage-present + no text), then the verdict outcome for text-carrying turns.
- */
-export function observeTurnShape(input: {
-  usagePresent: boolean;
-  text: string;
-  aborted: boolean;
-  /** Verdict extraction attempted and succeeded? (false = extraction failed) */
-  verdictExtracted: boolean;
-  /** Verdict extracted but discarded (US-006 repair-or-discard; today false). */
-  verdictDiscarded?: boolean | undefined;
-  outputTokens: number | null;
-  reasoningTokens: number | null;
-  errorMessage: string | null;
-}): TurnObservation {
-  let shape: TurnObservation["shape"];
-  if (input.aborted) shape = "aborted";
-  else if (!input.usagePresent) shape = "no-usage";
-  else if (input.text.length === 0) shape = "tier0-degenerate";
-  else if (input.verdictDiscarded === true) shape = "discarded-verdict";
-  else if (input.verdictExtracted) shape = "parsed";
-  else shape = "unparseable-text";
-  return {
-    shape,
-    output_tokens: input.outputTokens,
-    reasoning_tokens: input.reasoningTokens,
-    text_chars: input.text.length,
-    error: input.errorMessage,
-  };
-}
-
-/**
  * Runs the Tier-1 battery. ZERO client calls unless the shape is ambiguous
  * (AC-B1); one systemOne call otherwise; null (no diagnosis) on ANY client
  * failure — Tier-1 unavailability degrades to no-diagnosis and never throws
  * into the caller's failure path (AC-B3).
  */
-export async function assessTurnHealth(
+async function assessTurnHealth(
   client: JudgmentClient,
   input: TurnHealthAssessmentInput,
 ): Promise<TurnDiagnosis | null> {
@@ -202,7 +159,7 @@ export async function assessTurnHealth(
  * reported as live Jev usage). Fixed mid-range probabilities make offline
  * diagnosis records unmistakably scripted.
  */
-export const turnHealthOfflineResponder: InMemoryResponder = () => ({
+const turnHealthOfflineResponder: InMemoryResponder = () => ({
   degenerate_output: { type: "noul", noul: 0.1 },
   reasoning_without_text: { type: "noul", noul: 0.2 },
   truncation_risk: { type: "noul", noul: 0.6 },
@@ -217,7 +174,7 @@ function assessorFromClient(client: JudgmentClient): TurnHealthAssessor {
 
 /**
  * Env-aware factory for the runner wiring (scripts/run-demo.ts worker), same
- * seam rules as src/typesafe/client.ts createJevClient:
+ * seam rules as src/typesafe/client.ts (offline double / real client / none):
  * - TYPESAFE_OFFLINE=1 -> in-memory double + scripted responder (offline
  *   diagnosis evidence, model "in-memory-double");
  * - TYPESAFE_API_KEY present -> the REAL billed client;

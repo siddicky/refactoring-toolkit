@@ -24,7 +24,7 @@ export const DRAIN_PAGE_SIZE = 100;
  * retained envelope count; a server that never exhausts `nextPageToken` must
  * not hang the arm.
  */
-export const DEFAULT_MAX_DRAIN_PAGES = 500;
+const DEFAULT_MAX_DRAIN_PAGES = 500;
 
 /** One retained message as the drain needs it (structural; SDK-free). */
 export interface RetainedMessage {

@@ -6,13 +6,10 @@ import { describe, expect, test } from "bun:test";
 import {
   buildTscQueueState,
   capErrorsPerFile,
-  emptyBurnDown,
   parseTscDiagnostics,
   parseTscOutput,
   parseTscQueueState,
-  recordBurnDown,
   tscOutcomeFromRun,
-  type BurnDownSeries,
   type TscProcessRun,
   type TscQueueState,
 } from "./tsc-queue.js";
@@ -102,25 +99,6 @@ describe("tsc-queue", () => {
     const restored = JSON.parse(JSON.stringify(state)) as TscQueueState;
     // JSON round-trip preserves state exactly
     expect(restored).toStrictEqual(state);
-  });
-
-  test("burn-down records counts per iteration and replaces repeats", () => {
-    let series: BurnDownSeries = emptyBurnDown();
-    expect(series.entries).toStrictEqual([]);
-
-    series = recordBurnDown(series, 0, 12);
-    series = recordBurnDown(series, 1, 7);
-    series = recordBurnDown(series, 2, 0);
-    expect(series.entries.map((e) => [e.iteration, e.errorCount])).toStrictEqual([
-      [0, 12],
-      [1, 7],
-      [2, 0],
-    ]);
-
-    // Re-running the queue step for iteration 1 replaces, never duplicates.
-    series = recordBurnDown(series, 1, 5);
-    expect(series.entries.length).toBe(3);
-    expect(series.entries[1]).toStrictEqual({ iteration: 1, errorCount: 5 });
   });
 
   test("C06: global (file-less) diagnostics are counted, never glued onto a located record", () => {

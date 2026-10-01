@@ -165,14 +165,9 @@ export const TYPESAFE_ENV_VARS = {
   offline: "TYPESAFE_OFFLINE",
 } as const;
 
-/**
- * Read an env var without importing node typings (this slice must typecheck
- * standalone before the repo-root toolchain lands). Bun/Node both expose
- * `process` on globalThis.
- */
+/** Reads an env var at call time (never cached), so a test can change it between calls. */
 function readEnv(name: string): string | undefined {
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  return proc?.env?.[name];
+  return process.env[name];
 }
 
 /**

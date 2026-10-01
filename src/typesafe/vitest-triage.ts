@@ -37,7 +37,7 @@ import {
 import { choice } from "./client.js";
 
 /** The choice question name (single question per systemOne call). */
-export const VITEST_TRIAGE_QUESTION = "failure_attribution";
+const VITEST_TRIAGE_QUESTION = "failure_attribution";
 
 /** Jev triage options: optional model override + usage sink. */
 export interface JevTriageOptions {

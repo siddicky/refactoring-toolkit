@@ -212,7 +212,7 @@ export interface WatcherResult {
 }
 
 /** Practical floor of a stream read wait: whole seconds (SDK), 0 = server default. */
-export const DEFAULT_CATCH_UP_TIMEOUT_MS = 1_000;
+const DEFAULT_CATCH_UP_TIMEOUT_MS = 1_000;
 
 const DEFAULT_NOW = () => Date.now();
 const DEFAULT_SLEEP = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -221,7 +221,7 @@ const DEFAULT_SLEEP = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)
 const PROBE_FAILURE_LOG_EVERY = 10;
 
 /** Default wall-clock budget of the kill-gating flow-status probe. */
-export const DEFAULT_STATUS_GATE_TIMEOUT_MS = 500;
+const DEFAULT_STATUS_GATE_TIMEOUT_MS = 500;
 
 /** Distinguishes "the probe ran out of budget" from every real status. */
 const GATE_TIMED_OUT = Symbol("status gate timed out");

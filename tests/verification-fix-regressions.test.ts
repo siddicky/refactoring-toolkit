@@ -86,8 +86,7 @@ describe("C1: cross-branch dedup must ship the committed round to integration", 
     // THIS round's branch, then integration ships it.
     const reach = await makeCommitReachable(spare.lease.worktreePath, keyed);
     expect(["fast-forward", "merge", "already"]).toContain(reach);
-    const itg = await mergeLeaseIntoIntegration(root, integrationWt, spare.lease.branch);
-    void itg;
+    await mergeLeaseIntoIntegration(root, integrationWt, spare.lease.branch);
     const present = (await git(integrationWt).tryRun(["cat-file", "-e", `HEAD:${FILE}`])).ok;
     expect(present).toBe(true); // the committed round NOW lands
     expect(await keyedCommitIntegrated(integrationWt, keyed)).toBe(true);
@@ -235,7 +234,7 @@ new file mode 100644
     expect(firstBodyLine).toBe(DIFF_HEADER_LINES + 1);
     const citedLine = rendered.block.split("\n").indexOf("+export const first = 1;") + 1;
     expect(citedLine).toBe(DIFF_HEADER_LINES + 6);
-    const evidence = resolveEvidenceFor(rendered.block, diff, citedLine);
+    const evidence = resolveEvidenceFor(diff, citedLine);
     expect(evidence).not.toBeNull();
     expect(evidence?.quote).toBe("export const first = 1;");
     expect(evidence?.hunk_id).toBe("h1");
@@ -244,8 +243,7 @@ new file mode 100644
 
 // Local wrapper mirroring the flow's call path (parsedDiff + offset).
 import { parseUnifiedDiff, resolveEvidence } from "../src/harness/runtime.js";
-function resolveEvidenceFor(block: string, diff: string, blockLine: number) {
-  void block;
+function resolveEvidenceFor(diff: string, blockLine: number) {
   const parsed = parseUnifiedDiff(diff);
   return resolveEvidence(
     { start_line: blockLine, end_line: blockLine, snippet: "export const first = 1;" },

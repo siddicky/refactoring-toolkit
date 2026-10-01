@@ -29,7 +29,7 @@ import {
   fileFromIdentity,
   identityKeyOf,
   isModelCallingRole,
-  type ModelCallingRole,
+  isStartMarker,
 } from "./types.js";
 
 export { fileFromIdentity, identityKeyOf };
@@ -251,7 +251,7 @@ export function specsForStepId(stepId: string): PortStepSpec[] {
 }
 
 /** True when the step type is a known dex non-agent kind (case-insensitive). */
-export function isNonAgentDexKind(stepType: string): boolean {
+function isNonAgentDexKind(stepType: string): boolean {
   return NON_AGENT_DEX_KINDS.includes(stepType.toLowerCase());
 }
 
@@ -414,7 +414,7 @@ export function anchorDispatch(
       );
       continue;
     }
-    const isMarker = env.attempt === 0;
+    const isMarker = isStartMarker(env);
     // The start mini-step's own envelope (`<target>:start`, role record, real
     // attempt) anchors under its marker spec: the dispatch entry IS the same
     // step execution that staged the attempt-0 marker.
@@ -465,7 +465,7 @@ export function anchorDispatch(
         const hasMarker = envelopes.some(
           (m) =>
             m.stepId === env.stepId &&
-            m.attempt === 0 &&
+            isStartMarker(m) &&
             (legacyFlowKeyed && env.identity === null ? true : m.identity === env.identity),
         );
         if (!hasMarker) {
@@ -600,10 +600,14 @@ export function anchorDispatch(
 // Integration entry (AC2 cross-check)
 // ---------------------------------------------------------------------------
 
-/** Combined AC2 cross-check result: envelope provenance + dispatch anchor. */
+/**
+ * AC2 cross-check result. {@link anchorForRun} fills it from the dispatch
+ * anchor alone; runProvenanceCrossCheck (render.ts) also folds in the
+ * envelope-internal provenance failures (validateProvenance).
+ */
 export interface ProvenanceCrossCheck {
   ok: boolean;
-  /** Envelope-internal provenance failures + dispatch anchoring failures. */
+  /** Dispatch anchoring failures, plus the envelope provenance failures when built by runProvenanceCrossCheck. */
   failures: string[];
   anchor: DispatchAnchorResult;
 }
@@ -618,8 +622,10 @@ export interface ProvenanceCrossCheck {
  *   envelope-event attribute values, src/metrics/types.ts EnvelopeEvent).
  * @param options - `requireStartMarkers` (default true) enforces M4 markers
  *   on model-calling envelopes.
- * @returns combined cross-check: `ok` is true only when the envelope stream
- *   passes provenance validation AND the typed 1:N dispatch mapping holds.
+ * @returns the dispatch-anchor cross-check: `ok` and `failures` cover the
+ *   typed 1:N envelope<->dispatch mapping ONLY. Envelope-internal provenance
+ *   (validateProvenance: missing token usage, time order) is not checked here;
+ *   runProvenanceCrossCheck in render.ts runs both.
  *
  * Example (worker-1b evidence run):
  * ```ts

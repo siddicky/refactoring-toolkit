@@ -17,7 +17,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Context } from "@superdurable/dex";
 
-import { agreementByFileRound, classifyAgreement, agreementForGroup } from "../src/metrics/agreement.js";
+import { agreementForGroup } from "../src/metrics/agreement.js";
 import { renderReport } from "../src/metrics/render.js";
 import { evaluateSuspicion, normalizeVerdictText } from "../src/metrics/suspicion.js";
 import type {
@@ -136,10 +136,9 @@ function record(
 
 describe("PRE-CHECK: agreement accepts one- and zero-reviewer rounds", () => {
   test("one-reviewer round -> unreviewed, surfaced with the observed count", () => {
-    const out = agreementByFileRound([record("f.php", "reviewer-A", 1, [])]);
-    expect(out.length).toBe(1);
-    expect(out[0]?.outcome).toBe("unreviewed");
-    expect(out[0]?.reason).toContain("found 1");
+    const out = agreementForGroup([record("f.php", "reviewer-A", 1, [])], "f.php", 1);
+    expect(out.outcome).toBe("unreviewed");
+    expect(out.reason).toContain("found 1");
   });
 
   test("zero-reviewer round -> unreviewed", () => {
@@ -148,8 +147,8 @@ describe("PRE-CHECK: agreement accepts one- and zero-reviewer rounds", () => {
     expect(out.reason).toContain("found 0");
   });
 
-  test("classifyAgreement with a missing side -> unreviewed (tombstoned reviewer = missing record)", () => {
-    expect(classifyAgreement(record("f.php", "reviewer-A", 1, []), null).outcome).toBe("unreviewed");
+  test("a missing side -> unreviewed (tombstoned reviewer = missing record)", () => {
+    expect(agreementForGroup([record("f.php", "reviewer-A", 1, [])], "f.php", 1).outcome).toBe("unreviewed");
   });
 });
 

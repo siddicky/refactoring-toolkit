@@ -11,7 +11,6 @@
  *   kill smokes (PORTING_KIT_FAULT env), same mechanism as the Phase 0 probe.
  */
 
-import { execFileSync } from "node:child_process";
 import type { JudgmentClient } from "../src/typesafe/client.js";
 import type { TurnHealthAssessor } from "../src/metrics/types.js";
 
@@ -65,25 +64,4 @@ export function crashPortWorker(where: string): never {
   console.error(`[fault-injection] deterministic SIGKILL at ${where} (pid ${process.pid})`);
   process.kill(process.pid, "SIGKILL");
   throw new Error(`unreachable after SIGKILL at ${where}`);
-}
-
-/**
- * Resolves tsc/vitest binaries for the toolkit-owned queue steps WITHOUT
- * network: prefers the toolkit's own node_modules (.bin) and falls back to
- * bare names. Used by scripts/flows that run queues on the integration
- * checkout; exported for tests.
- */
-export function queueBin(rootDir: string, name: "tsc" | "vitest"): string | null {
-  for (const candidate of [
-    `${rootDir}/node_modules/.bin/${name}`,
-    name,
-  ]) {
-    try {
-      execFileSync(candidate, ["--version"], { stdio: "ignore", timeout: 30_000 });
-      return candidate;
-    } catch {
-      // try next candidate
-    }
-  }
-  return null;
 }

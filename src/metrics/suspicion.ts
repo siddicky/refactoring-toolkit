@@ -35,7 +35,7 @@ export interface SuspicionResult {
 }
 
 /** Hard cap for the all-blockers arm: MORE than this many, ALL blocker. */
-export const ALL_BLOCKER_CAP = 5;
+const ALL_BLOCKER_CAP = 5;
 
 /**
  * Canonical text form of a verdict reply for the verbatim-repeat arm: a

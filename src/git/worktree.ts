@@ -375,8 +375,8 @@ export class WorktreePool {
 // Sole-committer: keyed commit + lookup + integration
 // ---------------------------------------------------------------------------
 
-export const OP_ID_TRAILER = "Operation-ID:";
-export const CONTENT_HASH_TRAILER = "Content-Hash:";
+const OP_ID_TRAILER = "Operation-ID:";
+const CONTENT_HASH_TRAILER = "Content-Hash:";
 
 /**
  * Stages and commits all changes in the worktree on its lease branch.
@@ -419,7 +419,7 @@ export async function commitLeaseChanges(
 }
 
 /** Parses the round out of an opId (`file#round`); -1 when unparseable (m1). */
-export function roundOfOpId(opId: OperationId): number {
+function roundOfOpId(opId: OperationId): number {
   const i = opId.lastIndexOf("#");
   if (i < 0) return -1;
   const n = Number.parseInt(opId.slice(i + 1), 10);

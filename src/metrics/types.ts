@@ -114,7 +114,7 @@ export type TurnShapeClass =
   | "parsed"
   /** Parseable-length text that FAILS verdict extraction (885-token case). */
   | "unparseable-text"
-  /** Verdict extracted but discarded (US-006 repair-or-discard lands later). */
+  /** Verdict extracted but discarded (US-006 repair-or-discard). */
   | "discarded-verdict";
 
 /** The observed shape of one turn — data only, no behavior. */
@@ -201,7 +201,7 @@ export interface TurnHealthAssessor {
 }
 
 /** Shape classes the Tier-1 noul battery may fire on (shape-ambiguous). */
-export const AMBIGUOUS_SHAPE_CLASSES: readonly TurnShapeClass[] = [
+const AMBIGUOUS_SHAPE_CLASSES: readonly TurnShapeClass[] = [
   "unparseable-text",
   "discarded-verdict",
 ];
@@ -339,12 +339,10 @@ export { fileFromIdentity, fileFromSanitizedKey, identityKeyOf, sanitizeFileKey 
  * fixtures"). This module re-exports it under the metrics-facing name so
  * downstream consumers keep one import surface.
  */
-import { SEVERITIES, type Severity } from "../../harness/agents/verdict-schema.js";
+import type { Severity } from "../../harness/agents/verdict-schema.js";
 import { isDemotedAttempt } from "../harness/lanes.js";
 
 export type SeverityClass = Severity;
-
-export const SEVERITY_CLASSES: readonly SeverityClass[] = SEVERITIES;
 
 /** Lower rank = more severe. Used by the naive severity-class rerank. */
 export const SEVERITY_RANK: Readonly<Record<SeverityClass, number>> = {

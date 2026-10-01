@@ -38,7 +38,7 @@ import {
 } from "../flows/port-project.js";
 import {
   configureEnvelopeStreamPublisher,
-  envelopeStep,
+  envelopeStepClass,
   type EnvelopeStreamMessage,
 } from "../flows/steps/envelope.js";
 import {
@@ -206,12 +206,12 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
 describe("bounded telemetry swallow (US-007): DexServiceError silent, defects loud, durable path safe", () => {
   const fakeContext = () => stagingContext({ flowId: "us007-wiring-flow" });
 
-  const step = envelopeStep<{ n: number }, { n: number }>({
+  const step = new (envelopeStepClass<{ n: number }, { n: number }>({
     stepType: "ProbeWiringSwallow",
     stepId: "pp-wiring-swallow",
     role: "record",
     inner: async (_ctx, input) => ({ output: { n: input.n }, tokens: null }),
-  });
+  }))();
 
   let warns: string[] = [];
   const originalWarn = console.warn;

@@ -244,7 +244,7 @@ export const FinalStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
   stepId: "pp-final",
   role: "record",
   stepOptions: { executeLoadAttributeMaps: [ppQueue, ppVerify] },
-  inner: async (ctx, input) => {
+  inner: async (ctx) => {
     const queue = ppQueue.get(ctx, "queue");
     const verify = ppVerify.get(ctx, "verify");
     return {
@@ -408,11 +408,6 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
     // Grouped errors feed the per-file fix loop: done files whose ported
     // output has queue errors get a FIX ROUND (round increment); files at the
     // round cap move to blocked (termination rule: caps OR empty queues).
-    const outPathToPhp = new Map<string, { file: string; round: number }>();
-    for (const d of queue.done) {
-      const outPath = prep?.sourceMap[d.file]?.outPath;
-      if (outPath !== undefined) outPathToPhp.set(stripDotSlash(outPath), { file: d.file, round: d.round });
-    }
     const errorCountByFile = errorCountsByOutput(tscState.errors, vitestState.classified);
     const { fixable, capped } = selectFixableFiles(
       queue.done,
