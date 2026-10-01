@@ -25,7 +25,7 @@ bun run fixtures/generate-creatorex.ts    # or: npx tsx fixtures/generate-creato
 ```
 
 Each run wipes its output directory first and rewrites every file. Pass
-`--out <dir>` to write somewhere else (the tests use a temp dir); the wipe is
+`--out <dir>` (or `--out=<dir>`) to write somewhere else (the tests use a temp dir; `--out` is the only option, and any other argument is an error); the wipe is
 refused for a non-empty directory that lacks the `GENERATED.txt` marker, so a
 wrong `--out` cannot delete a directory the generator does not own.
 

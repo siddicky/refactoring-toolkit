@@ -142,6 +142,33 @@ describe("generator --out handling", () => {
       expect(run.status).not.toBe(0);
       expect(run.stderr).toContain("--out requires a directory argument");
     });
+
+    // B28: `--out=<dir>` (the form every other CLI of the repository takes) was
+    // ignored, and the generator wiped and rewrote the committed tree instead.
+    /** mtime (ms) of every committed file: a rewrite changes them. */
+    const committedStamp = (): string =>
+      listFiles(spec.committed)
+        .map((rel) => `${rel}:${statSync(join(spec.committed, rel)).mtimeMs}`)
+        .join("\n");
+
+    test(`${spec.name}: --out=<dir> writes THERE and leaves the committed tree untouched`, () => {
+      const dir = join(mkdtempSync(join(scratch, "eq-")), "out");
+      const before = committedStamp();
+      const run = runGenerator(spec, [`--out=${dir}`]);
+      expect(run.status).toBe(0);
+      expect(listFiles(dir)).toEqual(listFiles(spec.committed));
+      expect(committedStamp()).toBe(before);
+    });
+
+    test(`${spec.name}: an unrecognised argument is a usage error and never touches the committed tree`, () => {
+      const before = committedStamp();
+      for (const args of [["--outdir", "/tmp/x"], ["--out="], ["stray"], ["--out", "/tmp/a", "--out=/tmp/b"], ["--out", "/tmp/a", "--verbose"]]) {
+        const run = runGenerator(spec, args);
+        expect([args, run.status === 0]).toEqual([args, false]);
+        expect(run.stderr).toMatch(/--out|unknown argument/);
+      }
+      expect(committedStamp()).toBe(before);
+    });
   }
 });
 

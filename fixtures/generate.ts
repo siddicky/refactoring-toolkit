@@ -32,17 +32,33 @@ const here = dirname(fileURLToPath(import.meta.url));
 const MARKER = "GENERATED.txt";
 
 /**
- * Output directory: `--out <dir>` (used by tests to regenerate into a temp
- * dir) or the committed fixtures/php-sample.
+ * Output directory: `--out <dir>` or `--out=<dir>` (used by tests to
+ * regenerate into a temp dir), or the committed fixtures/php-sample when no
+ * argument is given. `--out` is the only option: anything else is an error,
+ * because a spelling this scanner did not recognise (`--outdir`, `--out=`)
+ * used to fall back silently to wiping and rewriting the committed tree.
  */
 function resolveOutRoot(): string {
-  const i = process.argv.indexOf("--out");
-  if (i < 0) return join(here, "php-sample");
-  const value = process.argv[i + 1];
-  if (value === undefined || value === "" || value.startsWith("--")) {
-    throw new Error("--out requires a directory argument");
+  const args = process.argv.slice(2);
+  let out: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    let value: string | undefined;
+    if (arg === "--out") {
+      value = args[++i];
+      if (value === undefined || value === "" || value.startsWith("--")) {
+        throw new Error("--out requires a directory argument");
+      }
+    } else if (arg.startsWith("--out=")) {
+      value = arg.slice("--out=".length);
+      if (value === "") throw new Error("--out requires a directory argument");
+    } else {
+      throw new Error(`unknown argument ${JSON.stringify(arg)}: the only option is --out <dir>`);
+    }
+    if (out !== undefined) throw new Error("--out was given more than once");
+    out = value;
   }
-  return resolve(value);
+  return out === undefined ? join(here, "php-sample") : resolve(out);
 }
 
 /**
