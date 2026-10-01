@@ -103,7 +103,7 @@ bun run scripts/run-demo.ts demo \
   --max-rounds 2 --wait-minutes 30
 ```
 
-These paths and file names are examples, not defaults to reuse. `--dir` must be the root of an existing Git repository with at least one commit; a nonexistent `--dir` is an error. (`--init-fixture` creates a throwaway README-only fixture repository when the path does not exist, for demos and probes; it never touches an existing directory.) The agent must create the output repository and commit its initial manifest, configuration, and `PORTING.md` before dispatch, because worktrees need a committed baseline, and should exclude the runner's worktrees from it with `echo '.worktrees/' >> .git/info/exclude`. `--files` takes exact PHP paths relative to `--source-root`. Each needs an exact Markdown mapping row in `PORTING.md`, such as:
+These paths and file names are examples, not defaults to reuse. `--dir` must be the root of an existing Git repository with at least one commit; a nonexistent `--dir` is an error. (`--init-fixture` creates a throwaway README-only fixture repository when the path does not exist, for demos and probes; it never touches an existing directory.) The agent must create the output repository and commit its initial manifest, configuration, and `PORTING.md` before dispatch, because worktrees need a committed baseline, and should exclude the runner's worktrees from it with `(cd /absolute/path/to/output-git-repo && echo '.worktrees/' >> "$(git rev-parse --git-path info/exclude)")`. `--files` takes exact PHP paths relative to `--source-root`. Each needs an exact Markdown mapping row in `PORTING.md`, such as:
 
 ```md
 | PHP file | Proposed port target | Notes |

@@ -1,8 +1,9 @@
 /**
  * Doc-claims guard (audit C79 and the docs stage): the facts the operator-facing
  * docs state are checked against the code and package.json, so they cannot
- * drift apart silently. This reads text and imports constants; it never starts
- * a process.
+ * drift apart silently. This reads text and imports constants; the one thing it
+ * runs is the documented `.worktrees/` exclusion command, against a scratch
+ * repository (a command that only looks right was once documented in three places).
  *
  * - `.env.example` lists exactly the environment variables the code reads, with
  *   the defaults the code uses, and no internal build jargon.
@@ -18,7 +19,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
 import { RENDER_METRICS_EXIT } from "../scripts/render-metrics.js";
@@ -26,6 +30,7 @@ import { CHAOS_KILL_EXIT } from "../scripts/chaos-kill.js";
 import { JEV_SPOT_CHECK_EXIT } from "../scripts/jev-spot-check.js";
 import { RUN_DEMO_CLI, RUN_DEMO_EXIT } from "../scripts/run-demo.js";
 import { flagName } from "../src/cli/args.js";
+import { makeFixtureRepo } from "../src/git/fixture.js";
 import { configFromEnv, DEFAULT_KILL_EVENT_FILES, DEFAULT_BURN_DOWN_FILES } from "../src/dashboard/config.js";
 import { DEFAULT_MAX_CHILD_FLOWS, DEFAULT_MAX_FLOWS } from "../src/dashboard/flow-select.js";
 import { DEFAULT_WORKER_TARGET_ADDRESS, dexConfigFromEnv } from "../src/dex/client.js";
@@ -382,6 +387,50 @@ describe("doc claims: the fixed verification stack", () => {
   test("the skill and the runner reference say where the result lands and that merging needs authorization", () => {
     for (const text of [skill, runner]) {
       expect(missingFrom(text, ["`integration`", ".worktrees/", "info/exclude", "explicit authorization"])).toEqual([]);
+    }
+  });
+});
+
+describe("doc claims: the documented `.worktrees/` exclusion command (B25)", () => {
+  // The one place this guard runs a command: a command that only LOOKS right was
+  // documented in three places (`echo ... >> "$(git -C <dir> rev-parse --git-path
+  // info/exclude)"`): git prints a path relative to <dir>, so the redirect landed in
+  // the caller's directory and the output repository was never excluded.
+  const COMMAND = /`(\(cd [^ `]+ && echo '\.worktrees\/' >> "\$\(git rev-parse --git-path info\/exclude\)"\))`/;
+  const sh = (command: string, cwd: string) => spawnSync("sh", ["-c", command], { cwd, encoding: "utf8" });
+
+  test.each([README, SKILL, RUNNER])("%s: run from another directory, it excludes the OUTPUT repository and nothing else", async (doc) => {
+    const command = COMMAND.exec(readSource(doc))?.[1];
+    if (command === undefined) throw new Error(`${doc} does not document the exclusion command in the checked form`);
+    const root = await mkdtemp(join(tmpdir(), "doc-exclude-"));
+    try {
+      const output = join(root, "output repo");
+      const caller = join(root, "caller");
+      await makeFixtureRepo(output);
+      await makeFixtureRepo(caller);
+
+      const result = sh(command.replace(/cd [^ ]+/, `cd '${output}'`), caller);
+      expect(result.status).toBe(0);
+      expect(readFileSync(join(output, ".git", "info", "exclude"), "utf8")).toContain(".worktrees/");
+      expect(readFileSync(join(caller, ".git", "info", "exclude"), "utf8")).not.toContain(".worktrees/");
+      // and the exclusion does what the docs say: `.worktrees/` no longer shows as untracked
+      await mkdir(join(output, ".worktrees", "integration"), { recursive: true });
+      await writeFile(join(output, ".worktrees", "integration", "x.txt"), "x");
+      expect(sh("git status --porcelain", output).stdout).not.toContain(".worktrees");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the reason it is written this way: `git -C <dir> rev-parse --git-path` prints a path relative to <dir>", async () => {
+    const root = await mkdtemp(join(tmpdir(), "doc-exclude-rel-"));
+    try {
+      await makeFixtureRepo(join(root, "out"));
+      const printed = sh(`git -C '${join(root, "out")}' rev-parse --git-path info/exclude`, root).stdout.trim();
+      expect(printed.startsWith("/")).toBe(false);
+      expect(runner).toContain("prints a path relative to `<dir>`");
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
