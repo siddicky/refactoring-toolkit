@@ -17,7 +17,7 @@ The runner is not generic. These properties come from the code, so they decide w
 | Option | Meaning | Default |
 |---|---|---|
 | `--dir` | Output (target) Git repository root. Required. It must already exist and have at least one commit. A nonexistent `--dir` is an error. | none |
-| `--init-fixture` | Create a throwaway README-only fixture repository when `--dir` does not exist. An existing directory is never touched. For demos and probes only. | off |
+| `--init-fixture` | Create a throwaway README-only fixture repository when `--dir` does not exist. An existing directory is never touched. For demos and probes only; `round --dir` takes the same flag, because the Phase-0 probe expects exactly such a repository. | off |
 | `--source-root` | Directory holding the PHP files. | `fixtures/php-sample` (`fixtures/creatorex-middleware` for `--files creatorex`) |
 | `--prep` | Markdown file with the source-map rows, normally the target's `PORTING.md`. | `fixtures/stub-prep.md` (the creatorex `prep-stub.md` for `--files creatorex`) |
 | `--files` | Comma-separated PHP paths relative to `--source-root`, or `creatorex` (the 10-file fixture set). | `src/Money.php,src/Pricing/FlatRateDiscount.php` |
@@ -53,7 +53,7 @@ The parser takes a row whose first cell is a backticked path ending in `.php` an
 
 The integration checkout is provisioned and verified by toolkit code, not by an agent. A target that does not fit has to be rejected or the runner adapted before dispatch.
 
-- **Bootstrap** (once, at the first integration; `flows/port/bootstrap.ts`): writes or patches `package.json`, adds `node_modules/` to `.gitignore`, runs `bun install` in `<dir>/.worktrees/integration` (so `bun` must be on the worker's `PATH`; it has a 300 s limit, and a failure fails the step), and commits all of it on `integration`.
+- **Bootstrap** (at the first integration, and skipped once the checkout satisfies it; `flows/port/bootstrap.ts`): writes or patches `package.json`, makes sure `node_modules/` is in `.gitignore`, runs `bun install` in `<dir>/.worktrees/integration` when vitest is not installed there or `package.json` changed (so `bun` must be on the worker's `PATH`; it has a 300 s limit, and a failure fails the step), and commits what it changed on `integration`.
   - `package.json`: written if absent. If present, it is patched: `"type": "module"` is forced and **`scripts.test` is overwritten with `vitest run`**. `vitest` is added to `devDependencies` at `^3.2.4` only when no vitest entry exists. Other fields stay.
   - `tsconfig.json`: written only if absent (strict, `ES2022`, `Bundler` resolution, `noEmit`, `types: []`; `include` covers `src/`, `test/`, `tests/` and the top-level directory of each source-map target). An existing `tsconfig.json` is used as is.
   - `vitest.config.ts`: written only if absent (`include`: `test/**/*.test.ts` and `tests/**/*.test.ts`). An existing one is used as is.
@@ -64,7 +64,7 @@ So the runner cannot serve a target that needs Jest or another runner, pnpm or y
 
 ## Where the result lands
 
-Each run commits its output to a branch named `integration` of the output repository, checked out as a worktree at `<dir>/.worktrees/integration`. Per-file work happens in lease worktrees `<dir>/.worktrees/<file>-<epoch>` on branches `lease/<file>/<epoch>`. The checkout at `<dir>` and its default branch are not updated, and nothing merges `integration` into it.
+Each run commits its output to a branch named `integration` of the output repository, checked out as a worktree at `<dir>/.worktrees/integration`. Per-file work happens in lease worktrees `<dir>/.worktrees/<file>-<epoch>` on branches `lease/<file>/<epoch>` (`<file>` is the source path with `/` written as `__`). The checkout at `<dir>` and its default branch are not updated, and nothing merges `integration` into it.
 
 1. **Before dispatch**, exclude the worktrees from the output repository without touching its history: `echo '.worktrees/' >> "$(git -C <dir> rev-parse --git-path info/exclude)"`. Otherwise `.worktrees/` shows up as untracked in `<dir>` and a `git add -A` there stages other worktrees.
 2. **Verify and inspect** in `<dir>/.worktrees/integration`, or on the `integration` branch, never in the main checkout of `<dir>`.

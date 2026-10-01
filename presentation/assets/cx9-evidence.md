@@ -115,5 +115,5 @@ current output differs from them in these ways:
   `typecheck (tsc): NOT RUN (<reason>)` when type checking did not run.
 
 Compare regenerated numbers against these reports with that in mind.
-`final-test-gate.txt` is the test summary of an earlier build (356 tests in 30
-files); `bun test` now runs far more.
+[`final-test-gate.txt`](final-test-gate.txt) is the test summary of an earlier
+build (356 tests in 30 files), kept as history; `bun test` now runs far more.
