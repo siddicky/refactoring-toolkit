@@ -15,8 +15,23 @@
  * no-protection note so an operator never mistakes silence for safety.
  */
 
+import type { StringOption } from "../src/cli/args.js";
 import type { DexHistoryWire } from "../src/dashboard/types.js";
 import type { QueryResult } from "../src/dashboard/queries.js";
+
+/**
+ * The gate's one command-line input, declared here so every caller shares one
+ * definition: `run-demo.ts gate --flow-id <id>` and `run-demo.ts demo
+ * --gate-flow-id <id>` both build their option from it (this module has no
+ * argv of its own; it is imported by the runner). Omitting it is allowed: the
+ * gate then reports "degraded" and dispatch proceeds (fail-open).
+ */
+export const GATE_FLOW_ID_OPTION = {
+  kind: "string",
+  metavar: "id",
+  description:
+    "flow whose dexcli history the dispatch health gate reads (omitted: gate reports degraded, no protection; it never blocks)",
+} as const satisfies StringOption;
 
 /** Per-history-query timeout (spec: 5 s). */
 export const GATE_QUERY_TIMEOUT_MS = 5_000;

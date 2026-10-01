@@ -164,15 +164,15 @@ describe("launchDashboard", () => {
 describe("demo only launches the dashboard on request", () => {
   test("startDemo reaches launchDashboard only behind --dashboard and never spawns serve-status itself", () => {
     const src = readFileSync(join(import.meta.dir, "..", "scripts", "run-demo.ts"), "utf8");
-    const start = src.indexOf("async function startDemo()");
+    const start = src.indexOf("async function startDemo(");
     const end = src.indexOf("\n}\n", start);
     const body = src.slice(start, end);
-    expect(body).toContain('process.argv.includes("--dashboard")');
+    expect(body).toContain("if (options.dashboard)");
     expect(body).toContain("launchDashboard(dir)");
     expect(body).not.toContain("spawn(");
     expect(body).not.toContain("serve-status");
     // the launch sits inside the --dashboard guard, before the --start-only return
-    expect(body.indexOf('"--dashboard"')).toBeLessThan(body.indexOf("launchDashboard(dir)"));
-    expect(body.indexOf("launchDashboard(dir)")).toBeLessThan(body.indexOf('"--start-only"'));
+    expect(body.indexOf("options.dashboard")).toBeLessThan(body.indexOf("launchDashboard(dir)"));
+    expect(body.indexOf("launchDashboard(dir)")).toBeLessThan(body.indexOf("options.startOnly"));
   });
 });

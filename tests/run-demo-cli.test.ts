@@ -16,6 +16,7 @@ import { join } from "node:path";
 
 import {
   ensureProjectRepo,
+  parseRunDemoArgs,
   preflightDemoInputs,
   resolveDemoInputs,
 } from "../scripts/run-demo.js";
@@ -41,7 +42,19 @@ async function exists(p: string): Promise<boolean> {
   return stat(p).then(() => true, () => false);
 }
 
-const argv = (...a: string[]) => ["bun", "run-demo.ts", "demo", ...a];
+/** Parses `demo <flags>` through the shared layer and resolves the inputs (a usage error throws here). */
+function inputsFor(...flags: string[]) {
+  const parsed = parseRunDemoArgs(["demo", ...flags]);
+  if (!parsed.ok || parsed.command !== "demo") throw new Error(parsed.ok ? "not the demo command" : parsed.error);
+  return resolveDemoInputs(parsed.options);
+}
+
+/** The usage error for `demo <flags>`. */
+function usageError(...flags: string[]): string {
+  const parsed = parseRunDemoArgs(["demo", ...flags]);
+  if (parsed.ok) throw new Error("expected a usage error");
+  return parsed.error;
+}
 
 describe("resolveDemoInputs", () => {
   test("defaults resolve from the script location, not the cwd, and are absolute", () => {
@@ -49,7 +62,7 @@ describe("resolveDemoInputs", () => {
     const elsewhere = tmpdir();
     process.chdir(elsewhere);
     try {
-      const inputs = resolveDemoInputs(argv("--dir", "some/relative/dir"));
+      const inputs = inputsFor("--dir", "some/relative/dir");
       expect(inputs.prepPath).toBe(join(FIXTURES, "stub-prep.md"));
       expect(inputs.sourceRoot).toBe(join(FIXTURES, "php-sample"));
       expect(inputs.dir.startsWith("/")).toBe(true);
@@ -57,6 +70,7 @@ describe("resolveDemoInputs", () => {
       expect(inputs.files).toEqual(["src/Money.php", "src/Pricing/FlatRateDiscount.php"]);
       expect(inputs.epoch).toBe(1);
       expect(inputs.maxRounds).toBe(1);
+      expect(inputs.waitMinutes).toBe(30);
       expect(inputs.dispatchMode).toBe("parallel");
       expect(inputs.initFixture).toBe(false);
     } finally {
@@ -65,47 +79,48 @@ describe("resolveDemoInputs", () => {
   });
 
   test("`--files creatorex` implies the creatorex prep artifact and source root; explicit flags still win", () => {
-    const implied = resolveDemoInputs(argv("--dir", "/p", "--files", "creatorex"));
+    const implied = inputsFor("--dir", "/p", "--files", "creatorex");
     expect(implied.files.length).toBe(10);
     expect(implied.prepPath).toBe(join(FIXTURES, "creatorex-middleware", "prep-stub.md"));
     expect(implied.sourceRoot).toBe(join(FIXTURES, "creatorex-middleware"));
 
-    const explicit = resolveDemoInputs(
-      argv("--dir", "/p", "--files", "creatorex", "--prep", "/my/prep.md", "--source-root", "/my/src"),
+    const explicit = inputsFor(
+      "--dir", "/p", "--files", "creatorex", "--prep", "/my/prep.md", "--source-root", "/my/src",
     );
     expect(explicit.prepPath).toBe("/my/prep.md");
     expect(explicit.sourceRoot).toBe("/my/src");
   });
 
   test("--init-fixture is an explicit opt-in flag", () => {
-    expect(resolveDemoInputs(argv("--dir", "/p", "--init-fixture")).initFixture).toBe(true);
+    expect(inputsFor("--dir", "/p", "--init-fixture").initFixture).toBe(true);
   });
 
-  test("numeric and enum flags are validated", () => {
-    expect(() => resolveDemoInputs(["bun", "run-demo.ts", "demo"])).toThrow("--dir");
-    expect(() => resolveDemoInputs(argv("--dir", "/p", "--epoch", "abc"))).toThrow("--epoch must be a positive integer");
-    expect(() => resolveDemoInputs(argv("--dir", "/p", "--max-rounds", "0"))).toThrow("--max-rounds");
-    expect(() => resolveDemoInputs(argv("--dir", "/p", "--wait-minutes", "-3"))).toThrow("--wait-minutes");
-    expect(() => resolveDemoInputs(argv("--dir", "/p", "--dispatch", "weird"))).toThrow("--dispatch");
-    expect(resolveDemoInputs(argv("--dir", "/p", "--dispatch", "sequential", "--epoch", "4", "--max-rounds", "2")).epoch).toBe(4);
+  test("numeric and enum flags are validated by the parse (usage errors, never a thrown NaN)", () => {
+    expect(usageError()).toContain("--dir is required");
+    expect(usageError("--dir", "/p", "--epoch", "abc")).toContain("--epoch must be a whole number >= 1");
+    expect(usageError("--dir", "/p", "--max-rounds", "0")).toContain("--max-rounds must be a whole number >= 1");
+    expect(usageError("--dir", "/p", "--wait-minutes=-3")).toContain("--wait-minutes must be a whole number >= 1");
+    expect(usageError("--dir", "/p", "--dispatch", "weird")).toContain("--dispatch must be one of parallel, sequential");
+    const ok = inputsFor("--dir", "/p", "--dispatch", "sequential", "--epoch", "4", "--max-rounds", "2");
+    expect([ok.dispatchMode, ok.epoch, ok.maxRounds]).toEqual(["sequential", 4, 2]);
   });
 
   test("a value flag with no value (last argument, or followed by another flag) is an error, not a swallowed neighbour", () => {
-    expect(() => resolveDemoInputs(argv("--dir", "/p", "--files"))).toThrow("--files requires a value");
-    expect(() => resolveDemoInputs(argv("--dir", "/p", "--epoch", "--max-rounds", "2"))).toThrow("--epoch requires a value");
-    expect(() => resolveDemoInputs(argv("--dir"))).toThrow("--dir requires a value");
+    expect(usageError("--dir", "/p", "--files")).toBe("--files requires a value");
+    expect(usageError("--dir", "/p", "--epoch", "--max-rounds", "2")).toContain("--epoch requires a value");
+    expect(usageError("--dir")).toBe("--dir requires a value");
   });
 });
 
 describe("preflightDemoInputs", () => {
   test("the shipped default and creatorex combinations pass", async () => {
-    await preflightDemoInputs(resolveDemoInputs(argv("--dir", "/p")));
-    await preflightDemoInputs(resolveDemoInputs(argv("--dir", "/p", "--files", "creatorex")));
+    await preflightDemoInputs(inputsFor("--dir", "/p"));
+    await preflightDemoInputs(inputsFor("--dir", "/p", "--files", "creatorex"));
   });
 
   test("creatorex files against the php-sample prep/source root (the recorded cx-1/cx-2 mistake) fail up front, in ONE message", async () => {
-    const inputs = resolveDemoInputs(
-      argv("--dir", "/p", "--files", "creatorex", "--prep", join(FIXTURES, "stub-prep.md"), "--source-root", join(FIXTURES, "php-sample")),
+    const inputs = inputsFor(
+      "--dir", "/p", "--files", "creatorex", "--prep", join(FIXTURES, "stub-prep.md"), "--source-root", join(FIXTURES, "php-sample"),
     );
     const err = await preflightDemoInputs(inputs).catch((e: Error) => e);
     expect(err).toBeInstanceOf(Error);
