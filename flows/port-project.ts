@@ -1541,10 +1541,14 @@ const PrepStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput
   route: (_ctx, _input, out) => goTo(SymbolStart, out),
 });
 
-const DispatchStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
-  PortRunInput,
-  PortRunInput & { done: boolean }
->({
+/**
+ * DispatchStep output: `done` = the port queue is exhausted; `requeue` = this
+ * pass only recorded a blocked file (round cap) and must be followed by another
+ * dispatch pass for the files still pending.
+ */
+type DispatchOutput = PortRunInput & { done: boolean; requeue?: boolean };
+
+const DispatchStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput, DispatchOutput>({
   stepType: "PpDispatch",
   stepId: "pp-dispatch",
   role: "record",
@@ -1577,7 +1581,10 @@ const DispatchStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
         current: null,
       };
       ppQueue.set(ctx, "queue", blocked);
-      return { output: { ...input, done: false }, tokens: null, outcome: "skipped" };
+      // Not Lease: with current cleared LeaseStep reads "exhausted" and ends the
+      // run, silently abandoning every file still pending behind this one. Each
+      // blocked pass removes one file, so re-dispatching always terminates.
+      return { output: { ...input, done: false, requeue: true }, tokens: null, outcome: "skipped" };
     }
     if (action.kind === "start") {
       ppQueue.set(ctx, "queue", {
@@ -1591,7 +1598,9 @@ const DispatchStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     return { output: { ...input, done: action.kind === "done" }, tokens: null };
   },
   route: (_ctx, _input, out) => {
-    if (out.done) return goTo(QueueVerifyStep, out);
+    const { done, requeue, ...run } = out;
+    if (requeue === true) return goTo(DispatchStep, run);
+    if (done) return goTo(QueueVerifyStep, out);
     if ((out.dispatchMode ?? "parallel") !== "parallel") return goTo(LeaseStep, out);
     const portWave: WaveDispatchOutput = { ...out, mode: "port" };
     return goTo(WaveDispatchStep, portWave);
