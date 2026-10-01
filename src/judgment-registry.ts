@@ -72,8 +72,10 @@ export const JUDGMENT_REGISTRY: readonly JudgmentRegistryEntry[] = [
     judgment: "failureClass Choice",
     threshold: "naive default / Jev when key",
     effect: "routes failure to attributedFile in fix-round feed",
-    provenance: "envelope + queue attribute",
-    failOpen: "naive classifier (a mid-batch Jev failure re-runs the whole batch naive)",
+    provenance:
+      "envelope + queue attribute: pp-verify.vitestState (classified records) and pp-verify.vitestTriage (checker + fallback reason)",
+    failOpen:
+      "naive classifier (a mid-batch Jev failure re-runs the whole batch naive; checker 'naive-fallback' + reason recorded on pp-verify.vitestTriage and logged)",
     seamModule:
       "src/queues/vitest-queue.ts (Jev route: src/typesafe/vitest-triage.ts; wired in flows/port-project.ts classifyVitestRecords)",
   },

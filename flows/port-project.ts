@@ -302,6 +302,14 @@ export interface QueueVerifyState {
    * Absent on states persisted before C06 and on child by-value feeds.
    */
   tscRun?: TscRunAccounting;
+  /**
+   * Lane-B vitest-triage provenance: which classifier produced
+   * `vitestState.classified` — "jev", "naive", or "naive-fallback" with the
+   * reason live Jev was abandoned (a fail-open is otherwise invisible in the
+   * routing it changed). Absent on states persisted before it existed and on
+   * child by-value feeds.
+   */
+  vitestTriage?: VitestTriageRecord;
 }
 
 /** Phase 4: one burn-down sample (dashboard renders queue-burndown/*). */
@@ -749,11 +757,12 @@ export interface JevGateResult<T> {
  * re-bills the batch. The degradation is returned for the caller to record.
  */
 async function withJevFallback<T>(
+  gate: "citation-check" | "prioritize" | "vitest-triage",
   jev: JudgmentClient | undefined,
   live: (client: JudgmentClient) => Promise<T>,
-  naive: () => T,
+  naive: () => T | Promise<T>,
 ): Promise<JevGateResult<T>> {
-  if (jev === undefined) return { value: naive(), checker: "naive", fallbackReason: null, jevTokens: 0 };
+  if (jev === undefined) return { value: await naive(), checker: "naive", fallbackReason: null, jevTokens: 0 };
   const counting = countingJevClient(jev);
   try {
     const value = await live(counting.client);
@@ -763,8 +772,8 @@ async function withJevFallback<T>(
     // Failing open must not be silent: a persistent client/auth defect would
     // otherwise degrade the whole run to naive with no signal beyond the
     // durable pp-kept record.
-    console.warn(`[lane-b] live Jev failed; using the naive default (${fallbackReason})`);
-    return { value: naive(), checker: "naive-fallback", fallbackReason, jevTokens: counting.tokens() };
+    console.warn(`[lane-b] live Jev failed in ${gate}; using the naive default (${fallbackReason})`);
+    return { value: await naive(), checker: "naive-fallback", fallbackReason, jevTokens: counting.tokens() };
   }
 }
 
@@ -775,6 +784,7 @@ export function runCitationGate(
   jev: JudgmentClient | undefined,
 ): Promise<JevGateResult<CitationCheckResult[]>> {
   return withJevFallback(
+    "citation-check",
     jev,
     (client) => createCitationChecker(client).check(verdict, diff),
     () => naiveCitationCheck(verdict, diff),
@@ -787,6 +797,7 @@ export function runPrioritizeGate(
   jev: JudgmentClient | undefined,
 ): Promise<JevGateResult<MetricsFinding[]>> {
   return withJevFallback(
+    "prioritize",
     findings.length === 0 ? undefined : jev,
     (client) => createJevPrioritizer(client).prioritize(findings),
     () => naivePrioritize(findings),
@@ -796,50 +807,52 @@ export function runPrioritizeGate(
 // Vitest triage (Lane-B "vitest-triage", declared in src/judgment-registry.ts)
 // ---------------------------------------------------------------------------
 
+/** Which classifier produced a vitest queue's triage, and why live Jev was abandoned. */
+export interface VitestTriageRecord {
+  checker: JudgmentChecker;
+  fallbackReason: string | null;
+}
+
 /**
  * Queue-build triage for the parsed vitest records: Jev classifier when a
  * live client is injected (TYPESAFE_API_KEY), naive path-heuristic default
  * otherwise; Jev failing MID-batch fails open to the naive classifier (the
- * whole batch re-runs naive — no half-Jev state persists). Usage tokens are
- * surfaced through hooks.onUsage as each Jev call completes, so tokens spent
- * before a failure are still accounted. `roots` (US-010) carries the ported
- * source/test/fixture roots derived from the prep source map, so failures
- * limited to a PORTED TEST file classify port-caused and route to that file.
+ * whole batch re-runs naive — no half-Jev state persists). Failing open is
+ * not silent: the degradation is logged and reported through
+ * `hooks.onTriage` ({checker: "naive-fallback", fallbackReason}) for the
+ * caller to persist next to the queue state, like the citation gate's
+ * records. Usage tokens are surfaced through hooks.onUsage as each Jev call
+ * completes, so tokens spent before a failure are still accounted. `roots`
+ * (US-010) carries the ported source/test/fixture roots derived from the prep
+ * source map, so failures limited to a PORTED TEST file classify port-caused
+ * and route to that file.
  */
 export async function classifyVitestRecords(
   records: readonly VitestFailureRecord[],
   iteration: number,
   jev: JudgmentClient | undefined,
-  hooks: { onUsage?: (tokens: number) => void } = {},
+  hooks: { onUsage?: (tokens: number) => void; onTriage?: (triage: VitestTriageRecord) => void } = {},
   roots?: ClassifierRoots,
 ): Promise<VitestQueueState> {
   const naive = createNaiveClassifier(roots ?? {});
-  let state: VitestQueueState;
-  if (jev === undefined) {
-    state = await buildClassifiedVitestQueueState(records, iteration, naive);
-  } else {
-    const jevOptions: { onUsage?: (tokens: number) => void; roots?: ClassifierRoots } = {
-      ...(hooks.onUsage !== undefined ? { onUsage: hooks.onUsage } : {}),
-      ...(roots !== undefined ? { roots } : {}),
-    };
-    try {
-      state = await buildClassifiedVitestQueueState(
-        records,
-        iteration,
-        createJevFailureClassifier(jev, jevOptions),
-      );
-    } catch {
-      // Fail-open (Lane-B rule): Jev unavailable/erroring degrades to the
-      // deterministic naive classifier — never a hard step failure.
-      state = await buildClassifiedVitestQueueState(records, iteration, naive);
-    }
-  }
+  const jevOptions: { onUsage?: (tokens: number) => void; roots?: ClassifierRoots } = {
+    ...(hooks.onUsage !== undefined ? { onUsage: hooks.onUsage } : {}),
+    ...(roots !== undefined ? { roots } : {}),
+  };
+  const gate = await withJevFallback(
+    "vitest-triage",
+    jev,
+    (client) =>
+      buildClassifiedVitestQueueState(records, iteration, createJevFailureClassifier(client, jevOptions)),
+    () => buildClassifiedVitestQueueState(records, iteration, naive),
+  );
+  hooks.onTriage?.({ checker: gate.checker, fallbackReason: gate.fallbackReason });
   // `total` stays the TRUE failure count (burn-down honesty); the durable
   // per-record evidence is capped like the tsc error list.
   return {
-    ...state,
-    failures: state.failures.slice(0, VITEST_RECORD_CAP),
-    classified: state.classified.slice(0, VITEST_RECORD_CAP),
+    ...gate.value,
+    failures: gate.value.failures.slice(0, VITEST_RECORD_CAP),
+    classified: gate.value.classified.slice(0, VITEST_RECORD_CAP),
   };
 }
 
@@ -3186,9 +3199,13 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     const vitestNote = vitestRun.kind === "not-run" ? vitestRun.reason : null;
     const jevUsageSink: number[] = [];
     const roots = portedRootsFromSourceMap(prep?.sourceMap ?? {});
+    let vitestTriage: VitestTriageRecord | undefined;
     const vitestState = await classifyVitestRecords(vitestRecords, iteration, liveJevClient(), {
       onUsage: (tokens) => {
         jevUsageSink.push(tokens);
+      },
+      onTriage: (triage) => {
+        vitestTriage = triage;
       },
     }, roots);
     const vitestJevTokens = jevUsageSink.reduce((sum, t) => sum + t, 0);
@@ -3282,6 +3299,7 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
       vitestState,
       vitestRun,
       tscRun: tscOutcome.accounting,
+      ...(vitestTriage !== undefined ? { vitestTriage } : {}),
     });
     ppQueue.set(ctx, "queue", {
       ...queue,
