@@ -18,7 +18,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
 import { RENDER_METRICS_EXIT } from "../scripts/render-metrics.js";
@@ -43,6 +43,17 @@ const RUNNER = `${SKILL_DIR}/references/runner.md`;
 const SKILL = `${SKILL_DIR}/SKILL.md`;
 /** Every operator-facing Markdown doc the guard reads (BUILD_NOTES.md is a history log and is not). */
 const DOCS = [README, "AGENTS.md", SKILL, RUNNER, "fixtures/FIXTURES.md", "tests/README.md", "presentation/assets/cx9-evidence.md"];
+
+const runner = readSource(RUNNER);
+const skill = readSource(SKILL);
+const packageJson = JSON.parse(readSource("package.json")) as {
+  scripts: Record<string, string>;
+  devDependencies: Record<string, string>;
+};
+
+const ascending = (codes: readonly number[]): number[] => [...codes].sort((a, b) => a - b);
+/** The needles a doc fails to contain (a list keeps a failure readable; the docs are long). */
+const missingFrom = (text: string, needles: readonly string[]): string[] => needles.filter((n) => !text.includes(n));
 
 /** Markdown with fenced code blocks blanked out, keeping line structure. */
 function withoutFences(text: string): string {
@@ -189,9 +200,7 @@ describe("doc claims: .env.example", () => {
 // ---------------------------------------------------------------------------
 
 describe("doc claims: scripts, paths and links resolve", () => {
-  const packageScripts = Object.keys(
-    (JSON.parse(readSource("package.json")) as { scripts: Record<string, string> }).scripts,
-  );
+  const packageScripts = Object.keys(packageJson.scripts);
 
   test("every `bun run <name>` names a package.json script, and every `bun run <path>` an existing file", () => {
     const bad: string[] = [];
@@ -324,17 +333,17 @@ describe("doc claims: run-demo flags and exit codes", () => {
     }
   });
 
-  const exitCodes = (doc: string): number[] =>
-    [...readSource(doc).matchAll(/^\|\s*(\d+)\s*\|/gm)].map((m) => Number(m[1])).sort((a, b) => a - b);
-  const expectedRunDemoCodes = Object.values(RUN_DEMO_EXIT).sort((a, b) => a - b);
+  const exitCodes = (text: string): number[] =>
+    ascending([...text.matchAll(/^\|\s*(\d+)\s*\|/gm)].map((m) => Number(m[1])));
+  const expectedRunDemoCodes = ascending(Object.values(RUN_DEMO_EXIT));
 
   test("the README and the runner reference list exactly run-demo's exit codes", () => {
-    expect(exitCodes(README)).toEqual(expectedRunDemoCodes);
-    expect(exitCodes(RUNNER)).toEqual(expectedRunDemoCodes);
+    expect(exitCodes(readSource(README))).toEqual(expectedRunDemoCodes);
+    expect(exitCodes(runner)).toEqual(expectedRunDemoCodes);
   });
 
   test("the runner reference's script table lists each script's exit codes", () => {
-    const table = readSource(RUNNER).slice(readSource(RUNNER).indexOf("## Other scripts and their exit codes"));
+    const table = runner.slice(runner.indexOf("## Other scripts and their exit codes"));
     const expected: Record<string, readonly number[]> = {
       "scripts/render-metrics.ts": Object.values(RENDER_METRICS_EXIT),
       "scripts/jev-spot-check.ts": Object.values(JEV_SPOT_CHECK_EXIT),
@@ -345,8 +354,8 @@ describe("doc claims: run-demo flags and exit codes", () => {
       const row = table.split("\n").find((line) => line.startsWith(`| \`${script}\``));
       if (row === undefined) throw new Error(`no row for ${script}`);
       const cell = row.split("|").map((c) => c.trim())[3] ?? "";
-      const documented = [...cell.matchAll(/(?:^|, )(\d+) (?=[a-z])/g)].map((m) => Number(m[1])).sort((a, b) => a - b);
-      expect({ script, documented }).toEqual({ script, documented: [...codes].sort((a, b) => a - b) });
+      const documented = ascending([...cell.matchAll(/(?:^|, )(\d+) (?=[a-z])/g)].map((m) => Number(m[1])));
+      expect({ script, documented }).toEqual({ script, documented: ascending(codes) });
     }
   });
 });
@@ -356,21 +365,13 @@ describe("doc claims: run-demo flags and exit codes", () => {
 // ---------------------------------------------------------------------------
 
 describe("doc claims: the fixed verification stack", () => {
-  const runner = readSource(RUNNER);
-  const skill = readSource(SKILL);
-  /** The needles a doc fails to contain (a list keeps a failure readable; the docs are long). */
-  const missingFrom = (text: string, needles: readonly string[]): string[] => needles.filter((n) => !text.includes(n));
-
   test("the runner reference states the vitest pin and the test directories the bootstrap uses", () => {
     expect(BOOTSTRAP_TEST_GLOBS.map((g) => g.split("/")[0])).toEqual(["test", "tests"]);
     expect(missingFrom(runner, [BOOTSTRAP_VITEST_PIN, ...BOOTSTRAP_TEST_GLOBS])).toEqual([]);
   });
 
   test("the toolkit's TypeScript version is the one the runner reference names", () => {
-    const pinned = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
-      devDependencies: Record<string, string>;
-    }).devDependencies.typescript as string;
-    expect(missingFrom(runner, [`TypeScript ${pinned}`])).toEqual([]);
+    expect(missingFrom(runner, [`TypeScript ${packageJson.devDependencies.typescript}`])).toEqual([]);
   });
 
   test("the skill and the runner reference tell the operator to reject or adapt before dispatch", () => {
@@ -380,9 +381,7 @@ describe("doc claims: the fixed verification stack", () => {
 
   test("the skill and the runner reference say where the result lands and that merging needs authorization", () => {
     for (const text of [skill, runner]) {
-      expect(missingFrom(text, ["`integration`", ".worktrees/", "explicit authorization"])).toEqual([]);
+      expect(missingFrom(text, ["`integration`", ".worktrees/", "info/exclude", "explicit authorization"])).toEqual([]);
     }
-    expect(missingFrom(runner, ["info/exclude"])).toEqual([]);
-    expect(missingFrom(skill, ["info/exclude"])).toEqual([]);
   });
 });
