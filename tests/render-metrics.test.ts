@@ -493,8 +493,16 @@ process.stdout.write(JSON.stringify(table[key]));
     expect(readFileSync(join(emptyOut, "report.md"), "utf8")).toContain("status: NO EVIDENCE");
   });
 
-  test("every dexcli call goes through DEXCLI_BIN with -server from DEX_SERVER_ADDRESS; summary fetched once", () => {
-    const calls = readFileSync(log, "utf8")
+  test("every dexcli call goes through DEXCLI_BIN with -server from DEX_SERVER_ADDRESS; summary fetched once", async () => {
+    // Its own run and its own call log: it used to read the log the tests above
+    // wrote, so it failed alone (`-t`) or under --randomize (B27).
+    const ownLog = join(tmp, "calls-own.log");
+    const r = await runDriver(
+      ["--flow-id", "flow-e2e", "--out-dir", join(tmp, "out-own"), "--generated-at", "2026-09-30T00:00:00.000Z"],
+      { DEXCLI_BIN: stub, DEX_SERVER_ADDRESS: "dex.test:1234", STUB_LOG: ownLog, STUB_TABLE: table },
+    );
+    expect(r.code).toBe(0);
+    const calls = readFileSync(ownLog, "utf8")
       .trim()
       .split("\n")
       .map((l) => JSON.parse(l) as string[]);
