@@ -6,14 +6,17 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { FIXER } from "../harness/agents/fixer.js";
 import { IMPLEMENTER } from "../harness/agents/implementer.js";
 import { REVIEWER } from "../harness/agents/reviewer.js";
 import { TOOL_CATEGORIES } from "../harness/agents/types.js";
-import { PHP_TO_TS_TYPE_MAP } from "../harness/skills/php-ts-type-map.js";
+import { PHP_TO_TS_TYPE_MAP, SELF_TYPE_RULE } from "../harness/skills/php-ts-type-map.js";
 import { PORTING_CONVENTIONS } from "../harness/skills/porting-conventions.js";
-import { phpTypeToTsType } from "../src/typesafe/symbol-types.js";
+import { phpTypeToTsType, recallCandidates } from "../src/typesafe/symbol-types.js";
 import {
   composeAgentTurn,
   configurePortHarness,
@@ -28,6 +31,7 @@ import {
 import type { AgentSessionClient, PromptOptions } from "../src/harness/opencode.js";
 import { evaluateSuspicion } from "../src/metrics/suspicion.js";
 import { stubContext } from "./support/dex-context.js";
+import { REPO_ROOT } from "./support/paths.js";
 import { portFlowSource } from "./support/port-flow-source.js";
 import type { Finding, VerdictRecord } from "../src/metrics/types.js";
 import {
@@ -555,14 +559,55 @@ describe("C23: conventions and per-symbol recall agree on PHP type hints", () =>
     }
   });
 
-  test("self/static/iterable have ONE mapping, and it is a valid TS annotation", () => {
-    expect(phpTypeToTsType("self")).toBe("this");
-    expect(phpTypeToTsType("static")).toBe("this");
-    expect(phpTypeToTsType("?self")).toBe("this | null");
+  test("iterable has ONE mapping, and bare self/static are never a mapped value", () => {
     expect(phpTypeToTsType("iterable")).toBe("Iterable<unknown>");
     expect(PHP_TO_TS_TYPE_MAP.iterable).toBe("Iterable<unknown>");
     for (const bare of ["self", "static"]) {
       expect(Object.values(PHP_TO_TS_TYPE_MAP)).not.toContain(bare);
+    }
+  });
+
+  test("B6: self/static are not in the table (no context-free spelling is valid); the conventions state the rule instead of `→ this`", () => {
+    expect(Object.hasOwn(PHP_TO_TS_TYPE_MAP, "self")).toBe(false);
+    expect(Object.hasOwn(PHP_TO_TS_TYPE_MAP, "static")).toBe(false);
+    expect(PORTING_CONVENTIONS.instructions).toContain(SELF_TYPE_RULE);
+    expect(PORTING_CONVENTIONS.instructions).not.toMatch(/`(self|static)` → `this`/);
+    expect(SELF_TYPE_RULE).toContain("enclosing class");
+    expect(SELF_TYPE_RULE).toContain("TS2526");
+  });
+
+  test("B6: what the conventions and the symbol recall produce for self/static compiles under tsc --strict (the old `this` mapping did not: TS2526)", async () => {
+    const recalled = (signature: string, className = "Money") =>
+      recallCandidates({ name: "m", kind: "method", file: "Money.php", signature, docblock: null, literal_usages: [], className }).candidates.map((c) => c.type);
+    // Recall lists parameter types first and the return type last.
+    const staticReturn = recalled("public static function fromCents(int $c): static").at(-1);
+    const instanceReturn = recalled("public function withTax(): static").at(-1);
+    const selfParam = recalled("public function eq(self $other)")[0];
+    const dir = mkdtempSync(join(tmpdir(), "self-static-tsc-"));
+    try {
+      writeFileSync(
+        join(dir, "money.ts"),
+        [
+          "export class Money {",
+          "  constructor(readonly cents: number) {}",
+          `  static fromCents(c: number): ${staticReturn} { return new Money(c); }`,
+          `  withTax(): ${instanceReturn} { return this; }`,
+          `  eq(other: ${selfParam}): boolean { return other.cents === this.cents; }`,
+          "}",
+          "export const ok: boolean = Money.fromCents(1).eq(new Money(1));",
+          "",
+        ].join("\n"),
+      );
+      // Run from the scratch directory: tsc then sees no node_modules/@types of this repository.
+      const tsc = Bun.spawnSync(
+        [join(REPO_ROOT, "node_modules", ".bin", "tsc"), "--noEmit", "--strict", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "Bundler", "money.ts"],
+        { cwd: dir },
+      );
+      expect(`${tsc.stdout.toString()}${tsc.stderr.toString()}`).toBe("");
+      expect(tsc.exitCode).toBe(0);
+      expect([staticReturn, instanceReturn, selfParam]).toEqual(["Money", "this", "Money"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

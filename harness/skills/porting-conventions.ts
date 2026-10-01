@@ -9,7 +9,7 @@
  */
 
 import type { SkillModule } from "./types.js";
-import { PHP_TO_TS_TYPE_MAP } from "./php-ts-type-map.js";
+import { PHP_TO_TS_TYPE_MAP, SELF_TYPE_RULE } from "./php-ts-type-map.js";
 
 // The PHP → TS type map is shared with src/typesafe/symbol-types.ts (audit
 // C23): one module, one mapping. Re-exported here for the existing import path.
@@ -26,6 +26,7 @@ export const PORTING_CONVENTIONS: SkillModule = {
     "- Annotate every parameter, property, and return type. `tsc --strict` is the bar; implicit `any` is a defect.",
     "- Map PHP type hints via the table below; anything not in the table must come from the prep per-symbol table, never guessed:",
     ...Object.entries(PHP_TO_TS_TYPE_MAP).map(([php, ts]) => `  - \`${php}\` → \`${ts}\``),
+    `  - ${SELF_TYPE_RULE}`,
     "- Nullable PHP parameter/property (`?T` or `= null`) → `T | null`.",
     "- PHP associative arrays with stable keys → a dedicated `interface`; free-form maps → `Record<string, T>` with the narrowest `T`.",
     "- `array<T>`-style homogeneous lists → `T[]`.",

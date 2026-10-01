@@ -39,6 +39,12 @@ export interface PhpSymbol {
   docblock: string | null;
   /** Literal values observed at usages, e.g. `"42"`, `'"abc"'`, `"true"`. */
   literal_usages: readonly string[];
+  /**
+   * The class, interface, trait or enum the symbol is declared in, when the
+   * harvest saw one. `self` / `static` map to this name; without it they have
+   * no valid TypeScript spelling and recall falls back to `unknown`.
+   */
+  className?: string;
 }
 
 // ---- recall -------------------------------------------------------------------
@@ -55,22 +61,40 @@ export interface RecallResult {
 }
 
 /**
+ * Where a type hint sits, which decides what `self` / `static` can become (B6).
+ * TypeScript's polymorphic `this` is an error in a static member or a
+ * standalone function (TS2526) and rejects another instance as a parameter, so
+ * the default for both is the enclosing class's name.
+ */
+export interface TypeHintContext {
+  /** The enclosing class: the spelling of `self` / `static`; `unknown` when not known. */
+  className?: string | undefined;
+  /** The hint is the return type of an instance method: `static` may be `this` there. */
+  thisAllowed?: boolean;
+}
+
+/**
  * PHPDoc/PHP type hint -> TypeScript type. Handles nullable (`?T`), unions,
  * indexed sugar (`T[]`), common generics (`array<K,V>`, `list<T>`,
  * `iterable<T>`), PHPDoc keywords (from the map SHARED with the porting
- * conventions: harness/skills/php-ts-type-map.ts), and class-name passthrough
- * (last namespace segment).
+ * conventions: harness/skills/php-ts-type-map.ts), `self` / `static` (see
+ * {@link TypeHintContext}), and class-name passthrough (last namespace
+ * segment).
  */
-export function phpTypeToTsType(phpType: string): string {
+export function phpTypeToTsType(phpType: string, context: TypeHintContext = {}): string {
   const t = phpType.trim();
   if (t === "") return "unknown";
-  if (t.startsWith("?")) return `${phpTypeToTsType(t.slice(1))} | null`;
+  if (t.startsWith("?")) return `${phpTypeToTsType(t.slice(1), context)} | null`;
 
   const unionParts = splitTopLevel(t, "|");
   if (unionParts.length > 1) {
-    return uniqueInOrder(unionParts.map((p) => phpTypeToTsType(p))).join(" | ");
+    return uniqueInOrder(unionParts.map((p) => phpTypeToTsType(p, context))).join(" | ");
   }
-  if (t.endsWith("[]")) return `${phpTypeToTsType(t.slice(0, -2))}[]`;
+  if (t.endsWith("[]")) return `${phpTypeToTsType(t.slice(0, -2), context)}[]`;
+  const selfHint = t.toLowerCase();
+  if (selfHint === "self" || selfHint === "static") {
+    return selfHint === "static" && context.thisAllowed === true ? "this" : (context.className ?? "unknown");
+  }
   // PHPStan/Psalm array shapes (`array{id: int}`) are not TS syntax.
   if (/^(?:array|object)\s*\{/i.test(t)) return "Record<string, unknown>";
 
@@ -82,7 +106,7 @@ export function phpTypeToTsType(phpType: string): string {
       .filter((a) => a.length > 0);
     if (head === "array" || head === "list" || head === "iterable") {
       const firstArg = args[0];
-      const element = args.length === 1 && firstArg !== undefined ? phpTypeToTsType(firstArg) : null;
+      const element = args.length === 1 && firstArg !== undefined ? phpTypeToTsType(firstArg, context) : null;
       if (head === "iterable") return element === null ? "Iterable<unknown>" : `Iterable<${element}>`;
       return element === null ? "unknown[]" : `${element}[]`;
     }
@@ -143,13 +167,14 @@ function uniqueInOrder(values: readonly string[]): string[] {
  * `{...}` balanced (so `array<int, string>` and `array{id: int}` survive
  * their inner whitespace) and ends at top-level whitespace or a `$variable`.
  */
-function docblockTypeTokens(docblock: string): string[] {
-  const tokens: string[] = [];
-  for (const m of docblock.matchAll(/@(?:param|return|var)\s+/g)) {
+function docblockTypeTokens(docblock: string): Array<{ tag: string; token: string }> {
+  const tokens: Array<{ tag: string; token: string }> = [];
+  for (const m of docblock.matchAll(/@(param|return|var)\s+/g)) {
+    const tag = m[1] ?? "";
     const start = (m.index ?? 0) + m[0].length;
     if (docblock[start] === "{") {
       const end = docblock.indexOf("}", start);
-      if (end > start + 1) tokens.push(docblock.slice(start + 1, end));
+      if (end > start + 1) tokens.push({ tag, token: docblock.slice(start + 1, end) });
       continue;
     }
     let depth = 0;
@@ -160,7 +185,7 @@ function docblockTypeTokens(docblock: string): string[] {
       else if (ch === ">" || ch === ")" || ch === "}") depth = Math.max(0, depth - 1);
       else if (depth === 0 && (ch === "$" || /\s/.test(ch))) break;
     }
-    if (end > start) tokens.push(docblock.slice(start, end));
+    if (end > start) tokens.push({ tag, token: docblock.slice(start, end) });
   }
   return tokens;
 }
@@ -187,17 +212,29 @@ export function recallCandidates(symbol: PhpSymbol): RecallResult {
   const candidates: TsTypeCandidate[] = [];
   const seen = new Set<string>();
 
-  const push = (raw: string | null | undefined, origin: CandidateOrigin): void => {
+  // B6: `static` may become `this` only as the return type of an INSTANCE
+  // method; everywhere else `self` / `static` are the enclosing class's name.
+  const instanceMethod = symbol.kind === "method" && !/\bstatic\s+function\b/.test(symbol.signature);
+  const contextFor = (position: "return" | "other"): TypeHintContext => ({
+    className: symbol.className,
+    thisAllowed: position === "return" && instanceMethod,
+  });
+
+  const push = (
+    raw: string | null | undefined,
+    origin: CandidateOrigin,
+    position: "return" | "other" = "other",
+  ): void => {
     if (raw === null || raw === undefined) return;
-    const type = phpTypeToTsType(raw);
+    const type = phpTypeToTsType(raw, contextFor(position));
     if (type.trim() === "" || seen.has(type)) return;
     seen.add(type);
     candidates.push({ type, origin });
   };
 
   // 1. docblock hints: @param {int} $x / @param int $x / @return array<int, string> / @var float
-  for (const token of docblockTypeTokens(symbol.docblock ?? "")) {
-    push(token, "docblock");
+  for (const { tag, token } of docblockTypeTokens(symbol.docblock ?? "")) {
+    push(token, "docblock", tag === "return" ? "return" : "other");
   }
 
   // 2. signature declared types: "?Type $name", "Type $name", return after "): Type".
@@ -209,7 +246,7 @@ export function recallCandidates(symbol: PhpSymbol): RecallResult {
     push(declared, "signature");
   }
   const returnType = symbol.signature.match(/\)\s*:\s*(\??[A-Za-z_][\w\\<>[\]|]*)\s*(?:\{|;|$)/);
-  if (returnType) push(returnType[1], "signature");
+  if (returnType) push(returnType[1], "signature", "return");
 
   // 3. signature default literals: `$x = 10,` / `$x = 'a')`
   for (const m of symbol.signature.matchAll(

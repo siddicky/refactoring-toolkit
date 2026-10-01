@@ -120,8 +120,70 @@ describe("C21: signature recall ignores declaration modifiers", () => {
     expect(recallCandidates(symbol({ signature: "private ?Money $amount;" })).candidates.map((c) => c.type)).toEqual([
       "Money | null",
     ]);
-    const method = recallCandidates(symbol({ kind: "method", signature: "public static function create(int $n): static {" }));
-    expect(method.candidates.map((c) => c.type)).toEqual(["number", "this"]);
+    const method = recallCandidates(
+      symbol({ kind: "method", signature: "public static function create(int $n): static {", className: "Money" }),
+    );
+    expect(method.candidates.map((c) => c.type)).toEqual(["number", "Money"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B6 — `self` / `static` are the enclosing class's name; `this` only as the
+// return type of an instance method (it is TS2526 in a static member and
+// rejects other instances as a parameter).
+// ---------------------------------------------------------------------------
+
+describe("B6: self/static recall is valid TypeScript in every position", () => {
+  const typesOf = (over: Partial<PhpSymbol>): string[] => recallCandidates(symbol(over)).candidates.map((c) => c.type);
+
+  test("a static named constructor returning self or static is the class name, never `this`", () => {
+    for (const ret of ["self", "static"]) {
+      expect(typesOf({ kind: "method", signature: `public static function make(): ${ret}`, className: "Money" })).toEqual(["Money"]);
+    }
+    expect(
+      typesOf({ kind: "method", signature: "public static function make()", docblock: "@return static", className: "Money" }),
+    ).toEqual(["Money"]);
+  });
+
+  test("an instance method returning static keeps the polymorphic `this`; returning self is the class name", () => {
+    expect(typesOf({ kind: "method", signature: "public function withTax(): static", className: "Money" })).toEqual(["this"]);
+    expect(typesOf({ kind: "method", signature: "public function copy(): self", className: "Money" })).toEqual(["Money"]);
+    expect(typesOf({ kind: "method", signature: "public function maybe(): ?static", className: "Money" })).toEqual(["this | null"]);
+  });
+
+  test("a self/static PARAMETER or PROPERTY is the class name (`eq(o: this)` rejects other instances)", () => {
+    expect(typesOf({ kind: "method", signature: "public function eq(self $other): bool", className: "Money" })).toEqual(["Money", "boolean"]);
+    expect(typesOf({ kind: "method", signature: "public function eq(static $other)", docblock: "@param static $other", className: "Money" })).toEqual(["Money"]);
+    expect(typesOf({ kind: "property", signature: "private ?self $next;", className: "Node" })).toEqual(["Node | null"]);
+  });
+
+  test("a standalone function, or a class that is not known, falls back to unknown, never `this`", () => {
+    expect(typesOf({ kind: "function", signature: "function f(self $x): static" })).toEqual(["unknown"]);
+    expect(typesOf({ kind: "method", signature: "public static function make(): self" })).toEqual(["unknown"]);
+  });
+
+  test("phpTypeToTsType: the context decides, and unions/arrays carry it", () => {
+    expect(phpTypeToTsType("self", { className: "Money" })).toBe("Money");
+    expect(phpTypeToTsType("static", { className: "Money", thisAllowed: true })).toBe("this");
+    expect(phpTypeToTsType("self", { className: "Money", thisAllowed: true })).toBe("Money");
+    expect(phpTypeToTsType("static[]", { className: "Money" })).toBe("Money[]");
+    expect(phpTypeToTsType("self|null", { className: "Money" })).toBe("Money | null");
+    expect(phpTypeToTsType("self")).toBe("unknown");
+  });
+
+  test("the harvester names the class each symbol sits in", () => {
+    const src = [
+      "<?php",
+      "final class Money {",
+      "    private ?self $next;",
+      "    public static function make(): self { return new self(); }",
+      "}",
+      "interface Priced {",
+      "    public function price(): static;",
+      "}",
+    ].join("\n");
+    const byName = Object.fromEntries(harvestPhpSymbols("src/Money.php", src).map((s) => [s.name, s.className]));
+    expect(byName).toEqual({ next: "Money", make: "Money", price: "Priced" });
   });
 });
 

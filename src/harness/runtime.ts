@@ -858,12 +858,31 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
     return null;
   };
 
+  // The class each symbol sits in (B6): `self` / `static` map to its name.
+  const classDecls = [
+    ...phpSource.matchAll(/^[ \t]*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\s+(\w+)/gm),
+  ].map((m) => ({ at: m.index ?? 0, name: m[1] ?? "" }));
+  const classAt = (offset: number): string | undefined => {
+    let found: string | undefined;
+    for (const decl of classDecls) {
+      if (decl.at > offset) break;
+      found = decl.name;
+    }
+    return found;
+  };
+  const lineStarts: number[] = [];
+  lines.reduce((at, l) => {
+    lineStarts.push(at);
+    return at + l.length + 1;
+  }, 0);
+
   const push = (
     kind: PhpSymbol["kind"],
     name: string,
     signature: string,
     index: number,
     docblockOverride?: string,
+    offset: number = lineStarts[index] ?? 0,
   ): void => {
     const key = `${kind}:${name}`;
     if (seen.has(key)) return;
@@ -872,6 +891,7 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
       omitted++;
       return;
     }
+    const className = classAt(offset);
     symbols.push({
       name,
       kind,
@@ -879,6 +899,7 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
       signature,
       docblock: docblockOverride ?? docblockBefore(index),
       literal_usages: [],
+      ...(className !== undefined ? { className } : {}),
     });
   };
 
@@ -889,7 +910,7 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
     const type = m[1];
     const name = m[2];
     if (type !== undefined && name !== undefined) {
-      push("property", name, `$${name} — @var ${type}`, -1, `@var ${type}`);
+      push("property", name, `$${name} — @var ${type}`, -1, `@var ${type}`, m.index ?? 0);
     }
   }
 
