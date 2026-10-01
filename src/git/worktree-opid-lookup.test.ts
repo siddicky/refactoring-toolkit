@@ -12,14 +12,14 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { makeFixtureRepo } from "../src/git/fixture.js";
+import { makeFixtureRepo } from "./fixture.js";
 import {
   InMemoryLeaseStore,
   WorktreePool,
   commitLeaseChanges,
   findCommitByOpId,
   operationId,
-} from "../src/git/worktree.js";
+} from "./worktree.js";
 
 let root: string | undefined;
 const savedDates = {

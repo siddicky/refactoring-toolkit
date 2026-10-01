@@ -879,7 +879,7 @@ describe("QueueFix is one step class in both flows (C90)", () => {
   test("port.Project and port.File register the SAME QueueFixStart / QueueFix classes", () => {
     expect(fileFlow.queueFix.constructor).toBe(projectFlow.queueFix.constructor);
     expect(fileFlow.queueFixStart.constructor).toBe(projectFlow.queueFixStart.constructor);
-    // Bracket access: the F1 lint (verify-fix.test.ts) greps source text for
+    // Bracket access: the F1 lint (verification-fix-regressions.test.ts) greps source text for
     // raw step-type access outside the envelope factory.
     const stepTypeOf = (step: object): string => (step as { ["getStepType"]: () => string })["getStepType"]();
     expect(stepTypeOf(projectFlow.queueFix)).toBe("PpQueueFix");

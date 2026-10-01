@@ -20,7 +20,7 @@ import { join, relative } from "node:path";
 
 import { DISPOSITIONS, validateFinding } from "../harness/agents/verdict-schema.js";
 
-const ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "./support/paths.js";
 const SCANNED_DIRS = ["tests", "harness", "scripts", "src", "flows", "fixtures"];
 const SCANNED_EXT = [".ts", ".json", ".jsonl"];
 
@@ -84,8 +84,8 @@ interface FindingLiteral {
 function findingLiterals(): FindingLiteral[] {
   const found: FindingLiteral[] = [];
   for (const dirName of SCANNED_DIRS) {
-    for (const path of walk(join(ROOT, dirName))) {
-      const file = relative(ROOT, path);
+    for (const path of walk(join(REPO_ROOT, dirName))) {
+      const file = relative(REPO_ROOT, path);
       if (file === SCHEMA_MODULE) continue;
       const text = readFileSync(path, "utf8");
       for (const match of text.matchAll(/["']?\bevidence_span["']?\s*:/g)) {
@@ -121,7 +121,7 @@ describe("INT-4: raw verdict fixtures follow the T4b contract", () => {
       "tests/review-step-identity.test.ts",
       "tests/jev-wiring.test.ts",
       "tests/lane-b-gates.test.ts",
-      "tests/phase2-flow.test.ts",
+      "tests/flow-pure-derivations.test.ts",
       "tests/verdict-repair.test.ts",
     ]) {
       expect(files.has(expected), `scan no longer reaches ${expected}`).toBe(true);

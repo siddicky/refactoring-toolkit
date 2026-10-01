@@ -47,7 +47,7 @@ import {
   spotCheckVerdict,
 } from "../src/typesafe/spot-check.js";
 
-const ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "./support/paths.js";
 
 function symbol(overrides: Partial<PhpSymbol>): PhpSymbol {
   return {
@@ -198,7 +198,7 @@ describe("C21: the symbol cap is shared and its truncation is visible", () => {
 
   test("neither the port flow nor the spot-check hard-codes a different cap", () => {
     for (const rel of [...portFlowFiles(), "scripts/jev-spot-check.ts"]) {
-      const source = readFileSync(join(ROOT, rel), "utf8");
+      const source = readFileSync(join(REPO_ROOT, rel), "utf8");
       expect(source).not.toMatch(/harvestPhpSymbols\([^)]*,[^)]*,\s*\d+\s*\)/);
     }
   });
@@ -209,7 +209,7 @@ describe("C21: the symbol cap is shared and its truncation is visible", () => {
 // ---------------------------------------------------------------------------
 
 describe("C21: spot-check oracle", () => {
-  const fixtureRoot = join(ROOT, "fixtures", "php-sample", "src");
+  const fixtureRoot = join(REPO_ROOT, "fixtures", "php-sample", "src");
   const harvested: PhpSymbol[] = [];
   for (const file of phpFilesUnder(fixtureRoot)) {
     harvested.push(...harvestPhpSymbols(file.slice(fixtureRoot.length + 1), readFileSync(file, "utf8")));
@@ -231,7 +231,7 @@ describe("C21: spot-check oracle", () => {
       for (const label of labels) expect(label).not.toMatch(/[<{,(]$/);
     }
     // the creatorex fixture's docblocks (4 symbols used to truncate) are clean too
-    const creatorexRoot = join(ROOT, "fixtures", "creatorex-middleware", "src");
+    const creatorexRoot = join(REPO_ROOT, "fixtures", "creatorex-middleware", "src");
     for (const file of phpFilesUnder(creatorexRoot)) {
       for (const s of harvestPhpSymbols(file.slice(creatorexRoot.length + 1), readFileSync(file, "utf8"))) {
         for (const c of recallCandidates(s).candidates) expect(c.type).not.toMatch(/[<{,(]$/);
@@ -340,7 +340,7 @@ describe("C18: one offline factory, and the lane banner names the symbol table",
   });
 
   test("the worker prints the summary under its JUDGMENT LANE label", () => {
-    const src = readFileSync(join(ROOT, "scripts", "run-demo.ts"), "utf8");
+    const src = readFileSync(join(REPO_ROOT, "scripts", "run-demo.ts"), "utf8");
     expect(src).toContain("JUDGMENT LANE: ${judgmentLaneSummary(judgment.kind)}");
   });
 });

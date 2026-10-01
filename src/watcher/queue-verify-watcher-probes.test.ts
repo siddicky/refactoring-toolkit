@@ -4,18 +4,18 @@
  *
  * All on the blocking virtual-clock world (tests/support/virtual-stream.ts), so
  * cadence and pacing are observable; the older fake in
- * tests/queue-verify-watcher.test.ts ignores `timeoutMs` and the clock.
+ * src/watcher/queue-verify-watcher.test.ts ignores `timeoutMs` and the clock.
  */
 
 import { describe, expect, test } from "bun:test";
 
-import { flowStatusFromWire } from "../src/watcher/flow-summary.js";
+import { flowStatusFromWire } from "./flow-summary.js";
 import {
   isTerminalFlowStatus,
   runQueueVerifyWatcher,
   type WatcherFlowStatus,
-} from "../src/watcher/queue-verify-watcher.js";
-import { DONE, START, noise, virtualWorld } from "./support/virtual-stream.js";
+} from "./queue-verify-watcher.js";
+import { DONE, START, noise, virtualWorld } from "../../tests/support/virtual-stream.js";
 
 const SILENT_30_MIN = { pollIntervalMs: 60_000, deadlineMs: 30 * 60_000 };
 

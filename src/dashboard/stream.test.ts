@@ -16,24 +16,22 @@
 import { describe, expect, test } from "bun:test";
 
 import { readdirSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
+import { REPO_ROOT } from "../../tests/support/paths.js";
 import {
   startEnvelopeStreamSubscriber,
   type EnvelopeStreamReader,
-} from "../src/dashboard/queries.js";
+} from "./queries.js";
 import {
   buildDashboardState,
   feedFromStreamMessages,
   parseEnvelope,
-} from "../src/dashboard/state.js";
+} from "./state.js";
 import type {
   DexFlowSummaryWire,
   StreamEventMessage,
-} from "../src/dashboard/types.js";
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+} from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -464,7 +462,7 @@ describe("C52: stream start + completion upsert (the feed never sticks on the in
 
   function feedFor(input: {
     states?: Record<string, { activeStepExecutions: []; attributes: Array<{ key: string; value: unknown }> }>;
-    histories?: Record<string, import("../src/dashboard/types.js").DexHistoryWire>;
+    histories?: Record<string, import("./types.js").DexHistoryWire>;
     streamFeed: StreamEventMessage[];
   }) {
     return buildDashboardState({
@@ -554,11 +552,11 @@ describe("US-007 projection-only boundary: streams are never read for correctnes
     const controlRoots = ["flows", join("src", "git"), join("src", "queues")];
     const offenders: string[] = [];
     const walk = (dir: string) => {
-      for (const e of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+      for (const e of readdirSync(join(REPO_ROOT, dir), { withFileTypes: true })) {
         const p = join(dir, e.name);
         if (e.isDirectory()) walk(p);
         else if (e.name.endsWith(".ts")) {
-          const src = readFileSync(join(ROOT, p), "utf8");
+          const src = readFileSync(join(REPO_ROOT, p), "utf8");
           if (/readStream|listStreamMessages/.test(src)) offenders.push(p);
         }
       }
@@ -568,7 +566,7 @@ describe("US-007 projection-only boundary: streams are never read for correctnes
   });
 
   test("the durable envelope attribute remains the only correctness source (structural check, not comment text)", () => {
-    const envelope = readFileSync(join(ROOT, "flows", "steps", "envelope.ts"), "utf8");
+    const envelope = readFileSync(join(REPO_ROOT, "flows", "steps", "envelope.ts"), "utf8");
     // The durable store exists under the key prefix every consumer matches on...
     expect(envelope).toMatch(/new AttributeMap<EnvelopeEvent>\(\s*"envelope-event"/);
     // ...and every durable write is immediately MIRRORED to the stream with the
@@ -586,10 +584,10 @@ describe("US-007 projection-only boundary: streams are never read for correctnes
       join("scripts", "serve-status.ts"),
       join("scripts", "watch-queue-verify.ts"),
     ]) {
-      expect(readFileSync(join(ROOT, allowed), "utf8")).toMatch(/readStream/);
+      expect(readFileSync(join(REPO_ROOT, allowed), "utf8")).toMatch(/readStream/);
     }
     // The watcher core takes an INJECTED source — no direct SDK read.
-    const core = readFileSync(join(ROOT, "src", "watcher", "queue-verify-watcher.ts"), "utf8");
+    const core = readFileSync(join(REPO_ROOT, "src", "watcher", "queue-verify-watcher.ts"), "utf8");
     expect(core).not.toMatch(/readStream/);
   });
 

@@ -158,7 +158,7 @@ export interface JudgmentClient {
  * default) when createRealJevClient does not pass them. They used to be listed
  * here as well but nothing in this repo read them, which made them look wired
  * when only the SDK honoured them; they are deliberately not repeated.
- * tests/typesafe-sdk-env.test.ts proves the SDK picks them up.
+ * src/typesafe/client-sdk-env.test.ts proves the SDK picks them up.
  */
 export const TYPESAFE_ENV_VARS = {
   apiKey: "TYPESAFE_API_KEY",

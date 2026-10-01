@@ -51,6 +51,7 @@ import {
   composeReviewerTurn,
   testPortScopeNote,
 } from "../src/harness/runtime.js";
+import { REPO_ROOT } from "./support/paths.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -607,7 +608,7 @@ describe("US-010 report verification distinction", () => {
 describe("US-010 CreatorPay fixture test rows", () => {
   test("prep stub source map includes the 5 test-file rows", async () => {
     const raw = await readFile(
-      new URL("../fixtures/creatorex-middleware/prep-stub.md", import.meta.url),
+      join(REPO_ROOT, "fixtures", "creatorex-middleware", "prep-stub.md"),
       "utf8",
     );
     const map = parsePrepSourceMap(raw);

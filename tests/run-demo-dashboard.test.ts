@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { dashboardPort, launchDashboard, probePortInUse } from "../scripts/run-demo.js";
+import { REPO_ROOT } from "./support/paths.js";
 
 const tmpDirs: string[] = [];
 const servers: Server[] = [];
@@ -163,7 +164,7 @@ describe("launchDashboard", () => {
 
 describe("demo only launches the dashboard on request", () => {
   test("startDemo reaches launchDashboard only behind --dashboard and never spawns serve-status itself", () => {
-    const src = readFileSync(join(import.meta.dir, "..", "scripts", "run-demo.ts"), "utf8");
+    const src = readFileSync(join(REPO_ROOT, "scripts", "run-demo.ts"), "utf8");
     const start = src.indexOf("async function startDemo(");
     const end = src.indexOf("\n}\n", start);
     const body = src.slice(start, end);

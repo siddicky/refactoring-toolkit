@@ -24,7 +24,7 @@ import {
   runQueueVerifyWatcher,
   type QueueVerifyWatcherOptions,
   type WatcherStreamEvent,
-} from "../src/watcher/queue-verify-watcher.js";
+} from "./queue-verify-watcher.js";
 
 const START_EVENT: WatcherStreamEvent = {
   eventKey: "pp-queue-verify#1",

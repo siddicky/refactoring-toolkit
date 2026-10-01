@@ -17,11 +17,11 @@ import { join } from "node:path";
 
 import { parseKillEvents } from "../src/metrics/kill-events.js";
 
-const ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "./support/paths.js";
 
 function git(args: string[]): { status: number; stdout: string } {
   try {
-    const stdout = execFileSync("git", args, { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const stdout = execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
     return { status: 0, stdout };
   } catch (err) {
     return { status: (err as { status?: number }).status ?? 1, stdout: "" };
@@ -30,7 +30,7 @@ function git(args: string[]): { status: number; stdout: string } {
 
 /** Relative `./fixtures/*.json` imports of every test file under src/metrics. */
 function metricsFixtureImports(): Array<{ test: string; fixture: string }> {
-  const dir = join(ROOT, "src", "metrics");
+  const dir = join(REPO_ROOT, "src", "metrics");
   const found: Array<{ test: string; fixture: string }> = [];
   for (const name of readdirSync(dir)) {
     if (!name.endsWith(".test.ts")) continue;
@@ -52,14 +52,14 @@ describe("INT-1: metrics test fixtures are tracked, not swallowed by .gitignore"
 
   test("every imported fixture exists, is not git-ignored, and is tracked by git", () => {
     for (const { test: importer, fixture } of imports) {
-      expect(existsSync(join(ROOT, fixture)), `${importer} imports missing ${fixture}`).toBe(true);
+      expect(existsSync(join(REPO_ROOT, fixture)), `${importer} imports missing ${fixture}`).toBe(true);
       expect(git(["check-ignore", "-q", fixture]).status, `${fixture} is git-ignored`).not.toBe(0);
       expect(git(["ls-files", "--error-unmatch", fixture]).status, `${fixture} is not tracked`).toBe(0);
     }
   });
 
   test("the recorded kill-events fixture parses through the one sidecar reader with no malformed lines", () => {
-    const parsed = parseKillEvents(readFileSync(join(ROOT, "src/metrics/fixtures/kill-events-run-a.json"), "utf8"));
+    const parsed = parseKillEvents(readFileSync(join(REPO_ROOT, "src/metrics/fixtures/kill-events-run-a.json"), "utf8"));
     expect(parsed.malformed).toEqual([]);
     expect(parsed.events.length).toBeGreaterThan(0);
   });

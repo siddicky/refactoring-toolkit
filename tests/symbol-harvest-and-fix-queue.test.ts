@@ -20,9 +20,10 @@ import {
 import { configurePortFault, faultMatches } from "../flows/runtime-hooks.js";
 import { burnDownFromUnknown } from "../src/dashboard/state.js";
 import type { QueueBurnDownSample } from "../flows/port-project.js";
+import { REPO_ROOT } from "./support/paths.js";
 
 const MONEY_SOURCE = readFileSync(
-  join(import.meta.dir, "..", "fixtures", "php-sample", "src", "Money.php"),
+  join(REPO_ROOT, "fixtures", "php-sample", "src", "Money.php"),
   "utf8",
 );
 

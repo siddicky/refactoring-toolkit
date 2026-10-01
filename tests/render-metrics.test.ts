@@ -23,6 +23,7 @@ import { CLI_EXIT, usageText } from "../src/cli/args.js";
 import { discoverChildFlowIds, flowFactsFromSummary } from "../src/metrics/collect.js";
 import eventStreamRaw from "../src/metrics/fixtures/event-stream-run-a.json" with { type: "json" };
 import historyRaw from "../src/metrics/fixtures/dex-history-run-a.json" with { type: "json" };
+import { REPO_ROOT } from "./support/paths.js";
 
 const tmp = mkdtempSync(join(tmpdir(), "render-metrics-test-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
@@ -213,7 +214,7 @@ describe("discoverChildFlowIds: every wave's children, not only the last (C45)",
 // Whole-driver tests: a stub dexcli (DEXCLI_BIN) answers from a JSON table.
 // ---------------------------------------------------------------------------
 
-const SCRIPT = join(import.meta.dir, "..", "scripts", "render-metrics.ts");
+const SCRIPT = join(REPO_ROOT, "scripts", "render-metrics.ts");
 
 async function runDriver(
   args: string[],

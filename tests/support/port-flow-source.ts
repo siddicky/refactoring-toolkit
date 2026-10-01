@@ -10,14 +10,14 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = join(import.meta.dir, "..", "..");
+import { REPO_ROOT } from "./paths.js";
 
 /** Repo-relative path of the public entry module. */
 export const PORT_FLOW_ENTRY = "flows/port-project.ts";
 
 /** Repo-relative paths of the entry module plus every flows/port/*.ts module (sorted). */
 export function portFlowFiles(): string[] {
-  const modules = readdirSync(join(ROOT, "flows", "port"))
+  const modules = readdirSync(join(REPO_ROOT, "flows", "port"))
     .filter((name) => name.endsWith(".ts"))
     .sort()
     .map((name) => `flows/port/${name}`);
@@ -26,7 +26,7 @@ export function portFlowFiles(): string[] {
 
 /** The text of each port-flow module, keyed by repo-relative path. */
 export function portFlowSources(): Record<string, string> {
-  return Object.fromEntries(portFlowFiles().map((rel) => [rel, readFileSync(join(ROOT, rel), "utf8")]));
+  return Object.fromEntries(portFlowFiles().map((rel) => [rel, readFileSync(join(REPO_ROOT, rel), "utf8")]));
 }
 
 /** All port-flow modules concatenated (for guards that grep the flow as one text). */

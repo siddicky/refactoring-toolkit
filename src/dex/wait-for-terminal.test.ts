@@ -22,7 +22,7 @@ import { DexServiceError, ErrorSubStatus, LongPollTimeoutError } from "@superdur
 import type { FlowResult, FlowStatus } from "@superdurable/dex";
 import { status } from "@grpc/grpc-js";
 
-import { isTransientWaitError, waitForFlowTerminal } from "../src/dex/wait-for-terminal.js";
+import { isTransientWaitError, waitForFlowTerminal } from "./wait-for-terminal.js";
 
 function serviceErr(code: status, subStatus: keyof typeof ErrorSubStatus): DexServiceError {
   return new DexServiceError(

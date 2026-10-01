@@ -21,8 +21,7 @@ import { DexServiceError, ErrorSubStatus } from "@superdurable/dex";
 import { status } from "@grpc/grpc-js";
 
 import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { configurePortJudgment } from "../flows/runtime-hooks.js";
 import { stagingContext, stubContext } from "./support/dex-context.js";
@@ -47,7 +46,7 @@ import {
   type JudgmentClient,
 } from "../src/typesafe/client.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+import { REPO_ROOT } from "./support/paths.js";
 
 // ---------------------------------------------------------------------------
 // 1: wiring — key present -> the REAL client reaches the consumption sites;
@@ -193,7 +192,7 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
   });
 
   test("the worker wires configurePortJudgment from resolveJudgment and announces the lane", () => {
-    const src = readFileSync(join(ROOT, "scripts", "run-demo.ts"), "utf8");
+    const src = readFileSync(join(REPO_ROOT, "scripts", "run-demo.ts"), "utf8");
     expect(src).toContain("const judgment = await resolveJudgment();");
     expect(src).toContain("configurePortJudgment(judgment);");
     expect(src).toContain("JUDGMENT LANE:");

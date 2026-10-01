@@ -38,12 +38,12 @@ import type { TurnHealthAssessmentInput } from "../src/metrics/types.js";
 import { stubContext } from "./support/dex-context.js";
 import { portFlowFiles } from "./support/port-flow-source.js";
 
-const ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "./support/paths.js";
 const FILE = "src/Money.php";
 
 /** Strips `//` and block comments so the guards read code, not prose. */
 function code(path: string): string {
-  return readFileSync(join(ROOT, path), "utf8")
+  return readFileSync(join(REPO_ROOT, path), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
 }

@@ -19,7 +19,7 @@ import {
   reconcile,
   type CompletionMarker,
   type KeyedCommit,
-} from "../src/git/worktree.js";
+} from "./worktree.js";
 
 const committedMarker = (round: number, opId: string, hash = "tree-hash"): CompletionMarker => ({
   round,

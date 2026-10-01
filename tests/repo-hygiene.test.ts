@@ -16,10 +16,10 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { basename, extname, join } from "node:path";
 
-const ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "./support/paths.js";
 
 function git(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("git", args, { cwd: ROOT, encoding: "utf8" });
+  const r = spawnSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" });
   if (r.error) throw r.error;
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
@@ -49,7 +49,7 @@ interface PackageJson {
 }
 
 function readPackageJson(): PackageJson {
-  return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as PackageJson;
+  return JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as PackageJson;
 }
 
 describe("kill-events fixtures and sidecars", () => {
@@ -111,7 +111,7 @@ describe("committed media", () => {
     const tracked = trackedFiles();
     const videos = tracked.filter((p) => MEDIA.has(extname(p).toLowerCase()));
     const textFiles = tracked.filter((p) => /\.(md|html|ts|json|txt|ya?ml)$/i.test(p));
-    const corpus = textFiles.map((p) => readFileSync(join(ROOT, p), "utf8")).join("\n");
+    const corpus = textFiles.map((p) => readFileSync(join(REPO_ROOT, p), "utf8")).join("\n");
     const orphans = videos.filter((v) => !corpus.includes(basename(v)));
     expect(orphans).toEqual([]);
   });
@@ -124,7 +124,7 @@ describe("package.json metadata and scripts", () => {
     expect(pkg.packageManager).toMatch(/^bun@\d+\.\d+\.\d+$/);
     expect(pkg.engines?.bun).toBeDefined();
     expect(pkg.license).toBe("MIT");
-    expect(readFileSync(join(ROOT, "LICENSE"), "utf8")).toMatch(/^MIT License/);
+    expect(readFileSync(join(REPO_ROOT, "LICENSE"), "utf8")).toMatch(/^MIT License/);
   });
 
   test("the pinned Bun version matches @types/bun", () => {
@@ -148,7 +148,7 @@ describe("package.json metadata and scripts", () => {
   test("every script alias points at a file that exists", () => {
     for (const cmd of Object.values(pkg.scripts ?? {})) {
       for (const m of cmd.matchAll(/bun run (scripts\/[\w.-]+\.ts)/g)) {
-        expect(existsSync(join(ROOT, m[1] as string))).toBe(true);
+        expect(existsSync(join(REPO_ROOT, m[1] as string))).toBe(true);
       }
     }
   });
@@ -161,7 +161,7 @@ describe("declared dependencies", () => {
   const BUILTINS = new Set([...builtinModules, "bun"]);
 
   function walk(dir: string, out: string[]): void {
-    for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+    for (const entry of readdirSync(join(REPO_ROOT, dir), { withFileTypes: true })) {
       if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
       const rel = `${dir}/${entry.name}`;
       if (SKIP_PREFIXES.some((p) => `${rel}/`.startsWith(p))) continue;
@@ -189,12 +189,12 @@ describe("declared dependencies", () => {
       ...Object.keys(pkg.devDependencies ?? {}),
     ]);
     const files: string[] = [];
-    for (const d of SCAN_DIRS) if (existsSync(join(ROOT, d))) walk(d, files);
+    for (const d of SCAN_DIRS) if (existsSync(join(REPO_ROOT, d))) walk(d, files);
     expect(files.length).toBeGreaterThan(20);
 
     const undeclared = new Map<string, string[]>();
     for (const file of files) {
-      const text = readFileSync(join(ROOT, file), "utf8");
+      const text = readFileSync(join(REPO_ROOT, file), "utf8");
       for (const re of [STATIC_IMPORT, SIDE_EFFECT_IMPORT, DYNAMIC_IMPORT]) {
         for (const m of text.matchAll(re)) {
           const pkgName = packageOf(m[1] as string);
@@ -208,7 +208,7 @@ describe("declared dependencies", () => {
 
   test("@grpc/grpc-js is pinned to the version bun.lock resolves", () => {
     const pkg = readPackageJson();
-    const lock = readFileSync(join(ROOT, "bun.lock"), "utf8");
+    const lock = readFileSync(join(REPO_ROOT, "bun.lock"), "utf8");
     const resolved = lock.match(/"@grpc\/grpc-js": \["@grpc\/grpc-js@([^"]+)"/)?.[1];
     expect(resolved).toBeDefined();
     expect(pkg.dependencies?.["@grpc/grpc-js"]).toBe(resolved);
@@ -227,7 +227,7 @@ describe("CI workflow", () => {
     jobs?: Record<string, { "runs-on"?: string; steps?: Step[] }>;
   }
 
-  const path = join(ROOT, ".github/workflows/ci.yml");
+  const path = join(REPO_ROOT, ".github/workflows/ci.yml");
 
   test("exists and parses", () => {
     expect(existsSync(path)).toBe(true);
@@ -263,11 +263,11 @@ describe("Biome", () => {
     assist?: { actions?: { source?: { organizeImports?: string } } };
   }
 
-  const biomeBin = join(ROOT, "node_modules/.bin/biome");
-  const config = () => JSON.parse(readFileSync(join(ROOT, "biome.json"), "utf8")) as BiomeConfig;
+  const biomeBin = join(REPO_ROOT, "node_modules/.bin/biome");
+  const config = () => JSON.parse(readFileSync(join(REPO_ROOT, "biome.json"), "utf8")) as BiomeConfig;
 
   function biome(...args: string[]): { status: number | null; output: string } {
-    const r = spawnSync(biomeBin, args, { cwd: ROOT, encoding: "utf8" });
+    const r = spawnSync(biomeBin, args, { cwd: REPO_ROOT, encoding: "utf8" });
     if (r.error) throw r.error;
     return { status: r.status, output: `${r.stdout}${r.stderr}` };
   }

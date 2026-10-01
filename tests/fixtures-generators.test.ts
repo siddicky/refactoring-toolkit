@@ -14,12 +14,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { parsePrepSourceMap } from "../flows/port-project.js";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+import { REPO_ROOT } from "./support/paths.js";
 
 interface FixtureSpec {
   readonly name: string;
@@ -29,13 +28,13 @@ interface FixtureSpec {
 
 const PHP_SAMPLE: FixtureSpec = {
   name: "php-sample",
-  script: join(repoRoot, "fixtures/generate.ts"),
-  committed: join(repoRoot, "fixtures/php-sample"),
+  script: join(REPO_ROOT, "fixtures/generate.ts"),
+  committed: join(REPO_ROOT, "fixtures/php-sample"),
 };
 const CREATOREX: FixtureSpec = {
   name: "creatorex-middleware",
-  script: join(repoRoot, "fixtures/generate-creatorex.ts"),
-  committed: join(repoRoot, "fixtures/creatorex-middleware"),
+  script: join(REPO_ROOT, "fixtures/generate-creatorex.ts"),
+  committed: join(REPO_ROOT, "fixtures/creatorex-middleware"),
 };
 const SPECS: readonly FixtureSpec[] = [PHP_SAMPLE, CREATOREX];
 
@@ -64,7 +63,7 @@ function printedDigest(stdout: string): string {
 }
 
 function documentedDigest(label: string): string {
-  const doc = readFileSync(join(repoRoot, "fixtures/FIXTURES.md"), "utf8");
+  const doc = readFileSync(join(REPO_ROOT, "fixtures/FIXTURES.md"), "utf8");
   const match = new RegExp(`^${label}:\\s+([0-9a-f]{64})$`, "m").exec(doc);
   if (match?.[1] === undefined) throw new Error(`fixtures/FIXTURES.md has no digest line for ${label}`);
   return match[1];
@@ -165,8 +164,8 @@ function phpMethod(source: string, name: string): string {
 }
 
 describe("fixture documentation claims about PHP behaviour (audit C74)", () => {
-  const stubPrep = readFileSync(join(repoRoot, "fixtures/stub-prep.md"), "utf8");
-  const fixturesDoc = readFileSync(join(repoRoot, "fixtures/FIXTURES.md"), "utf8");
+  const stubPrep = readFileSync(join(REPO_ROOT, "fixtures/stub-prep.md"), "utf8");
+  const fixturesDoc = readFileSync(join(REPO_ROOT, "fixtures/FIXTURES.md"), "utf8");
 
   test("stub-prep trap 3 does not claim an explicit (float) cast warns", () => {
     // `(float) $row['total']` is an explicit cast; PHP never warns for those.

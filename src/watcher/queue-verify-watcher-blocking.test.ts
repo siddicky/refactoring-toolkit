@@ -1,7 +1,7 @@
 /**
  * Queue-verify watcher against BLOCKING reads on a virtual clock.
  *
- * tests/queue-verify-watcher.test.ts fakes `nextStreamEvent` as
+ * src/watcher/queue-verify-watcher.test.ts fakes `nextStreamEvent` as
  * `async () => queue.shift() ?? null`, which ignores `timeoutMs` and the clock,
  * so a defect that only exists because a read BLOCKS could not be caught there
  * (audit C27: the catch-up read after a START waited a full pollInterval, the
@@ -16,8 +16,8 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { runQueueVerifyWatcher } from "../src/watcher/queue-verify-watcher.js";
-import { DONE, START, noise, virtualWorld } from "./support/virtual-stream.js";
+import { runQueueVerifyWatcher } from "./queue-verify-watcher.js";
+import { DONE, START, noise, virtualWorld } from "../../tests/support/virtual-stream.js";
 
 describe("C27: catch-up reads must not absorb the DONE that closes the kill window", () => {
   // The observed queue-verify windows were ~1.1-1.6 s. START is published at

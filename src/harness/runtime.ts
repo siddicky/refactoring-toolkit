@@ -7,7 +7,7 @@
  * Responsibilities (plan §Reviewer isolation enforcement + §Flow contract):
  * - effective-permission merge: agent tool config merged with the opencode
  *   plugin tool surface, DENY AUTHORITATIVE. The merged reviewer agent must
- *   have zero effective tools (tested in tests/phase1-isolation.test.ts).
+ *   have zero effective tools (tested in tests/agent-isolation-and-lease-integration.test.ts).
  * - diff pass-by-value: the reviewed diff is rendered into the prompt with a
  *   stable 1-based line numbering shared with the hunk resolver, so reviewer
  *   evidence spans can be mapped back onto diff hunks.

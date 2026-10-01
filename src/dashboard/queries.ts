@@ -484,7 +484,7 @@ export async function readBurnDownSources(paths: readonly string[]): Promise<Bur
  * envelope-event attribute stays the ONLY source of truth; this subscriber is
  * a live projection that replaces dexcli subprocess polling when it works.
  * Projection-only: no correctness path ever reads a stream (asserted by the
- * import/usage boundary test in tests/dashboard-stream.test.ts).
+ * import/usage boundary test in src/dashboard/stream.test.ts).
  *
  * The dex seam stays injected and structural (same rationale as the dexcli
  * seam above): the caller composes the real reader over an SDK Client's

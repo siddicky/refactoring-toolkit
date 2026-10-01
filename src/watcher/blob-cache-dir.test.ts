@@ -10,9 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openBlobCache } from "@superdurable/dex";
 
-import { WATCHER_BLOB_CACHE_DIR, watcherBlobCacheDir } from "../src/watcher/blob-cache-dir.js";
-
-const REPO_ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "../../tests/support/paths.js";
+import { WATCHER_BLOB_CACHE_DIR, watcherBlobCacheDir } from "./blob-cache-dir.js";
 
 let dir: string | undefined;
 afterEach(async () => {

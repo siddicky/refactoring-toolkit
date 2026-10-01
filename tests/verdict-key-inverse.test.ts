@@ -19,7 +19,7 @@ import { degradedRoundsOf } from "../src/dashboard/state.js";
 import { collectTombstones, type StateAttribute } from "../src/metrics/collect.js";
 import { fileFromSanitizedKey, sanitizeFileKey } from "../src/metrics/types.js";
 
-const ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "./support/paths.js";
 
 function sources(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -45,13 +45,13 @@ function degradedAttributes(file: string, round: number): StateAttribute[] {
 
 describe("INT-11: one inverse of the verdict-key sanitizer", () => {
   test("the dashboard imports fileFromSanitizedKey and keeps no private `__` -> `/` copy", () => {
-    const state = readFileSync(join(ROOT, "src", "dashboard", "state.ts"), "utf8");
+    const state = readFileSync(join(REPO_ROOT, "src", "dashboard", "state.ts"), "utf8");
     expect(state).toMatch(/import \{ fileFromSanitizedKey \} from "\.\.\/metrics\/types\.js"/);
     expect(state).toContain("fileFromSanitizedKey(");
     // across all non-test sources, the inverse is spelled exactly once: in the shared helper
-    const copies = [...sources(join(ROOT, "src")), ...sources(join(ROOT, "scripts")), ...sources(join(ROOT, "flows"))]
+    const copies = [...sources(join(REPO_ROOT, "src")), ...sources(join(REPO_ROOT, "scripts")), ...sources(join(REPO_ROOT, "flows"))]
       .filter((path) => /\.replace\(\s*\/__\/g\s*,\s*["']\/["']\s*\)/.test(readFileSync(path, "utf8")))
-      .map((path) => relative(ROOT, path));
+      .map((path) => relative(REPO_ROOT, path));
     expect(copies).toEqual(["src/metrics/types.ts"]);
   });
 

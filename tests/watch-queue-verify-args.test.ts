@@ -14,8 +14,9 @@ import { join } from "node:path";
 import { CLI_EXIT } from "../src/cli/args.js";
 import { DEFAULT_KILL_EVENTS_PATH } from "../src/metrics/kill-events.js";
 import { WATCHER_EXIT, WATCHER_USAGE, parseWatcherArgs } from "../src/watcher/cli-args.js";
+import { REPO_ROOT } from "./support/paths.js";
 
-const WATCH_SCRIPT = join(import.meta.dir, "..", "scripts", "watch-queue-verify.ts");
+const WATCH_SCRIPT = join(REPO_ROOT, "scripts", "watch-queue-verify.ts");
 const parse = (...argv: string[]) => parseWatcherArgs(argv);
 
 describe("C34(5): parseWatcherArgs validates instead of coercing", () => {

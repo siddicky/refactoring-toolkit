@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { parseFlowSummary, resolveFlowRunId } from "../src/watcher/flow-summary.js";
+import { parseFlowSummary, resolveFlowRunId } from "./flow-summary.js";
 
 // Shape of `dexcli flow summary <flowId> -output json` (DexFlowSummaryWire).
 const SUMMARY_JSON = JSON.stringify({

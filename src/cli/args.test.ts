@@ -5,7 +5,7 @@
  * was swallowed, a trailing flag produced undefined and then NaN, enum-like
  * flags coerced silently, and a usage error exited 1 in one script and 2 in
  * another. These tests pin the shared rules once; each script's own parse
- * tests (watcher-cli-args, chaos-kill, render-metrics, run-demo-cli,
+ * tests (watch-queue-verify-args, chaos-kill, render-metrics, run-demo-cli,
  * jev-spot-check-args, serve-status-args) pin its table.
  */
 
@@ -23,7 +23,7 @@ import {
   programUsageText,
   reportParseFailure,
   usageText,
-} from "../src/cli/args.js";
+} from "./args.js";
 
 const tool = defineCli({
   name: "tool.ts",

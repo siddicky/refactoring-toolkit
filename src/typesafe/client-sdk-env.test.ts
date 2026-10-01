@@ -11,7 +11,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { createRealJevClient, noul, TYPESAFE_ENV_VARS } from "../src/typesafe/client.js";
+import { createRealJevClient, noul, TYPESAFE_ENV_VARS } from "./client.js";
 
 const VARS = ["TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL", "TYPESAFE_LOG_LEVEL"] as const;
 const saved = new Map<string, string | undefined>(VARS.map((name) => [name, process.env[name]]));

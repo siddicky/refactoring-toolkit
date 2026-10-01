@@ -17,12 +17,12 @@ import {
   toWatcherEvent,
   type RetainedMessage,
   type RetainedPage,
-} from "../src/watcher/drain-backlog.js";
+} from "./drain-backlog.js";
 import {
   activeAttemptStarts,
   runQueueVerifyWatcher,
   type WatcherStreamEvent,
-} from "../src/watcher/queue-verify-watcher.js";
+} from "./queue-verify-watcher.js";
 
 /** Envelope-shaped stream value the script's toWatcherEvent understands. */
 function envelopeValue(eventKey: string, stepId: string, endedAt: string | null) {

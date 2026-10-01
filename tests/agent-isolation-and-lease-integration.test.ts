@@ -38,6 +38,7 @@ import {
 } from "../src/git/worktree.js";
 import { git } from "../src/git/exec.js";
 import { makeFixtureRepo } from "../src/git/fixture.js";
+import { REPO_ROOT } from "./support/paths.js";
 
 let root: string | undefined;
 
@@ -90,9 +91,8 @@ describe("agent-cannot-commit boundary (module structure)", () => {
       "harness/agents/types.ts",
       "harness/agents/verdict-schema.ts",
     ];
-    const rootDir = join(import.meta.dir, "..");
     for (const rel of agentFiles) {
-      const source = await readFile(join(rootDir, rel), "utf8");
+      const source = await readFile(join(REPO_ROOT, rel), "utf8");
       expect(source).not.toMatch(/from\s+["'].*src\/git\//);
       expect(source).not.toMatch(/commitLeaseChanges|mergeLeaseIntoIntegration|findCommitByOpId/);
       expect(source).not.toMatch(/getStepType\s*\(/);
@@ -101,7 +101,6 @@ describe("agent-cannot-commit boundary (module structure)", () => {
   });
 
   test("the sole committer entry points are imported only by toolkit code", async () => {
-    const rootDir = join(import.meta.dir, "..");
     const { readdir } = await import("node:fs/promises");
     const allowedPrefixes = ["flows/", "scripts/", "src/git/", "tests/"];
     const offenders: string[] = [];
@@ -115,14 +114,14 @@ describe("agent-cannot-commit boundary (module structure)", () => {
           continue;
         }
         if (!entry.name.endsWith(".ts") || entry.name.endsWith(".test.ts")) continue;
-        const rel = p.slice(rootDir.length + 1).replace(/\\/g, "/");
+        const rel = p.slice(REPO_ROOT.length + 1).replace(/\\/g, "/");
         const source = await readFile(p, "utf8");
         if (source.includes("commitLeaseChanges") && !allowedPrefixes.some((pre) => rel.startsWith(pre))) {
           offenders.push(rel);
         }
       }
     };
-    await walk(rootDir);
+    await walk(REPO_ROOT);
     expect(offenders).toEqual([]);
   });
 });

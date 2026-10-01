@@ -15,8 +15,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { git } from "../src/git/exec.js";
-import { makeFixtureRepo } from "../src/git/fixture.js";
+import { git } from "./exec.js";
+import { makeFixtureRepo } from "./fixture.js";
 import {
   InMemoryLeaseStore,
   WorktreePool,
@@ -27,7 +27,7 @@ import {
   operationId,
   reconcile,
   type LeaseRecord,
-} from "../src/git/worktree.js";
+} from "./worktree.js";
 
 let root: string | undefined;
 

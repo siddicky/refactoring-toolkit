@@ -7,25 +7,24 @@
 
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import ts from "typescript";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+import { REPO_ROOT } from "./support/paths.js";
 
 function resolvedProjectFiles(): Set<string> {
-  const configPath = join(repoRoot, "tsconfig.json");
+  const configPath = join(REPO_ROOT, "tsconfig.json");
   const read = ts.readConfigFile(configPath, ts.sys.readFile);
   if (read.error !== undefined) {
     throw new Error(ts.flattenDiagnosticMessageText(read.error.messageText, "\n"));
   }
-  const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, repoRoot);
+  const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, REPO_ROOT);
   return new Set(parsed.fileNames.map((f) => resolve(f)));
 }
 
 function trackedTypeScriptFiles(): string[] {
   const out = execFileSync("git", ["ls-files", "--", "*.ts", "*.mts", "*.cts", "*.tsx"], {
-    cwd: repoRoot,
+    cwd: REPO_ROOT,
     encoding: "utf8",
   });
   return out.split("\n").filter((line) => line !== "");
@@ -36,7 +35,7 @@ describe("tsconfig coverage (audit C85)", () => {
     const files = resolvedProjectFiles();
     const tracked = trackedTypeScriptFiles();
     expect(tracked.length).toBeGreaterThan(0);
-    const missing = tracked.filter((rel) => !files.has(resolve(repoRoot, rel)));
+    const missing = tracked.filter((rel) => !files.has(resolve(REPO_ROOT, rel)));
     expect(missing, `tracked .ts files tsc never checks: ${missing.join(", ")}`).toEqual([]);
   });
 });

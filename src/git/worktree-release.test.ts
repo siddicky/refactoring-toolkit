@@ -11,9 +11,9 @@ import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { git } from "../src/git/exec.js";
-import { makeFixtureRepo } from "../src/git/fixture.js";
-import { InMemoryLeaseStore, WorktreePool } from "../src/git/worktree.js";
+import { git } from "./exec.js";
+import { makeFixtureRepo } from "./fixture.js";
+import { InMemoryLeaseStore, WorktreePool } from "./worktree.js";
 
 const savedPath = process.env.PATH;
 const tmpDirs: string[] = [];

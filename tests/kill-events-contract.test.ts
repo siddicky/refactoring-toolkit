@@ -32,6 +32,7 @@ import {
   withResumed,
 } from "../src/metrics/kill-events.js";
 import { renderReport } from "../src/metrics/render.js";
+import { REPO_ROOT } from "./support/paths.js";
 
 const DEAD_PID = 99_999_999;
 const FLOW_ID = "demo-flow";
@@ -51,7 +52,7 @@ describe("INT-3: one DEFAULT_KILL_EVENTS_PATH", () => {
   });
 
   test("chaos-kill no longer defines its own literal", () => {
-    const source = readFileSync(join(import.meta.dir, "..", "scripts", "chaos-kill.ts"), "utf8");
+    const source = readFileSync(join(REPO_ROOT, "scripts", "chaos-kill.ts"), "utf8");
     expect(source).toContain('from "../src/metrics/kill-events.js"');
     expect(source).not.toMatch(/DEFAULT_KILL_EVENTS_PATH\s*=\s*"/);
   });

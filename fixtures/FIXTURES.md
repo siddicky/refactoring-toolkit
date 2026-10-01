@@ -199,5 +199,5 @@ defaults and the prep step finds no source-map rows for the creatorex files.
 `creatorex-middleware/prep-stub.md` is the stub prep artifact: a hand-written
 source map (the test files are explicit rows, because `parsePrepSourceMap`
 skips glob rows such as `tests/*.php`). The generator emits it like every other
-file in the directory, and `tests/us010-vitest-honesty.test.ts` reads it. Treat
+file in the directory, and `tests/vitest-honesty.test.ts` reads it. Treat
 it as a stub until Phase 3 prep-analysis produces the real thing.

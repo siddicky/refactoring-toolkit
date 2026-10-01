@@ -13,8 +13,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { expandFilesArg, makeFixtureRepo, parseRunDemoArgs } from "../scripts/run-demo.js";
+import { REPO_ROOT } from "./support/paths.js";
 
-const RUN_DEMO = join(import.meta.dir, "..", "scripts", "run-demo.ts");
+const RUN_DEMO = join(REPO_ROOT, "scripts", "run-demo.ts");
 const tmpDirs: string[] = [];
 
 afterEach(async () => {

@@ -12,9 +12,9 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = join(import.meta.dir, "..");
-const SCRIPTS_DIR = join(ROOT, "scripts");
-const read = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
+import { REPO_ROOT } from "./support/paths.js";
+const SCRIPTS_DIR = join(REPO_ROOT, "scripts");
+const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), "utf8");
 
 /** Scripts that parse argv (directly, or through their option table in src/watcher/cli-args.ts). */
 const CLI_SCRIPTS = [

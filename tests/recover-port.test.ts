@@ -33,8 +33,9 @@ import {
   operationId,
   sanitizePathSegment,
 } from "../src/git/worktree.js";
+import { REPO_ROOT } from "./support/paths.js";
 
-const RUN_DEMO = join(import.meta.dir, "..", "scripts", "run-demo.ts");
+const RUN_DEMO = join(REPO_ROOT, "scripts", "run-demo.ts");
 const MONEY = "src/Money.php";
 const CUSTOMER = "src/Customer.php";
 

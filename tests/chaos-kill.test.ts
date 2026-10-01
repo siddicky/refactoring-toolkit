@@ -21,8 +21,9 @@ import {
   parseChaosKillArgs,
 } from "../scripts/chaos-kill.js";
 import { WATCHER_EXIT } from "../src/watcher/cli-args.js";
+import { REPO_ROOT } from "./support/paths.js";
 
-const CHAOS_KILL_SCRIPT = join(import.meta.dir, "..", "scripts", "chaos-kill.ts");
+const CHAOS_KILL_SCRIPT = join(REPO_ROOT, "scripts", "chaos-kill.ts");
 
 /** A pid that cannot exist on any supported platform (kernel pid_max < 2^22). */
 const DEAD_PID = 99_999_999;

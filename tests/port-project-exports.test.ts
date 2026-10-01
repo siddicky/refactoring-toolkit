@@ -22,7 +22,7 @@ import * as entry from "../flows/port-project.js";
 import { releaseStepLink } from "../flows/port/links.js";
 import { PORT_FLOW_ENTRY } from "./support/port-flow-source.js";
 
-const ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "./support/paths.js";
 const ENTRY = PORT_FLOW_ENTRY;
 
 /** Runtime exports of flows/port-project.ts (sorted with the default string order). */
@@ -139,11 +139,11 @@ describe("flows/port-project.ts public export surface", () => {
   });
 
   test("the module's full export set (values AND types) is exactly the pinned lists", () => {
-    const config = ts.readConfigFile(join(ROOT, "tsconfig.json"), ts.sys.readFile);
-    const options = ts.parseJsonConfigFileContent(config.config, ts.sys, ROOT).options;
-    const program = ts.createProgram([join(ROOT, ENTRY)], { ...options, noEmit: true });
+    const config = ts.readConfigFile(join(REPO_ROOT, "tsconfig.json"), ts.sys.readFile);
+    const options = ts.parseJsonConfigFileContent(config.config, ts.sys, REPO_ROOT).options;
+    const program = ts.createProgram([join(REPO_ROOT, ENTRY)], { ...options, noEmit: true });
     const checker = program.getTypeChecker();
-    const source = program.getSourceFile(join(ROOT, ENTRY));
+    const source = program.getSourceFile(join(REPO_ROOT, ENTRY));
     if (source === undefined) throw new Error(`${ENTRY} is not part of the program`);
     const moduleSymbol = checker.getSymbolAtLocation(source);
     if (moduleSymbol === undefined) throw new Error(`${ENTRY} is not a module`);
@@ -175,22 +175,22 @@ describe("flows/port module graph", () => {
   const SPECIFIER = /^(import|export)\s+(type\s+)?[^;]*?\bfrom\s*["']([^"']+)["']|^import\s*["']([^"']+)["']/gm;
 
   function tsFiles(dir: string): string[] {
-    return readdirSync(join(ROOT, dir)).flatMap((name) => {
+    return readdirSync(join(REPO_ROOT, dir)).flatMap((name) => {
       const rel = `${dir}/${name}`;
-      if (statSync(join(ROOT, rel)).isDirectory()) return tsFiles(rel);
+      if (statSync(join(REPO_ROOT, rel)).isDirectory()) return tsFiles(rel);
       return name.endsWith(".ts") ? [rel] : [];
     });
   }
 
   /** Runtime (non-`import type`) relative imports that stay inside flows/, repo-relative. */
   function runtimeImports(rel: string): string[] {
-    const text = readFileSync(join(ROOT, rel), "utf8");
+    const text = readFileSync(join(REPO_ROOT, rel), "utf8");
     const out: string[] = [];
     for (const match of text.matchAll(SPECIFIER)) {
       if (match[2] !== undefined) continue; // `import type` / `export type`: erased
       const specifier = match[3] ?? match[4];
       if (specifier === undefined || !specifier.startsWith(".")) continue;
-      const target = relative(ROOT, resolve(dirname(join(ROOT, rel)), specifier.replace(/\.js$/, ".ts")));
+      const target = relative(REPO_ROOT, resolve(dirname(join(REPO_ROOT, rel)), specifier.replace(/\.js$/, ".ts")));
       if (target.startsWith("flows/")) out.push(target);
     }
     return out;
@@ -268,7 +268,7 @@ describe("flows/port module graph", () => {
   });
 
   test("the entry module holds no code: only (type) re-exports", () => {
-    const code = readFileSync(join(ROOT, ENTRY), "utf8")
+    const code = readFileSync(join(REPO_ROOT, ENTRY), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/.*$/gm, "")
       .replace(/(?:export\s+(?:type\s+)?\{[^}]*\}\s*from\s*"[^"]+";)/g, "")
@@ -283,7 +283,7 @@ describe("step graph topology (static goTo() edges)", () => {
     const edges: Record<string, Set<string>> = {};
     for (const rel of rels) {
       let current: string | null = null;
-      for (const line of readFileSync(join(ROOT, rel), "utf8").split("\n")) {
+      for (const line of readFileSync(join(REPO_ROOT, rel), "utf8").split("\n")) {
         const declaration = /^(?:export )?const (\w+)\s*:\s*EnvelopeStepClass</.exec(line);
         if (declaration !== null) {
           current = declaration[1] ?? null;
@@ -359,6 +359,6 @@ describe("step graph topology (static goTo() edges)", () => {
 
 describe("depth- and order-sensitive facts", () => {
   test("queueVerifyTools.tscBin still points at the repo's node_modules/.bin/tsc", () => {
-    expect(entry.queueVerifyTools.tscBin).toBe(join(ROOT, "node_modules", ".bin", "tsc"));
+    expect(entry.queueVerifyTools.tscBin).toBe(join(REPO_ROOT, "node_modules", ".bin", "tsc"));
   });
 });

@@ -23,7 +23,7 @@ import {
 import { git } from "../src/git/exec.js";
 import { makeFixtureRepo } from "../src/git/fixture.js";
 
-const REPO_ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "./support/paths.js";
 const FIXTURES = join(REPO_ROOT, "fixtures");
 const RUN_DEMO = join(REPO_ROOT, "scripts", "run-demo.ts");
 const tmpDirs: string[] = [];

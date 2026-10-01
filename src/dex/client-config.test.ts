@@ -19,7 +19,7 @@ import {
   dexConfigFromEnv,
   releaseOnFailure,
   startDexWorker,
-} from "../src/dex/client.js";
+} from "./client.js";
 
 const tmpDirs: string[] = [];
 

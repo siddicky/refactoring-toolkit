@@ -12,8 +12,9 @@ import { join } from "node:path";
 
 import { CLI_EXIT, usageText } from "../src/cli/args.js";
 import { JEV_SPOT_CHECK_CLI, JEV_SPOT_CHECK_EXIT, parseJevSpotCheckArgs } from "../scripts/jev-spot-check.js";
+import { REPO_ROOT } from "./support/paths.js";
 
-const SCRIPT = join(import.meta.dir, "..", "scripts", "jev-spot-check.ts");
+const SCRIPT = join(REPO_ROOT, "scripts", "jev-spot-check.ts");
 const parse = (...argv: string[]) => parseJevSpotCheckArgs(argv);
 
 function failure(...argv: string[]) {

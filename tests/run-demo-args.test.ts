@@ -20,8 +20,9 @@ import { PROBE_LONG_STEP_OPTIONS, PROBE_ROUND_OPTIONS } from "../scripts/probe-f
 import { RUN_DEMO_CLI, RUN_DEMO_EXIT, parseRunDemoArgs } from "../scripts/run-demo.js";
 import { CLI_EXIT, commandUsageText, programUsageText } from "../src/cli/args.js";
 import { parseHarnessChoice } from "../src/harness/select.js";
+import { REPO_ROOT } from "./support/paths.js";
 
-const RUN_DEMO = join(import.meta.dir, "..", "scripts", "run-demo.ts");
+const RUN_DEMO = join(REPO_ROOT, "scripts", "run-demo.ts");
 
 type Parsed = ReturnType<typeof parseRunDemoArgs>;
 

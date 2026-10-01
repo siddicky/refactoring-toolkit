@@ -12,14 +12,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { OpencodeHarness, type AgentSessionClient } from "../src/harness/opencode.js";
+import { OpencodeHarness, type AgentSessionClient } from "./opencode.js";
 import {
   describeHarness,
   parseHarnessChoice,
   selectHarness,
   type ProbeableHarness,
-} from "../src/harness/select.js";
-import { clearHarnessEnv } from "./support/opencode-env.js";
+} from "./select.js";
+import { clearHarnessEnv } from "../../tests/support/opencode-env.js";
 
 let restoreEnv: () => void;
 beforeEach(() => {

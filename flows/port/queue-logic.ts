@@ -1,6 +1,6 @@
 /**
  * Keys and pure helpers of the port flows (unit-tested in
- * tests/phase2-flow.test.ts and friends): attribute-key builders, the prep
+ * tests/flow-pure-derivations.test.ts and friends): attribute-key builders, the prep
  * source-map parser, the dispatch/fix-round derivations over the durable queue,
  * and the input rebuilders. No I/O, no step classes.
  */

@@ -22,9 +22,9 @@ import {
   parseModelRef,
   plannerPromptOpts,
   reviewLaneRouting,
-} from "../src/harness/lanes.js";
-import { OpencodeHarness } from "../src/harness/opencode.js";
-import { clearHarnessEnv } from "./support/opencode-env.js";
+} from "./lanes.js";
+import { OpencodeHarness } from "./opencode.js";
+import { clearHarnessEnv } from "../../tests/support/opencode-env.js";
 
 // Bun auto-loads the operator's .env, which README tells them to fill with
 // OPENCODE_*_MODEL/VARIANT overrides: clear BEFORE each test (not only after)

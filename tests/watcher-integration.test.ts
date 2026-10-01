@@ -2,7 +2,7 @@
  * INT-9 — the T7 mid-run review items that only close once T3/T5/T6 are merged.
  *
  * 1. fired:false is honoured by every consumer. Writer to T5/T6 readers is in
- *    contract-b-kill-events.test.ts; here the WATCHER side: a kill action that
+ *    kill-events-contract.test.ts; here the WATCHER side: a kill action that
  *    killed nothing is reported as a no-op, and a kill action that THROWS is
  *    never reported as fired (a swallowed throw ended runs as a silent success
  *    or a silent "no kill").
@@ -31,7 +31,7 @@ import {
   type WatcherStreamEvent,
 } from "../src/watcher/queue-verify-watcher.js";
 
-const ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "./support/paths.js";
 
 // ---------------------------------------------------------------------------
 // 1. The watcher never reports a failed or empty kill as fired
@@ -126,7 +126,7 @@ describe("INT-9: chaos-kill and watch-queue-verify share one exit-code table", (
   test("both scripts document the same numbers", () => {
     /** The header comment as one line of prose (comment stars and line breaks folded away). */
     const header = (script: string): string =>
-      readFileSync(join(ROOT, "scripts", script), "utf8")
+      readFileSync(join(REPO_ROOT, "scripts", script), "utf8")
         .slice(0, 3_500)
         .replace(/\n\s*\*\s?/g, " ");
     const chaos = header("chaos-kill.ts");
@@ -149,8 +149,8 @@ describe("INT-9: chaos-kill and watch-queue-verify share one exit-code table", (
   });
 
   async function run(script: string, args: string[]): Promise<number> {
-    const proc = Bun.spawn([process.execPath, join(ROOT, "scripts", script), ...args], {
-      cwd: ROOT,
+    const proc = Bun.spawn([process.execPath, join(REPO_ROOT, "scripts", script), ...args], {
+      cwd: REPO_ROOT,
       env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
       stdout: "pipe",
       stderr: "pipe",
@@ -193,7 +193,7 @@ describe("INT-9: serve-status does not share DEX_BLOB_CACHE_DIR with the worker"
       expect(dirName.startsWith(".dex-cache")).toBe(true);
       const ignored = (() => {
         try {
-          execFileSync("git", ["check-ignore", "-q", `${dirName}/blob`], { cwd: ROOT, stdio: "ignore" });
+          execFileSync("git", ["check-ignore", "-q", `${dirName}/blob`], { cwd: REPO_ROOT, stdio: "ignore" });
           return true;
         } catch {
           return false;
@@ -209,7 +209,7 @@ describe("INT-9: serve-status does not share DEX_BLOB_CACHE_DIR with the worker"
   });
 
   test("scripts/serve-status.ts overrides the spread dexConfigFromEnv() cache with its own directory", () => {
-    const source = readFileSync(join(ROOT, "scripts", "serve-status.ts"), "utf8");
+    const source = readFileSync(join(REPO_ROOT, "scripts", "serve-status.ts"), "utf8");
     expect(source).toMatch(/\{\s*\.\.\.dexConfigFromEnv\(\),\s*blobCacheDir\s*\}/);
     expect(source).not.toMatch(/process\.env\.DEX_BLOB_CACHE_DIR/);
   });

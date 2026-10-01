@@ -15,7 +15,7 @@ import {
   PORTING_KIT_LABEL_PREFIX,
   fenceLabel,
   parseFenceLabel,
-} from "../src/harness/opencode.js";
+} from "./opencode.js";
 
 interface FenceDouble {
   harness: OpencodeHarness;

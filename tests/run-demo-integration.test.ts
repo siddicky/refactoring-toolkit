@@ -27,8 +27,8 @@ import type { PortRunResult } from "../flows/port-project.js";
 import { dashboardChildEnv, dashboardPort, EXIT_UNRESOLVED, flowOutcome } from "../scripts/run-demo.js";
 import { configFromEnv } from "../src/dashboard/config.js";
 
-const ROOT = join(import.meta.dir, "..");
-const RUN_DEMO = join(ROOT, "scripts", "run-demo.ts");
+import { REPO_ROOT } from "./support/paths.js";
+const RUN_DEMO = join(REPO_ROOT, "scripts", "run-demo.ts");
 
 let scratch: string | undefined;
 afterEach(async () => {
@@ -48,7 +48,7 @@ async function runDemo(args: string[], env: Record<string, string>) {
   const dir = await mkdtemp(join(tmpdir(), "run-demo-int5-"));
   scratch = dir;
   const proc = Bun.spawn([process.execPath, RUN_DEMO, ...args.map((a) => (a === "<dir>" ? dir : a))], {
-    cwd: ROOT,
+    cwd: REPO_ROOT,
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...env },
     stdout: "pipe",
     stderr: "pipe",
@@ -112,7 +112,7 @@ describe("INT-5: the logged dashboard URL is the port serve-status binds", () =>
 });
 
 describe("INT-5: probe-flow.ts documents the harness semantics T4a implemented", () => {
-  const header = readFileSync(join(ROOT, "scripts", "probe-flow.ts"), "utf8").slice(0, 2_000);
+  const header = readFileSync(join(REPO_ROOT, "scripts", "probe-flow.ts"), "utf8").slice(0, 2_000);
 
   test("reachability decides, --harness auto falls back loudly, --harness stub is explicit", () => {
     expect(header).toContain("reachable opencode server");

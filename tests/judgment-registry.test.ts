@@ -14,8 +14,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, relative } from "node:path";
 
 import { citationKept } from "../flows/port-project.js";
 import {
@@ -27,7 +26,7 @@ import {
 import { DEFAULT_ESCALATION_THRESHOLD, selectSymbolType, type PhpSymbol } from "../src/typesafe/symbol-types.js";
 import { createInMemoryJevClient, type InMemoryResponder } from "../src/typesafe/client.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+import { REPO_ROOT } from "./support/paths.js";
 
 /** Seam constructor -> the registry entry that must list every module calling it. */
 const LANE_B_SEAMS: Readonly<Record<string, string>> = {
@@ -94,7 +93,7 @@ describe("AC-R: seam modules exist", () => {
       const paths = seamModulePaths(entry.seamModule);
       expect(paths.length).toBeGreaterThan(0);
       for (const path of paths) {
-        expect(existsSync(join(ROOT, path))).toBe(true);
+        expect(existsSync(join(REPO_ROOT, path))).toBe(true);
       }
     }
   });
@@ -103,7 +102,7 @@ describe("AC-R: seam modules exist", () => {
     const entry = judgmentRegistryEntry("citation-check");
     const seam = seamModulePaths(entry.seamModule);
     expect(seam).toContain("src/typesafe/verdict-check.ts");
-    const source = readFileSync(join(ROOT, "src/typesafe/verdict-check.ts"), "utf8");
+    const source = readFileSync(join(REPO_ROOT, "src/typesafe/verdict-check.ts"), "utf8");
     expect(source).toContain("p_cited");
     // The path the audit found wrong: agreement.ts has no citation/p_cited code.
     expect(seam).not.toContain("src/metrics/agreement.ts");
@@ -127,8 +126,8 @@ function unregisteredCallers(seam: string, entryName: string, sources: Readonly<
 describe("AC-R: Lane-B seam construction only in registry-listed modules", () => {
   const productionSources: Record<string, string> = Object.fromEntries(
     ["flows", "src", "scripts"]
-      .flatMap((d) => listTs(join(ROOT, d)))
-      .map((abs) => [relative(ROOT, abs), readFileSync(abs, "utf8")]),
+      .flatMap((d) => listTs(join(REPO_ROOT, d)))
+      .map((abs) => [relative(REPO_ROOT, abs), readFileSync(abs, "utf8")]),
   );
 
   for (const [seam, entryName] of Object.entries(LANE_B_SEAMS)) {

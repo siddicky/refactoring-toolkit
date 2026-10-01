@@ -12,8 +12,9 @@ import { join } from "node:path";
 
 import { parseOptions, usageText } from "../src/cli/args.js";
 import { SERVE_STATUS_CLI } from "../scripts/serve-status.js";
+import { REPO_ROOT } from "./support/paths.js";
 
-const SCRIPT = join(import.meta.dir, "..", "scripts", "serve-status.ts");
+const SCRIPT = join(REPO_ROOT, "scripts", "serve-status.ts");
 const parse = (...argv: string[]) => parseOptions(SERVE_STATUS_CLI, argv);
 
 function failure(...argv: string[]) {

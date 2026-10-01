@@ -9,9 +9,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { join } from "node:path";
 
-const REPO_ROOT = join(import.meta.dir, "..");
+import { REPO_ROOT } from "./support/paths.js";
 
 const POLLUTION: Record<string, string> = {
   OPENCODE_PLANNER_MODEL: "acme/planner-x",
@@ -28,10 +27,10 @@ const POLLUTION: Record<string, string> = {
 };
 
 const SUITES = [
-  "tests/lanes.test.ts",
+  "src/harness/lanes.test.ts",
   "tests/turn-health.test.ts",
-  "tests/opencode-harness.test.ts",
-  "tests/harness-select.test.ts",
+  "src/harness/opencode.test.ts",
+  "src/harness/select.test.ts",
 ] as const;
 
 describe("harness test suites ignore the operator's OPENCODE_* / TYPESAFE_* env", () => {

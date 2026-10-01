@@ -39,6 +39,7 @@ import {
 import { envelopeEventKey } from "../flows/steps/envelope.js";
 import { REVIEWER } from "../harness/agents/reviewer.js";
 import { TOOL_CATEGORIES } from "../harness/agents/types.js";
+import { REPO_ROOT } from "./support/paths.js";
 
 let root: string | undefined;
 afterEach(async () => {
@@ -161,7 +162,6 @@ describe("M6: re-round leases base on integration (fast-forward re-rounds)", () 
 
 describe("F1: step-factory completeness lint", () => {
   test("raw dex step creation exists only in flows/steps/envelope.ts", async () => {
-    const rootDir = join(import.meta.dir, "..");
     const offenders: string[] = [];
     const walk = async (dir: string): Promise<void> => {
       const entries = await readdir(dir, { withFileTypes: true });
@@ -173,7 +173,7 @@ describe("F1: step-factory completeness lint", () => {
           continue;
         }
         if (!entry.name.endsWith(".ts")) continue;
-        const rel = p.slice(rootDir.length + 1).replace(/\\/g, "/");
+        const rel = p.slice(REPO_ROOT.length + 1).replace(/\\/g, "/");
         const source = await readFile(p, "utf8");
         const rawCreation =
           /getStepType\s*\(\)/.test(source) || /implements\s+Step\b/.test(source);
@@ -181,7 +181,7 @@ describe("F1: step-factory completeness lint", () => {
         if (rawCreation && !sanctioned) offenders.push(rel);
       }
     };
-    await walk(rootDir);
+    await walk(REPO_ROOT);
     expect(offenders).toEqual([]);
   });
 });
