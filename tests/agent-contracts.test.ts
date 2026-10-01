@@ -285,7 +285,7 @@ const SPEC_HEAD = [
 const SPEC_TAIL = ["", "## 3. Known traps", "1. rounding is half away from zero"].join("\n");
 
 /** A planner reply: ```markdown spec containing a nested fenced example. */
-function specReply(nestedLang: string, outerFence = "```"): string {
+function specReply(nestedLang: string, outerFence = FENCE): string {
   return [
     "Here is the revised spec map.",
     "",
@@ -293,7 +293,7 @@ function specReply(nestedLang: string, outerFence = "```"): string {
     SPEC_HEAD,
     `${FENCE}${nestedLang}`,
     nestedLang === "php" ? "<?php echo round($a + $b);" : "const total: number = a + b;",
-    "```",
+    FENCE,
     SPEC_TAIL,
     outerFence,
     "",

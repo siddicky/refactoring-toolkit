@@ -165,18 +165,14 @@ export const TYPESAFE_ENV_VARS = {
   offline: "TYPESAFE_OFFLINE",
 } as const;
 
-/** Reads an env var at call time (never cached), so a test can change it between calls. */
-function readEnv(name: string): string | undefined {
-  return process.env[name];
-}
-
 /**
  * True when TYPESAFE_OFFLINE is set to anything truthy (1, true, yes...).
  * "0", "false", "" and unset count as online. Offline mode forces the
- * in-memory double so tests never touch the network.
+ * in-memory double so tests never touch the network. Read at call time, so a
+ * test can change it between calls.
  */
 export function isTypesafeOffline(): boolean {
-  const v = readEnv(TYPESAFE_ENV_VARS.offline);
+  const v = process.env[TYPESAFE_ENV_VARS.offline];
   if (v === undefined || v === "" || v === "0") return false;
   return v.toLowerCase() !== "false";
 }
@@ -261,7 +257,7 @@ export async function createRealJevClient(config?: {
   apiKey?: string;
   baseURL?: string;
 }): Promise<JudgmentClient> {
-  const apiKey = config?.apiKey ?? readEnv(TYPESAFE_ENV_VARS.apiKey);
+  const apiKey = config?.apiKey ?? process.env[TYPESAFE_ENV_VARS.apiKey];
   if (apiKey === undefined || apiKey === "") {
     throw new JevConfigError(
       `real TypeSafe client requires an API key via ${TYPESAFE_ENV_VARS.apiKey} (env) — refusing to proceed without credentials`,

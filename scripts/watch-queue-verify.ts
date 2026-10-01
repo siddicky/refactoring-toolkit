@@ -204,7 +204,8 @@ async function main(): Promise<number> {
       if (summary.runId !== null) observedRunId = summary.runId;
       return summary;
     } catch (err) {
-      throw new Error(`dexcli flow summary failed: ${oneLine(err instanceof ExecError ? describeExecFailure(err.failure) : err)}`);
+      const cause = err instanceof ExecError ? describeExecFailure(err.failure) : err;
+      throw new Error(`dexcli flow summary failed: ${oneLine(cause)}`);
     }
   };
   // Not awaited: a slow/unreachable dexcli must not delay arming the watcher.

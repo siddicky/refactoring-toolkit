@@ -36,7 +36,7 @@ interface CapturedRun {
   /** Exit code; null when killed, signalled or never spawned. */
   exitCode: number | null;
   signal: string | null;
-  /** True when execFile's timeout / maxBuffer guard killed the process. */
+  /** The runtime's raw `killed` flag: the timeout killed the process (see ExecFailure.killed). */
   killed: boolean;
   /** Spawn-level error code ("ENOENT", "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", ...). */
   errorCode: string | null;

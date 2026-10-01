@@ -15,10 +15,10 @@
  *   report on stdout (`git merge` CONFLICT lines, a diff with exit 1), and
  *   node leaves stderr empty on a timeout, so neither is dropped.
  *
- * Two entry points: {@link execTool} throws {@link ExecError}; {@link
- * execToolResult} never throws and returns the failure as data (a "no" exit
- * code is an answer, not an error, for tools such as `pgrep` and `git diff
- * --quiet`). src/git/exec.ts builds the git runner on top of this module.
+ * Two entry points: `execTool` throws an `ExecError`; `execToolResult` never
+ * throws and returns the failure as data (a "no" exit code is an answer, not an
+ * error, for tools such as `pgrep`). src/git/exec.ts builds the git runner on
+ * top of this module.
  */
 
 import { execFile } from "node:child_process";
@@ -60,7 +60,7 @@ export interface ExecFailure {
   signal: string | null;
   /** True when the exec timeout killed the process. */
   timedOut: boolean;
-  /** Node's raw `killed` flag: the timeout OR the maxBuffer guard killed the process. */
+  /** The runtime's raw `killed` flag: set when the timeout killed the process (Node also sets it for a maxBuffer kill, Bun does not). */
   killed: boolean;
   /** The timeout that applied (ms); used to word the timed-out diagnosis. */
   timeoutMs: number;
@@ -86,7 +86,7 @@ function asText(value: unknown): string {
 }
 
 /** Normalizes whatever execFile threw into {@link ExecFailure}. */
-export function classifyExecError(err: unknown, timeoutMs: number = EXEC_TIMEOUT_MS): ExecFailure {
+function classifyExecError(err: unknown, timeoutMs: number = EXEC_TIMEOUT_MS): ExecFailure {
   const e = (typeof err === "object" && err !== null ? err : {}) as {
     stdout?: unknown;
     stderr?: unknown;
