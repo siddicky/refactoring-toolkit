@@ -18,10 +18,9 @@
  * keep rendering the rest — never crash.
  */
 
-import { execFile } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
-import { promisify } from "node:util";
 
+import { ExecError, execTool } from "../exec.js";
 import { burnDownFromUnknown } from "./state.js";
 import type {
   BurnDownSample,
@@ -34,8 +33,6 @@ import type {
   StreamEventMessage,
   StreamMode,
 } from "./types.js";
-
-const execFileP = promisify(execFile);
 
 export type QueryResult<T> =
   | { ok: true; value: T }
@@ -53,43 +50,37 @@ export function err<T = never>(error: string): QueryResult<T> {
  * Normalizes any throw into a short, actionable message (spawn ENOENT,
  * non-zero exit, timeout...). For a failed child process it reports the cause
  * (first non-empty stderr line, exit code / signal / timeout) and never echoes
- * the full argv: execFile's own message is `Command failed: <argv>\n<stderr>`,
- * and the argv can carry control characters (git log separators).
+ * the full argv: an {@link ExecError} message is `<argv> failed: <cause>`, and
+ * the argv can carry control characters (git log separators).
  */
 export function describeError(e: unknown): string {
-  if (e instanceof Error) {
-    const x = e as Error & { cmd?: unknown; code?: unknown; killed?: unknown; signal?: unknown; stderr?: unknown };
-    const exitFailure = typeof x.code === "number" || x.killed === true || typeof x.signal === "string";
-    if (typeof x.cmd === "string" && exitFailure) {
-      const stderrLine =
-        typeof x.stderr === "string"
-          ? x.stderr.split("\n").map((l) => l.trim()).find((l) => l.length > 0)
-          : undefined;
-      const cause =
-        x.killed === true
-          ? `command timed out or was killed${typeof x.signal === "string" ? ` (${x.signal})` : ""}`
-          : typeof x.code === "number"
-            ? `command exited ${x.code}`
-            : `command killed by ${String(x.signal)}`;
-      const msg = stderrLine === undefined ? cause : `${cause}: ${stderrLine}`;
-      return msg.length > 300 ? `${msg.slice(0, 300)}...` : msg;
+  if (e instanceof ExecError) {
+    const f = e.failure;
+    if (f.exitCode !== null || f.killed || f.signal !== null) {
+      const stderrLine = f.stderr
+        .split("\n")
+        .map((l) => l.trim())
+        .find((l) => l.length > 0);
+      const cause = f.killed
+        ? `command timed out or was killed${f.signal !== null ? ` (${f.signal})` : ""}`
+        : f.exitCode !== null
+          ? `command exited ${f.exitCode}`
+          : `command killed by ${String(f.signal)}`;
+      return clip(stderrLine === undefined ? cause : `${cause}: ${stderrLine}`);
     }
-    const msg = e.message.split("\n")[0] ?? e.message;
-    return msg.length > 300 ? `${msg.slice(0, 300)}...` : msg;
+    // Spawn failure (binary missing): the runtime's own message names the binary, not the argv.
+    return clip(f.message.split("\n")[0] ?? f.message);
   }
+  if (e instanceof Error) return clip(e.message.split("\n")[0] ?? e.message);
   return String(e);
 }
 
-async function runBin(
-  bin: string,
-  args: readonly string[],
-  timeoutMs: number,
-): Promise<string> {
-  const { stdout } = await execFileP(bin, [...args], {
-    timeout: timeoutMs,
-    maxBuffer: 64 * 1024 * 1024,
-    encoding: "utf8",
-  });
+function clip(msg: string): string {
+  return msg.length > 300 ? `${msg.slice(0, 300)}...` : msg;
+}
+
+async function runBin(bin: string, args: readonly string[], timeoutMs: number): Promise<string> {
+  const { stdout } = await execTool(bin, args, { timeoutMs });
   return stdout;
 }
 

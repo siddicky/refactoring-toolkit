@@ -10,14 +10,11 @@
 
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 
+import { execTool } from "../../src/exec.js";
 import { commitLeaseChanges, findCommitByOpId } from "../../src/git/worktree.js";
 import { pathExists } from "./queue-tools.js";
 import { stripDotSlash } from "../../src/file-keys.js";
-
-const execFileP = promisify(execFile);
 
 /** Sole-committer op-ID for the bootstrap commit (dedup across kill/replay). */
 export const BOOTSTRAP_OP_ID = "bootstrap:integration";
@@ -262,7 +259,7 @@ export async function runIntegrationBootstrap(
     const install =
       deps.install ??
       (async (cwd: string) => {
-        await execFileP("bun", ["install"], { cwd, timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+        await execTool("bun", ["install"], { cwd, timeoutMs: 300_000 });
       });
     await install(itg);
     outcome.installRan = true;

@@ -8,16 +8,13 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { execFile } from "node:child_process";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
 import { describeError } from "../src/dashboard/queries.js";
+import { execTool } from "../src/exec.js";
 import { GitError, git, gitPredicate } from "../src/git/exec.js";
-
-const execFileP = promisify(execFile);
 
 const tmpDirs: string[] = [];
 const savedPath = process.env.PATH;
@@ -161,21 +158,21 @@ describe("tryRun reports why it failed", () => {
   });
 });
 
-describe("dashboard describeError keeps the actionable part of execFile failures", () => {
+describe("dashboard describeError keeps the actionable part of exec failures", () => {
   test("non-zero exit: first stderr line, no argv echo", async () => {
-    const e = await execFileP("git", ["-C", "/nonexistent-dir-xyz", "log", "--pretty=%H\x1f%h\x1e"]).catch(
+    const e = await execTool("git", ["-C", "/nonexistent-dir-xyz", "log", "--pretty=%H\x1f%h\x1e"]).catch(
       (err: unknown) => err,
     );
     const msg = describeError(e);
     expect(msg).toContain("cannot change to");
     expect(msg).toContain("exited 128");
-    expect(msg).not.toContain("Command failed");
+    expect(msg).not.toContain("--pretty");
     expect(msg).not.toContain("\x1f");
     expect(msg).not.toContain("\x1e");
   });
 
   test("timeout: says it timed out rather than echoing the command", async () => {
-    const e = await execFileP("sleep", ["5"], { timeout: 100 }).catch((err: unknown) => err);
+    const e = await execTool("sleep", ["5"], { timeoutMs: 100 }).catch((err: unknown) => err);
     const msg = describeError(e);
     expect(msg).toContain("timed out");
     expect(msg).toContain("SIGTERM");
@@ -183,8 +180,11 @@ describe("dashboard describeError keeps the actionable part of execFile failures
   });
 
   test("spawn failure and plain errors keep their own message", async () => {
-    const enoent = await execFileP("definitely-not-a-binary-xyz", []).catch((err: unknown) => err);
+    const enoent = await execTool("definitely-not-a-binary-xyz", ["--arg-that-must-not-echo"]).catch(
+      (err: unknown) => err,
+    );
     expect(describeError(enoent)).toContain("definitely-not-a-binary-xyz");
+    expect(describeError(enoent)).not.toContain("--arg-that-must-not-echo");
     expect(describeError(new Error("boom\nsecond line"))).toBe("boom");
     expect(describeError("plain")).toBe("plain");
   });

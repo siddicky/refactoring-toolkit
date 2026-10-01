@@ -5,12 +5,11 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
+import { execTool } from "../exec.js";
 import {
   gitQueries,
   parseGitLog,
@@ -18,8 +17,6 @@ import {
   readBurnDownSources,
   readKillEventSources,
 } from "./queries.js";
-
-const run = promisify(execFile);
 
 // Field/record separators of the log format (queries.ts LOG_SEP / LOG_REC).
 const FS = "\x1f";
@@ -127,7 +124,7 @@ describe("gitQueries against a real scratch repository (C63)", () => {
   let dir = "";
   let repo = "";
   const gitIn = (cwd: string, args: string[]) =>
-    run("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-C", cwd, ...args]);
+    execTool("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-C", cwd, ...args]);
 
   beforeAll(async () => {
     dir = await mkdtemp(join(tmpdir(), "dash-git-"));

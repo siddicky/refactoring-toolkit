@@ -73,11 +73,10 @@
  * the guidance (audit C61).
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import {
   DexServiceError,
 } from "@superdurable/dex";
+import { describeExecFailure, ExecError, execTool, execToolResult } from "../src/exec.js";
 import { openDexClient, dexConfigFromEnv } from "../src/dex/client.js";
 import { dexCliQueries } from "../src/dashboard/queries.js";
 import { envelopeStream } from "../flows/steps/envelope.js";
@@ -100,8 +99,6 @@ import {
   parseFlowSummary,
   resolveFlowRunId,
 } from "../src/watcher/flow-summary.js";
-
-const execFileP = promisify(execFile);
 
 /**
  * cx6b live finding: the readStream long-poll wake-up ("nothing arrived in
@@ -135,20 +132,19 @@ async function targetPids(): Promise<number[]> {
   // One pgrep per pattern, concurrently: this runs inside the kill window.
   const found = await Promise.all(
     patterns.map(async (pattern): Promise<number[]> => {
-      try {
-        const { stdout } = await execFileP("pgrep", ["-f", pattern], { timeout: 5_000 });
-        return stdout
+      const r = await execToolResult("pgrep", ["-f", pattern], { timeoutMs: 5_000 });
+      if (r.ok) {
+        return r.stdout
           .split("\n")
           .map((line) => Number.parseInt(line.trim(), 10))
           .filter((pid) => Number.isInteger(pid) && pid > 0);
-      } catch (err) {
-        // pgrep exits 1 on no match — no PIDs for this pattern. Anything else
-        // (missing binary, timeout) would make a live target look absent, so say so.
-        if ((err as { code?: unknown }).code !== 1) {
-          log(`pgrep for ${JSON.stringify(pattern)} failed: ${(err as Error).message}`);
-        }
-        return [];
       }
+      // pgrep exits 1 on no match — no PIDs for this pattern. Anything else
+      // (missing binary, timeout) would make a live target look absent, so say so.
+      if (r.failure.exitCode !== 1) {
+        log(`pgrep for ${JSON.stringify(pattern)} failed: ${describeExecFailure(r.failure)}`);
+      }
+      return [];
     }),
   );
   return [...new Set(found.flat())];
@@ -199,16 +195,16 @@ async function main(): Promise<number> {
   let survivors: number[] = [];
   const fetchFlowSummary = async () => {
     try {
-      const out = await execFileP(
+      const out = await execTool(
         dexcliBin,
         ["flow", "summary", flowId, "-server", config.serverAddress, "-output", "json"],
-        { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
+        { timeoutMs: 10_000, maxBuffer: 4 * 1024 * 1024 },
       );
       const summary = parseFlowSummary(out.stdout);
       if (summary.runId !== null) observedRunId = summary.runId;
       return summary;
     } catch (err) {
-      throw new Error(`dexcli flow summary failed: ${oneLine(err)}`);
+      throw new Error(`dexcli flow summary failed: ${oneLine(err instanceof ExecError ? describeExecFailure(err.failure) : err)}`);
     }
   };
   // Not awaited: a slow/unreachable dexcli must not delay arming the watcher.

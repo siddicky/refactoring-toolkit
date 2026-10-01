@@ -17,6 +17,7 @@ import { builtinModules } from "node:module";
 import { basename, extname, join } from "node:path";
 
 import { REPO_ROOT } from "./support/paths.js";
+import { readSource, walkFiles } from "./support/source-files.js";
 
 function git(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" });
@@ -151,6 +152,20 @@ describe("package.json metadata and scripts", () => {
         expect(existsSync(join(REPO_ROOT, m[1] as string))).toBe(true);
       }
     }
+  });
+});
+
+describe("one process runner (audit C88)", () => {
+  // Built from parts so this file does not match its own pattern.
+  const COPY = new RegExp(["promisify", "\\(\\s*execFile\\s*\\)"].join(""));
+  const SCAN_DIRS = ["src", "flows", "harness", "scripts", "tests", "fixtures"];
+
+  test("only src/exec.ts wraps execFile: the flows, the dashboard and the scripts share it", () => {
+    const files = SCAN_DIRS.flatMap((d) => walkFiles(d, (rel) => rel.endsWith(".ts")));
+    expect(files.length).toBeGreaterThan(20);
+    const copies = files.filter((rel) => rel !== "src/exec.ts" && COPY.test(readSource(rel)));
+    expect(copies).toEqual([]);
+    expect(COPY.test(readSource("src/exec.ts"))).toBe(true);
   });
 });
 

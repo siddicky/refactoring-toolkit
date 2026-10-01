@@ -27,14 +27,11 @@
 
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
-import { promisify } from "node:util";
 import { sanitizeFileKey } from "../src/file-keys.js";
-
-const execFileP = promisify(execFile);
 import {
   dexConfigFromEnv,
   openDexClient,
@@ -287,11 +284,7 @@ async function gitSelftest(): Promise<number> {
  */
 async function latestRoundFor(repoDir: string, file: string): Promise<number> {
   const escaped = escapeRegExp(file);
-  const { stdout } = await execFileP(
-    "git",
-    ["log", "--all", "--grep", `Operation-ID: ${escaped}#`, "--format=%B"],
-    { cwd: repoDir, maxBuffer: 16 * 1024 * 1024 },
-  );
+  const stdout = await git(repoDir).run(["log", "--all", "--grep", `Operation-ID: ${escaped}#`, "--format=%B"]);
   let max = 0;
   for (const m of stdout.matchAll(new RegExp(`Operation-ID: ${escaped}#(\\d+)`, "g"))) {
     const n = Number.parseInt(m[1] ?? "0", 10);
@@ -1115,8 +1108,7 @@ export function parseWorktreeList(porcelain: string): WorktreeRef[] {
 
 /** Worktrees registered with the repository: durable git state, never an in-memory store. */
 async function listWorktrees(repoDir: string): Promise<WorktreeRef[]> {
-  const { stdout } = await execFileP("git", ["worktree", "list", "--porcelain"], { cwd: repoDir });
-  return parseWorktreeList(stdout);
+  return parseWorktreeList(await git(repoDir).run(["worktree", "list", "--porcelain"]));
 }
 
 function escapeRegExp(s: string): string {

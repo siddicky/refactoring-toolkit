@@ -7,17 +7,14 @@
 
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 
+import { execToolResult } from "../../src/exec.js";
 import {
   parseVitestOutput,
   parseVitestSummary,
   type VitestFailureRecord,
   type VitestRunState,
 } from "../../src/queues/vitest-queue.js";
-
-const execFileP = promisify(execFile);
 
 const TSC_BIN = join(import.meta.dir, "..", "..", "node_modules", ".bin", "tsc");
 
@@ -51,30 +48,17 @@ export async function runCaptured(
   args: readonly string[],
   opts: { cwd: string; timeoutMs: number },
 ): Promise<CapturedRun> {
-  try {
-    const { stdout, stderr } = await execFileP(bin, [...args], {
-      cwd: opts.cwd,
-      timeout: opts.timeoutMs,
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    return { stdout, stderr, exitCode: 0, signal: null, killed: false, errorCode: null };
-  } catch (err) {
-    const e = err as {
-      stdout?: string;
-      stderr?: string;
-      code?: number | string | null;
-      signal?: string | null;
-      killed?: boolean;
-    };
-    return {
-      stdout: e.stdout ?? "",
-      stderr: e.stderr ?? "",
-      exitCode: typeof e.code === "number" ? e.code : null,
-      signal: e.signal ?? null,
-      killed: e.killed === true,
-      errorCode: typeof e.code === "string" ? e.code : null,
-    };
-  }
+  const r = await execToolResult(bin, args, { cwd: opts.cwd, timeoutMs: opts.timeoutMs });
+  if (r.ok) return { stdout: r.stdout, stderr: r.stderr, exitCode: 0, signal: null, killed: false, errorCode: null };
+  const f = r.failure;
+  return {
+    stdout: f.stdout,
+    stderr: f.stderr,
+    exitCode: f.exitCode,
+    signal: f.signal,
+    killed: f.killed,
+    errorCode: f.spawnError,
+  };
 }
 
 export async function pathExists(p: string): Promise<boolean> {

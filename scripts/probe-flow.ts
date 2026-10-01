@@ -49,11 +49,8 @@ import {
   operationId,
   type CompletionMarker,
 } from "../src/git/worktree.js";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { git } from "../src/git/exec.js";
 import { identityKeyOf } from "../src/file-keys.js";
-
-const execFileP = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Command-line inputs. This module has no argv of its own (run-demo.ts drives
@@ -160,8 +157,7 @@ export interface RoundInput {
 
 async function gitDiff(worktreePath: string): Promise<string> {
   try {
-    const { stdout } = await execFileP("git", ["diff", "HEAD"], { cwd: worktreePath });
-    return stdout;
+    return await git(worktreePath).run(["diff", "HEAD"]);
   } catch (err) {
     return `<<diff failed: ${(err as Error).message}>>`;
   }
@@ -380,12 +376,7 @@ const ProbeIntegrateStep = envelopeStepClass<RoundInput, { integratedSha: string
 });
 
 async function leaseBranchOf(input: RoundInput): Promise<string> {
-  const { stdout } = await execFileP(
-    "git",
-    ["rev-parse", "--abbrev-ref", "HEAD"],
-    { cwd: input.worktreePath },
-  );
-  return stdout.trim();
+  return (await git(input.worktreePath).run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
 }
 
 function tokenSum(usage: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number }): number {
