@@ -415,6 +415,29 @@ export interface VerdictTombstone {
   tokens: number | TokenUsage | null;
 }
 
+/**
+ * One reviewer's citation-gate result for a file+round, as the flow's gate
+ * persisted it (`pp-kept`: `citationGate` scores + `dropped`). This is the
+ * score the gate APPLIED (live Jev's p_cited when a key is configured), unlike
+ * `VerdictRecord.citation_check`, which is the deterministic check stamped at
+ * review time. The report shows both and says which is which (C14).
+ */
+export interface CitationGateView {
+  file: string;
+  round: number;
+  reviewer: string;
+  /** "naive" | "jev" | "naive-fallback": what produced the scores. */
+  checker: string;
+  /** Why live Jev was abandoned (checker "naive-fallback"); null otherwise. */
+  fallbackReason: string | null;
+  scores: Array<{
+    finding_id: string;
+    p_cited: number;
+    /** What the gate did with the finding. */
+    outcome: "kept" | "dropped-citation" | "dropped-disposition";
+  }>;
+}
+
 /** Narrow an unknown/union verdict-attribute value to a tombstone. */
 export function isVerdictTombstone(value: unknown): value is VerdictTombstone {
   return (

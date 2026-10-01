@@ -208,7 +208,7 @@ describe("renderReport against recorded fixture events (run-a + dex history)", (
     expect(rendered.markdown).toContain("### src/Auth/LdapAuth.php — round 1 (agreement: disagree)");
     expect(rendered.markdown).toContain("(agreement: agree-clean)");
     expect(rendered.markdown).toContain("(agreement: unreviewed)");
-    expect(rendered.markdown).toContain("- citation checks: F1=1.00, F2=1.00");
+    expect(rendered.markdown).toContain("- citation checks (deterministic, at review time; no gate record): F1=1.00, F2=1.00");
     expect(rendered.markdown).toContain("F5=0.40");
     expect(rendered.markdown).toContain("tokens (model-calling roles): 15640");
     expect(rendered.markdown).toContain("- envelopes: 54 (start markers: 15, interrupted: 1)");

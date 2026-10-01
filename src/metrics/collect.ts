@@ -6,7 +6,9 @@
  * its `main()` on import and cannot be).
  */
 import {
+  type CitationGateView,
   type EnvelopeEvent,
+  fileFromIdentity,
   fileFromSanitizedKey,
   type JevUsageEntry,
   type QueueBurnDownEvent,
@@ -176,6 +178,59 @@ export function collectEnvelopes(attrs: readonly StateAttribute[]): EnvelopeEven
   const startedAt = (e: EnvelopeEvent): string =>
     typeof e.started_at === "string" ? e.started_at : "";
   return out.sort((p, q) => startedAt(p).localeCompare(startedAt(q)));
+}
+
+/**
+ * The citation gate's own scores (`pp-kept/<sanitized-file>#<round>`, value =
+ * KeptFindings): per reviewer, the p_cited the gate APPLIED and what it did
+ * with each finding. The verdict records carry only the deterministic check
+ * stamped at review time, which can read 1.00 for a finding the live Jev gate
+ * dropped at 0.3, so the report needs this attribute to show the gate's score
+ * (C14). Records that predate `citationGate`, and malformed ones, yield nothing.
+ */
+export function collectCitationGates(attrs: readonly StateAttribute[]): CitationGateView[] {
+  const out: CitationGateView[] = [];
+  for (const a of attrs) {
+    if (!a.key.startsWith("pp-kept/")) continue;
+    const target = fileFromIdentity(a.key.slice("pp-kept/".length));
+    const kept = a.value as {
+      citationGate?: unknown;
+      dropped?: unknown;
+    } | null;
+    if (target === null || kept === null || typeof kept !== "object" || !Array.isArray(kept.citationGate)) continue;
+    const dropped = (Array.isArray(kept.dropped) ? kept.dropped : []) as Array<{
+      finding_id?: unknown;
+      reviewer?: unknown;
+      p_cited?: unknown;
+    } | null>;
+    for (const raw of kept.citationGate as unknown[]) {
+      const g = raw as { reviewer?: unknown; checker?: unknown; fallbackReason?: unknown; scores?: unknown } | null;
+      if (g === null || typeof g !== "object" || typeof g.reviewer !== "string" || !Array.isArray(g.scores)) continue;
+      const reviewer = g.reviewer;
+      const scores: CitationGateView["scores"] = [];
+      for (const s of g.scores as unknown[]) {
+        const score = s as { finding_id?: unknown; p_cited?: unknown } | null;
+        if (typeof score?.finding_id !== "string" || typeof score.p_cited !== "number") continue;
+        const drop = dropped.find((d) => d?.reviewer === reviewer && d.finding_id === score.finding_id);
+        scores.push({
+          finding_id: score.finding_id,
+          p_cited: score.p_cited,
+          outcome: drop == null ? "kept" : typeof drop.p_cited === "number" ? "dropped-citation" : "dropped-disposition",
+        });
+      }
+      out.push({
+        file: target.file,
+        round: target.round,
+        reviewer,
+        checker: typeof g.checker === "string" ? g.checker : "unknown",
+        fallbackReason: typeof g.fallbackReason === "string" ? g.fallbackReason : null,
+        scores,
+      });
+    }
+  }
+  return out.sort((p, q) =>
+    `${p.file}#${p.round}#${p.reviewer}`.localeCompare(`${q.file}#${q.round}#${q.reviewer}`),
+  );
 }
 
 /**

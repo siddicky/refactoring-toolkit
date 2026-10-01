@@ -20,7 +20,9 @@
  *   `metrics` member is the AC2 VerdictRecord — plus the US-006 tombstone
  *   variant `{reviewer, discarded, reason, attempt, tokens}`), `queue-burndown/*`,
  *   `pp-jev-usage/*` (live TypeSafe Jev spend — reported as its own
- *   "judgment (Jev)" line, never folded into the model-calling totals);
+ *   "judgment (Jev)" line, never folded into the model-calling totals),
+ *   `pp-kept/*` (the citation gate's own p_cited and decision per reviewer,
+ *   shown beside the deterministic check on the verdict record);
  * - `dexcli flow history <flowId>` (typed dispatch anchoring);
  * - `dexcli flow summary <flowId>` (run ids + flowStatus; fetched once);
  * - optional chaos sidecar (JSON lines, intent/completed records) merged into
@@ -46,6 +48,7 @@ import {
 import { dexConfigFromEnv } from "../src/dex/client.js";
 import {
   collectBurnDown,
+  collectCitationGates,
   collectEnvelopes,
   collectJevUsage,
   collectTombstones,
@@ -59,6 +62,7 @@ import {
 import { loadKillEvents, resumedAfterKill, withResumed } from "../src/metrics/kill-events.js";
 import { renderReport } from "../src/metrics/render.js";
 import type {
+  CitationGateView,
   EnvelopeEvent,
   JevUsageEntry,
   QueueBurnDownEvent,
@@ -272,6 +276,7 @@ async function main(argv: readonly string[]): Promise<number> {
   const tombstones: Array<VerdictTombstone & { file: string; round: number }> = [];
   const burnDown: QueueBurnDownEvent[] = [];
   const jevUsage: JevUsageEntry[] = [];
+  const citationGates: CitationGateView[] = [];
   for (const id of [flowId, ...childIds]) {
     const s = id === flowId ? state : (runDexcli(["flow", "state", id]) as FlowState);
     envelopes.push(...collectEnvelopes(s.attributes ?? []));
@@ -279,6 +284,7 @@ async function main(argv: readonly string[]): Promise<number> {
     tombstones.push(...collectTombstones(s.attributes ?? []));
     burnDown.push(...collectBurnDown(s.attributes ?? []));
     jevUsage.push(...collectJevUsage(s.attributes ?? []));
+    citationGates.push(...collectCitationGates(s.attributes ?? []));
   }
 
   for (const id of childIds) {
@@ -303,6 +309,7 @@ async function main(argv: readonly string[]): Promise<number> {
     tombstones,
     burnDown,
     jevUsage,
+    citationGates,
     ...(killEvents !== null ? { killEvents } : {}),
     killEventDiagnostics: loaded.diagnostics,
     history,

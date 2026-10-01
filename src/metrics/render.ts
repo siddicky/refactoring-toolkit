@@ -34,6 +34,7 @@ import {
   PREP_SPEC_FILE,
   sanitizeFileKey,
   type CitationCheckResult,
+  type CitationGateView,
   type EnvelopeEvent,
   type EnvelopeRole,
   type Finding,
@@ -73,6 +74,12 @@ export interface MetricsRenderInput {
    * with ZERO completed records and >= 2 tombstones is DEGRADED.
    */
   tombstones?: ReadonlyArray<VerdictTombstone & { file: string; round: number }>;
+  /**
+   * The citation gate's own scores per reviewer and round (`pp-kept`), so the
+   * report can show the p_cited the gate APPLIED next to the deterministic
+   * review-time check on the verdict record (C14).
+   */
+  citationGates?: readonly CitationGateView[];
   burnDown: readonly QueueBurnDownEvent[];
   /**
    * Live TypeSafe Jev usage from the flows' `pp-jev-usage` attribute (parent +
@@ -153,7 +160,14 @@ export interface ReportJson {
     /** True when the round reached verdict-check with every reviewer discarded. */
     degraded: boolean;
     tombstones: Array<{ reviewer: string; reason: string; attempt: number }>;
+    /**
+     * The deterministic citation check stamped on the verdict records at review
+     * time. NOT what the gate decided on when live Jev is configured: see
+     * `citation_gate`.
+     */
     citation_checks: CitationCheckResult[];
+    /** The gate's own p_cited and decision per reviewer; empty when no gate record exists (older evidence). */
+    citation_gate: Array<Omit<CitationGateView, "file" | "round">>;
   }>;
   tokens_by_file_role: Array<{
     file: string;
@@ -458,6 +472,15 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     const citationChecks: CitationCheckResult[] = records.flatMap((r) =>
       r.citation_check.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
     );
+    const citationGate = (input.citationGates ?? [])
+      .filter((g) => canonicalFile(g.file) === file && g.round === round)
+      .map((g) => ({
+        reviewer: g.reviewer,
+        checker: g.checker,
+        fallbackReason: g.fallbackReason,
+        scores: g.scores,
+      }))
+      .sort((p, q) => compareStrings(p.reviewer, q.reviewer));
     fileRounds.push({
       file,
       round,
@@ -472,6 +495,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
         .map((t) => ({ reviewer: t.reviewer, reason: t.reason, attempt: t.attempt }))
         .sort((p, q) => compareStrings(p.reviewer, q.reviewer)),
       citation_checks: citationChecks,
+      citation_gate: citationGate,
     });
   }
   fileRounds.sort((p, q) => (p.file !== q.file ? compareStrings(p.file, q.file) : p.round - q.round));
@@ -879,11 +903,25 @@ function renderMarkdown(report: ReportJson): string {
     for (const t of fr.tombstones) {
       lines.push(`- tombstone: ${mdCell(t.reviewer)} discarded at attempt ${t.attempt} — ${mdCell(t.reason)}`);
     }
+    // The gate's own score first: it is what decided which findings reached the
+    // fixer. The verdict record's check is the deterministic one stamped at
+    // review time and can disagree with a live Jev gate (C14).
+    for (const g of fr.citation_gate) {
+      const via = g.checker === "naive-fallback" ? `naive-fallback: ${mdCell(g.fallbackReason ?? "no reason recorded")}` : g.checker;
+      const scores = g.scores
+        .map((s) => `${mdCell(s.finding_id)}=${pFmt(s.p_cited)} ${s.outcome === "kept" ? "kept" : s.outcome === "dropped-citation" ? "dropped (citation)" : "dropped (disposition)"}`)
+        .join(", ");
+      lines.push(`- citation gate (${via}) ${mdCell(g.reviewer)}: ${scores === "" ? "no findings scored" : scores}`);
+    }
     if (fr.citation_checks.length > 0) {
       const checks = fr.citation_checks
         .map((c) => `${c.finding_id}=${pFmt(c.p_cited)}`)
         .join(", ");
-      lines.push(`- citation checks: ${checks}`);
+      lines.push(
+        fr.citation_gate.length > 0
+          ? `- review-time citation checks (deterministic, before the gate): ${checks}`
+          : `- citation checks (deterministic, at review time; no gate record): ${checks}`,
+      );
     }
   }
   lines.push("");

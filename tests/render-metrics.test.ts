@@ -380,6 +380,17 @@ describe("render-metrics end to end against a stub dexcli (C36 C39 C42 C45 C38)"
       value: { metrics: v },
     })),
     ...stream.burn_down.map((v, i) => ({ key: `queue-burndown/${i}`, value: v })),
+    // The citation gate's own record for one round (C14): live Jev dropped F2 at 0.30.
+    {
+      key: "pp-kept/src__Auth__LdapAuth.php#1",
+      value: {
+        findings: [],
+        dropped: [{ finding_id: "F2", reviewer: "reviewer-A", reason: "citation check failed (p_cited=0.3)", p_cited: 0.3 }],
+        citationGate: [
+          { reviewer: "reviewer-A", checker: "jev", fallbackReason: null, scores: [{ finding_id: "F1", p_cited: 0.97 }, { finding_id: "F2", p_cited: 0.3 }] },
+        ],
+      },
+    },
   ];
 
   writeFileSync(
@@ -473,6 +484,10 @@ process.stdout.write(JSON.stringify(table[key]));
     });
     // Child flow's Jev usage joined the report.
     expect(report.jev_usage?.total_tokens).toBe(321);
+    // The citation gate's own score is read from pp-kept and shown (C14).
+    expect(readFileSync(join(outDir, "report.md"), "utf8")).toContain(
+      "- citation gate (jev) reviewer-A: F1=0.97 kept, F2=0.30 dropped (citation)",
+    );
   });
 
   test("a flow with no envelope evidence exits non-zero with NO EVIDENCE instead of a vacuous pass (C48)", async () => {
