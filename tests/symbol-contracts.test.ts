@@ -223,6 +223,79 @@ describe("C21: harvestPhpSymbols ignores comments", () => {
   });
 });
 
+describe("B7: a `/*` inside a line comment or a string opens no phantom block comment", () => {
+  const names = (lines: string[]): string[] => harvestPhpSymbols("A.php", lines.join("\n")).map((s) => s.name);
+
+  test("`// ... /* ...` before two methods loses neither (was: both swallowed)", () => {
+    expect(
+      names([
+        "<?php",
+        "class A {",
+        " // matches /* style comments",
+        " public function first(int $x): int { return $x; }",
+        " public function second(string $s): string { return $s; }",
+        "}",
+      ]),
+    ).toEqual(["first", "second"]);
+  });
+
+  test("a trailing `// see /* old` after code does not swallow the methods that follow (was: only `first` survived)", () => {
+    expect(
+      names([
+        "<?php",
+        "class A {",
+        " public function first(int $x): int { return $x; } // see /* old",
+        " public function second(string $s): string { return $s; }",
+        " public function third(): void {}",
+        "}",
+      ]),
+    ).toEqual(["first", "second", "third"]);
+  });
+
+  test("the same for a `#` comment, and for a `/*` that only a docblock further down closes", () => {
+    expect(
+      names([
+        "<?php",
+        "class A {",
+        " # matches /* style comments",
+        " public function first(): int { return 1; }",
+        "",
+        " /** the docblock of second */",
+        " public function second(): int { return 2; }",
+        "}",
+      ]),
+    ).toEqual(["first", "second"]);
+  });
+
+  test("a string holding `/*` or `//` is not a comment, even when the declaration shares its line", () => {
+    expect(
+      names([
+        "<?php",
+        "class A {",
+        ' public function glob(string $pattern = "src/*"): string { return $pattern; }',
+        ' public function url(string $u = "http://x/*y"): string { return $u; }',
+        " public function after(): int { return 1; }",
+        "}",
+      ]),
+    ).toEqual(["glob", "url", "after"]);
+  });
+
+  test("real comments still hide what they contain, including a multi-line block that mentions `//` and `#`", () => {
+    expect(
+      names([
+        "<?php",
+        "class A {",
+        " /* function hidden(x) {} ",
+        "    // not a line comment here",
+        "    # function alsoHidden(y) {} */",
+        " public function visible(): int { return 1; }",
+        " #[Route('/a')] public function attributed(): int { return 2; }",
+        "}",
+      ]),
+    ).toEqual(["visible", "attributed"]);
+  });
+});
+
 describe("C21: the symbol cap is shared and its truncation is visible", () => {
   const manyMethods = ["<?php", "class Big {", ...Array.from({ length: 25 }, (_, i) => `    public function m${i}(int $a): int { return $a; }`), "}"].join("\n");
 

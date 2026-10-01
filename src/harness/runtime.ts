@@ -820,6 +820,55 @@ export interface SymbolHarvest {
 }
 
 /**
+ * The source lines with PHP comments removed, left to right, so what opens a
+ * comment is decided by what comes first on the line: a `/*` inside a `//` or
+ * `#` comment (or inside a string such as "src/*") opens nothing, and a `//`
+ * inside a string is not a comment. Block comments carry across lines; quote
+ * state does not (an unterminated quote ends with its line). `#[` is a PHP
+ * attribute, not a comment.
+ */
+function stripPhpComments(lines: readonly string[]): string[] {
+  let inBlock = false;
+  return lines.map((line) => {
+    let out = "";
+    let quote: string | null = null;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line.charAt(i);
+      const next = line.charAt(i + 1);
+      if (inBlock) {
+        if (ch === "*" && next === "/") {
+          inBlock = false;
+          i++;
+        }
+        continue;
+      }
+      if (quote !== null) {
+        out += ch;
+        if (ch === "\\") {
+          out += next;
+          i++;
+        } else if (ch === quote) {
+          quote = null;
+        }
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        out += ch;
+      } else if (ch === "/" && next === "*") {
+        inBlock = true;
+        i++;
+      } else if ((ch === "/" && next === "/") || (ch === "#" && next !== "[")) {
+        break;
+      } else {
+        out += ch;
+      }
+    }
+    return out;
+  });
+}
+
+/**
  * Deterministic, code-only harvest of PHP symbols from one source file
  * (read-only input for the per-symbol table). Zero model calls. Captures
  * named functions, class methods, and typed properties, each with its
@@ -858,23 +907,23 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
     return null;
   };
 
+  // The same lines with comments removed (strings kept): declarations are
+  // matched on these, so prose in a comment never yields or hides a symbol.
+  const codeLines = stripPhpComments(lines);
   // The class each symbol sits in (B6): `self` / `static` map to its name.
-  const classDecls = [
-    ...phpSource.matchAll(/^[ \t]*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\s+(\w+)/gm),
-  ].map((m) => ({ at: m.index ?? 0, name: m[1] ?? "" }));
-  const classAt = (offset: number): string | undefined => {
+  const classDecls = codeLines.flatMap((code, line) => {
+    const m = /^\s*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\s+(\w+)/.exec(code);
+    return m === null ? [] : [{ line, name: m[1] ?? "" }];
+  });
+  const classAt = (line: number): string | undefined => {
     let found: string | undefined;
     for (const decl of classDecls) {
-      if (decl.at > offset) break;
+      if (decl.line > line) break;
       found = decl.name;
     }
     return found;
   };
-  const lineStarts: number[] = [];
-  lines.reduce((at, l) => {
-    lineStarts.push(at);
-    return at + l.length + 1;
-  }, 0);
+  const lineOfOffset = (offset: number): number => phpSource.slice(0, offset).split("\n").length - 1;
 
   const push = (
     kind: PhpSymbol["kind"],
@@ -882,7 +931,7 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
     signature: string,
     index: number,
     docblockOverride?: string,
-    offset: number = lineStarts[index] ?? 0,
+    classLine: number = index,
   ): void => {
     const key = `${kind}:${name}`;
     if (seen.has(key)) return;
@@ -891,7 +940,7 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
       omitted++;
       return;
     }
-    const className = classAt(offset);
+    const className = classAt(classLine);
     symbols.push({
       name,
       kind,
@@ -910,36 +959,17 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
     const type = m[1];
     const name = m[2];
     if (type !== undefined && name !== undefined) {
-      push("property", name, `$${name} — @var ${type}`, -1, `@var ${type}`, m.index ?? 0);
+      push("property", name, `$${name} — @var ${type}`, -1, `@var ${type}`, lineOfOffset(m.index ?? 0));
     }
   }
 
-  let inBlockComment = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    // Strip comments so neither a declaration regex nor a phantom `function`
-    // mention inside a docblock / `// ...` / `# ...` can produce a symbol;
-    // code sharing a line with a comment (`/** @return int */ public function
-    // f()`) is still harvested. A block opener must follow whitespace or
-    // punctuation, so a string such as "src/*" cannot open a bogus comment.
-    let code: string;
-    if (inBlockComment) {
-      const end = line.indexOf("*/");
-      inBlockComment = end < 0;
-      code = end < 0 ? "" : line.slice(end + 2);
-    } else {
-      code = line.replace(/\/\*.*?\*\//g, "");
-      const opener = /(^|[\s;{}(),])\/\*/.exec(code);
-      if (opener !== null) {
-        inBlockComment = true;
-        code = code.slice(0, opener.index + (opener[1] ?? "").length);
-      }
-    }
-    const codeTrimmed = code.trim();
-    code =
-      codeTrimmed.startsWith("//") || (codeTrimmed.startsWith("#") && !codeTrimmed.startsWith("#["))
-        ? ""
-        : code.replace(/\s\/\/.*$/, "");
+    // Neither a declaration regex nor a phantom `function` mention inside a
+    // docblock / `// ...` / `# ...` can produce a symbol; code sharing a line
+    // with a comment (`/** @return int */ public function f()`) is still
+    // harvested.
+    const code = codeLines[i] ?? "";
     if (code.trim().length > 0) {
       // Typed properties with a @var docblock are harvested via their docblock
       // annotation (handled below); functions and methods via signatures.
