@@ -149,12 +149,20 @@ export interface JudgmentClient {
 
 // ---- env handling ---------------------------------------------------------------
 
-/** Env var names. The API key comes from TYPESAFE_API_KEY only — never from code. */
+/**
+ * Env var names THIS module reads. The API key comes from TYPESAFE_API_KEY only
+ * — never from code.
+ *
+ * TYPESAFE_BASE_URL, TYPESAFE_DEFAULT_MODEL and TYPESAFE_LOG_LEVEL are read by
+ * the @typesafe-ai/sdk client itself (explicit option, then env, then SDK
+ * default) when createRealJevClient does not pass them. They used to be listed
+ * here as well but nothing in this repo read them, which made them look wired
+ * when only the SDK honoured them; they are deliberately not repeated.
+ * tests/typesafe-sdk-env.test.ts proves the SDK picks them up.
+ */
 export const TYPESAFE_ENV_VARS = {
   apiKey: "TYPESAFE_API_KEY",
   offline: "TYPESAFE_OFFLINE",
-  baseURL: "TYPESAFE_BASE_URL",
-  defaultModel: "TYPESAFE_DEFAULT_MODEL",
 } as const;
 
 /**
