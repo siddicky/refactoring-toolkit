@@ -30,7 +30,6 @@ import {
   Stream,
   Wait,
   gracefulComplete,
-  goTo,
 } from "@superdurable/dex";
 import type {
   AsyncContext,
@@ -429,6 +428,37 @@ export function envelopeStep<I, O>(spec: EnvelopeSpec<I, O>): Step<I> {
 }
 
 /**
+ * What a class-form step was built from. The dispatch anchor's step table
+ * (PORT_FLOW_STEPS in src/metrics/dispatch-anchor.ts) mirrors these triples by
+ * hand, because the metrics layer never imports flow code; this registry lets
+ * tests/mirror-drift.test.ts compare the mirror with the real flows. A start
+ * marker records its TARGET step's stepId and role (its own envelope is
+ * `<stepId>:start`, role record).
+ */
+export interface EnvelopeStepIdentity {
+  stepType: string;
+  stepId: string;
+  role: EnvelopeRole;
+  marker: boolean;
+}
+
+const stepIdentities = new WeakMap<object, EnvelopeStepIdentity>();
+
+/** The identity a step INSTANCE's class was built with; undefined for a step not made by the class factories. */
+export function envelopeStepIdentityOf(step: object): EnvelopeStepIdentity | undefined {
+  return stepIdentities.get(step.constructor);
+}
+
+/** Every step a flow registers, by dex step type, with its recorded identity (undefined when not factory-made). */
+export function registeredSteps(flow: Flow<any>): Map<string, EnvelopeStepIdentity | undefined> {
+  const steps = new Map<string, EnvelopeStepIdentity | undefined>();
+  for (const definition of flow.getSteps()) {
+    steps.set(definition.step.getStepType(), envelopeStepIdentityOf(definition.step));
+  }
+  return steps;
+}
+
+/**
  * Class form of {@link envelopeStep}: dex step movement (goTo) identifies
  * steps by their runtime CLASS, so chained flows use this variant and route
  * with `goTo(NextStepClass, input)`. The returned constructor is concrete so
@@ -468,37 +498,6 @@ export function envelopeStepClass<I, O>(
     marker: false,
   });
   return stepClass;
-}
-
-/**
- * What a class-form step was built from. The dispatch anchor's step table
- * (PORT_FLOW_STEPS in src/metrics/dispatch-anchor.ts) mirrors these triples by
- * hand, because the metrics layer never imports flow code; this registry lets
- * tests/mirror-drift.test.ts compare the mirror with the real flows. A start
- * marker records its TARGET step's stepId and role (its own envelope is
- * `<stepId>:start`, role record).
- */
-export interface EnvelopeStepIdentity {
-  stepType: string;
-  stepId: string;
-  role: EnvelopeRole;
-  marker: boolean;
-}
-
-const stepIdentities = new WeakMap<object, EnvelopeStepIdentity>();
-
-/** The identity a step INSTANCE's class was built with; undefined for a step not made by the class factories. */
-export function envelopeStepIdentityOf(step: object): EnvelopeStepIdentity | undefined {
-  return stepIdentities.get(step.constructor);
-}
-
-/** Every step a flow registers, by dex step type, with its recorded identity (undefined when not factory-made). */
-export function registeredSteps(flow: Flow<any>): Map<string, EnvelopeStepIdentity | undefined> {
-  const steps = new Map<string, EnvelopeStepIdentity | undefined>();
-  for (const definition of flow.getSteps()) {
-    steps.set(definition.step.getStepType(), envelopeStepIdentityOf(definition.step));
-  }
-  return steps;
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +657,8 @@ export function envelopeStartMarker<I>(spec: StartMarkerSpec<I>): EnvelopeStepCl
     },
     route: (_ctx, input) => spec.route(input),
   });
+  // The factory recorded the marker's own envelope (`<target>:start`, record);
+  // the identity a drift check wants is the target step it precedes.
   stepIdentities.set(markerClass, {
     stepType: spec.stepType,
     stepId: spec.targetStepId,

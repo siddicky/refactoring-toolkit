@@ -25,7 +25,6 @@ import {
   makeCommitReachable,
   mergeLeaseIntoIntegration,
   operationId,
-  roundOfOpId,
 } from "../src/git/worktree.js";
 import { git } from "../src/git/exec.js";
 import { makeFixtureRepo } from "../src/git/fixture.js";

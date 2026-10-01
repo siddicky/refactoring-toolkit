@@ -42,7 +42,6 @@ import {
   type QueueBurnDownEvent,
   type QueueKind,
   type ReportKillEvent,
-  type TokenUsage,
   type TscRunAccounting,
   type VerdictRecord,
   type VerdictTombstone,

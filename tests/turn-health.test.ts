@@ -156,7 +156,7 @@ const DEGENERATE_FIXTURES: ReadonlyArray<{ label: string; fixture: RawMessage }>
 describe("Tier-0 degenerate-turn detection (raw SDK shapes through the real extractors)", () => {
   test("all ten degenerate no-text fixtures throw retryable OpencodePromptError", async () => {
     expect(DEGENERATE_FIXTURES.length).toBe(10);
-    for (const { label, fixture } of DEGENERATE_FIXTURES) {
+    for (const { fixture } of DEGENERATE_FIXTURES) {
       const h = harness(fixture);
       let caught: unknown;
       try {
@@ -347,7 +347,7 @@ describe("envelope telemetry stream (US-002)", () => {
 // same predicate and that Tier-1 evidence has zero control-flow consumers.
 // ---------------------------------------------------------------------------
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
