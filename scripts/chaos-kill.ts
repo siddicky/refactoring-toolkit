@@ -12,14 +12,56 @@
  *
  * Usage:
  *   bun run scripts/chaos-kill.ts --pids 123,456 --reason "hello-flow-kill" \
- *     [--events /tmp/kill-events.json] [--run-id <id>] [--wait-ms 5000]
+ *     [--events metrics/kill-events.jsonl] [--run-id <id>] \
+ *     [--flow-run-id <dexRunId>] [--wait-ms 5000]
+ *
+ * Every --pids entry must be a PID > 1 and --wait-ms a whole number of
+ * milliseconds: an unparsable value is a usage error (exit 64), never silently
+ * dropped (a dropped PID would shrink the kill set without a trace).
+ *
+ * Exit codes ({@link CHAOS_KILL_EXIT}, the SAME numbers and meanings as
+ * watch-queue-verify's, so one table covers both tools): 0 every target exited
+ * after SIGKILL; 3 NO-OP (no target was alive, nothing was killed); 4 a target
+ * survived SIGKILL; 64 usage error; 70 fatal internal error.
+ *
+ * Sidecar path: `--events`, default {@link DEFAULT_KILL_EVENTS_PATH}
+ * (`metrics/kill-events.jsonl`, relative to the cwd; /metrics/ is the repo's
+ * gitignored run-output directory, and the parent directory is created on
+ * first write). Shared by chaos-kill and watch-queue-verify (Contract B).
  *
  * Sidecar format: JSON lines, one object per line, append-only:
  *   {"kind":"intent",    run_id, utc, monotonic_ms, target_pids, signal, reason}
- *   {"kind":"completed", run_id, utc, monotonic_ms, killed_pids, notes}
+ *   {"kind":"completed", run_id, utc, monotonic_ms, killed_pids, notes, fired}
+ * `fired` is `killed_pids.length > 0`. A completion with fired:false is a
+ * NO-OP — nothing was killed — and its notes say so; it must never be read as
+ * a successful kill-and-resume.
  */
 
-import { appendFileSync, closeSync, fsyncSync, openSync } from "node:fs";
+import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync } from "node:fs";
+import { dirname } from "node:path";
+
+import { WATCHER_EXIT, parseFlagValues } from "../src/watcher/cli-args.js";
+
+/**
+ * Default kill-event sidecar path (Contract B): JSON Lines, relative to the
+ * cwd, inside the gitignored /metrics/ run-output directory. Explicit
+ * `--events` flags still win.
+ */
+export const DEFAULT_KILL_EVENTS_PATH = "metrics/kill-events.jsonl";
+
+/**
+ * Exit codes of the chaos-kill CLI: a subset of watch-queue-verify's table
+ * (WATCHER_EXIT) with identical numbers and meanings, never overlapping it.
+ */
+export const CHAOS_KILL_EXIT = {
+  ok: WATCHER_EXIT.fired,
+  /** No target was alive: nothing was killed. */
+  noop: WATCHER_EXIT.noop,
+  /** A target survived SIGKILL. */
+  survivors: WATCHER_EXIT.survivor,
+  usage: WATCHER_EXIT.usage,
+  fatal: WATCHER_EXIT.fatal,
+} as const;
 
 export interface KillEventIntent {
   kind: "intent";
@@ -29,7 +71,7 @@ export interface KillEventIntent {
   target_pids: number[];
   signal: "SIGKILL";
   reason: string;
-  /** Dex flow run id, when known — the sidecar self-anchors to the run. */
+  /** Real Dex RUN id (not the flow id), when known — the sidecar self-anchors to the run. */
   flow_run_id?: string;
 }
 
@@ -40,11 +82,18 @@ export interface KillEventCompletion {
   monotonic_ms: number;
   killed_pids: number[];
   notes: string;
-  /** Dex flow run id, when known — the sidecar self-anchors to the run. */
+  /** True only when at least one process was actually killed (`killed_pids.length > 0`). */
+  fired: boolean;
+  /** Real Dex RUN id (not the flow id), when known — the sidecar self-anchors to the run. */
   flow_run_id?: string;
 }
 
-export type KillEvent = KillEventIntent | KillEventCompletion;
+/**
+ * One line of the kill sidecar as this writer emits it. (Named KillSidecarLine
+ * so it no longer collides with `KillEvent` in src/metrics/types.ts, the
+ * renderer's normalized shape.)
+ */
+export type KillSidecarLine = KillEventIntent | KillEventCompletion;
 
 export function monotonicMs(): number {
   return Number(process.hrtime.bigint() / 1_000_000n);
@@ -62,7 +111,9 @@ function pidAlive(pid: number): boolean {
 }
 
 /** Appends one JSON line and fsyncs so a killer-side crash cannot reorder evidence. */
-export function appendKillEvent(eventsPath: string, event: KillEvent): void {
+export function appendKillEvent(eventsPath: string, event: KillSidecarLine): void {
+  // The default path lives in metrics/, which may not exist yet.
+  mkdirSync(dirname(eventsPath), { recursive: true });
   const fd = openSync(eventsPath, "a");
   try {
     appendFileSync(fd, `${JSON.stringify(event)}\n`, "utf8");
@@ -78,14 +129,18 @@ export interface ChaosKillOptions {
   runId: string;
   eventsPath: string;
   waitMs: number;
-  /** Dex flow run id (verifier F3-analog): written into both sidecar records. */
+  /** Real Dex RUN id (not the flow id), when known: written into both sidecar records. */
   flowRunId?: string;
 }
 
-export async function chaosKill(options: ChaosKillOptions): Promise<{
+export interface ChaosKillResult {
   killed: number[];
   stillAlive: number[];
-}> {
+  /** True only when at least one target was actually killed. */
+  fired: boolean;
+}
+
+export async function chaosKill(options: ChaosKillOptions): Promise<ChaosKillResult> {
   const { pids, reason, runId, eventsPath, waitMs, flowRunId } = options;
 
   // 1. INTENT BEFORE KILL — fsynced before any signal is sent.
@@ -120,61 +175,105 @@ export async function chaosKill(options: ChaosKillOptions): Promise<{
     stillAlive = killed.filter(pidAlive);
   }
 
-  // 4. COMPLETION AFTER KILL.
+  // 4. COMPLETION AFTER KILL. Nothing killed is a NO-OP and says so: the old
+  // note claimed "all targets exited after SIGKILL" for an empty/dead target
+  // set, and a downstream renderer then showed a successful kill-and-resume.
+  const fired = killed.length > 0;
+  const notes = !fired
+    ? `NO-OP: nothing was killed — no live target among [${pids.join(",") || "none"}] (reason=${reason})`
+    : stillAlive.length === 0
+      ? `all targets exited after SIGKILL (reason=${reason})`
+      : `WARNING: ${stillAlive.length} target(s) survived SIGKILL: ${stillAlive.join(",")}`;
   appendKillEvent(eventsPath, {
     kind: "completed",
     run_id: runId,
     utc: new Date().toISOString(),
     monotonic_ms: monotonicMs(),
     killed_pids: killed,
-    notes:
-      stillAlive.length === 0
-        ? `all targets exited after SIGKILL (reason=${reason})`
-        : `WARNING: ${stillAlive.length} target(s) survived SIGKILL: ${stillAlive.join(",")}`,
+    notes,
+    fired,
     ...(flowRunId !== undefined ? { flow_run_id: flowRunId } : {}),
   });
 
-  return { killed, stillAlive };
+  return { killed, stillAlive, fired };
 }
 
 // ---------------------------------------------------------------------------
 // CLI entrypoint
 // ---------------------------------------------------------------------------
 
-function argValue(argv: readonly string[], flag: string): string | undefined {
-  const i = argv.indexOf(flag);
-  return i >= 0 ? argv[i + 1] : undefined;
+const KNOWN_FLAGS = ["--pids", "--reason", "--events", "--run-id", "--flow-run-id", "--wait-ms"] as const;
+
+const USAGE =
+  "usage: chaos-kill --pids <pid[,pid...]> --reason <reason> [--events path] [--run-id id] [--flow-run-id dexRunId] [--wait-ms n]";
+
+export type ParsedChaosKillArgs =
+  | { ok: true; options: ChaosKillOptions }
+  | { ok: false; error: string };
+
+/**
+ * Strict CLI parse (audit C71): every token is validated instead of filtered.
+ * A flag needs a value that is not itself a flag, unknown flags are rejected
+ * (a typo like `--event` would otherwise fall back to the default path), every
+ * `--pids` entry must be a whole PID > 1 (0 and negatives would signal a whole
+ * process group), and `--wait-ms` must be a non-negative whole number.
+ */
+export function parseChaosKillArgs(argv: readonly string[]): ParsedChaosKillArgs {
+  const scanned = parseFlagValues(argv, KNOWN_FLAGS);
+  if (!scanned.ok) return scanned;
+  const values = scanned.values;
+
+  const pidsArg = values.get("--pids");
+  if (pidsArg === undefined || pidsArg.trim() === "") {
+    return { ok: false, error: "--pids is required" };
+  }
+  const pids: number[] = [];
+  const invalid: string[] = [];
+  for (const raw of pidsArg.split(",")) {
+    const token = raw.trim();
+    const pid = /^\d+$/.test(token) ? Number(token) : Number.NaN;
+    if (Number.isSafeInteger(pid) && pid > 1) pids.push(pid);
+    else invalid.push(token === "" ? "<empty>" : token);
+  }
+  if (invalid.length > 0) {
+    return { ok: false, error: `invalid --pids entr${invalid.length === 1 ? "y" : "ies"} (need whole PIDs > 1): ${invalid.join(", ")}` };
+  }
+
+  const waitArg = values.get("--wait-ms") ?? "5000";
+  if (!/^\d+$/.test(waitArg.trim())) {
+    return { ok: false, error: `invalid --wait-ms (need a non-negative whole number): ${waitArg}` };
+  }
+
+  const flowRunId = values.get("--flow-run-id");
+  return {
+    ok: true,
+    options: {
+      pids,
+      reason: values.get("--reason") ?? "unspecified",
+      runId: values.get("--run-id") ?? `kill-${Date.now()}`,
+      eventsPath: values.get("--events") ?? DEFAULT_KILL_EVENTS_PATH,
+      waitMs: Number(waitArg.trim()),
+      ...(flowRunId !== undefined ? { flowRunId } : {}),
+    },
+  };
 }
 
 async function main(): Promise<number> {
-  const argv = process.argv.slice(2);
-  const pidsArg = argValue(argv, "--pids");
-  if (pidsArg === undefined || pidsArg.trim() === "") {
-    console.error("usage: chaos-kill --pids <pid[,pid...]> --reason <reason> [--events path] [--run-id id] [--wait-ms n]");
-    return 2;
+  const parsed = parseChaosKillArgs(process.argv.slice(2));
+  if (!parsed.ok) {
+    console.error(`[chaos-kill] ${parsed.error}\n${USAGE}`);
+    return CHAOS_KILL_EXIT.usage;
   }
-  const pids = pidsArg
-    .split(",")
-    .map((s) => Number.parseInt(s.trim(), 10))
-    .filter((n) => Number.isInteger(n) && n > 1);
-  if (pids.length === 0) {
-    console.error("no valid pids given");
-    return 2;
-  }
-  const flowRunId = argValue(argv, "--flow-run-id");
-  const options: ChaosKillOptions = {
-    pids,
-    reason: argValue(argv, "--reason") ?? "unspecified",
-    runId: argValue(argv, "--run-id") ?? `kill-${Date.now()}`,
-    eventsPath: argValue(argv, "--events") ?? "kill-events.json",
-    waitMs: Number.parseInt(argValue(argv, "--wait-ms") ?? "5000", 10),
-    ...(flowRunId !== undefined ? { flowRunId } : {}),
-  };
+  const options = parsed.options;
   const result = await chaosKill(options);
   console.log(
-    `[chaos-kill] run=${options.runId} killed=[${result.killed.join(",")}] survivors=[${result.stillAlive.join(",")}] sidecar=${options.eventsPath}`,
+    `[chaos-kill] run=${options.runId} fired=${result.fired} killed=[${result.killed.join(",")}] survivors=[${result.stillAlive.join(",")}] sidecar=${options.eventsPath}`,
   );
-  return result.stillAlive.length === 0 ? 0 : 1;
+  if (!result.fired) {
+    console.error("[chaos-kill] NO-OP: no target was alive — nothing was killed");
+    return CHAOS_KILL_EXIT.noop;
+  }
+  return result.stillAlive.length === 0 ? CHAOS_KILL_EXIT.ok : CHAOS_KILL_EXIT.survivors;
 }
 
 const isDirectRun =
@@ -186,6 +285,6 @@ if (isDirectRun) {
     .then((code) => process.exit(code))
     .catch((err: unknown) => {
       console.error("[chaos-kill] fatal:", err);
-      process.exit(1);
+      process.exit(CHAOS_KILL_EXIT.fatal);
     });
 }

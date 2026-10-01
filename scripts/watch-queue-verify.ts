@@ -7,10 +7,19 @@
  * dexcli polling retained as a 60 s FALLBACK probe. Bounded to 30 minutes.
  * Fires the chaos kill EXACTLY ONCE and exits cleanly:
  *
- *   exit 0  kill fired (via stream or poll)
- *   exit 1  flow reached COMPLETED/FAILED before the trigger (clean, no kill;
- *           this is the r1-review non-exiting-terminal-branch fix)
- *   exit 2  30-minute bound elapsed without trigger
+ *   exit 0   kill fired (via stream or poll)
+ *   exit 1   flow reached a terminal status (COMPLETED, FAILED, TERMINATED,
+ *            CANCELED, server-side timeout) before the trigger (clean, no
+ *            kill; this is the r1-review non-exiting-terminal-branch fix)
+ *   exit 2   30-minute bound elapsed without trigger
+ *   exit 3   trigger seen but the kill was a NO-OP (no live target PIDs; the
+ *            sidecar's completed record says fired:false)
+ *   exit 4   the kill fired but a target SURVIVED SIGKILL (the sidecar notes
+ *            say WARNING) — the kill-and-resume experiment is not valid
+ *   exit 64  usage error (bad/missing/unknown argument; nothing was started)
+ *   exit 70  fatal internal error
+ * Each outcome has its own code (audit C34: usage used to share 2 with "bound
+ * elapsed" and a fatal throw shared 1 with "flow terminal").
  *
  * Event visibility note: the envelope factory publishes the stream message
  * the moment PpQueueVerify STARTS — before any durable attribute could exist
@@ -22,20 +31,43 @@
  * for the trigger, and the follow cursor is pinned to the drained HEAD — the
  * follow long-poll then sees post-arm messages ~immediately instead of
  * consuming a stale backlog at ~1 message/pollInterval (cx8: cursor ~28 min
- * behind; both ~1.1-1.6 s queue-verify windows missed). Keep the follow
- * cadence SHORT (`--poll-seconds 1..5`) so a message published mid-cycle is
- * read within seconds of its window, not after a full default interval.
+ * behind; both ~1.1-1.6 s queue-verify windows missed). The follow long-poll
+ * wakes the moment a message is published, so `--poll-seconds` only sets the
+ * poll-fallback cadence; the reads AFTER the first event use their own short
+ * `--catch-up-seconds` (default 1 s — the SDK takes whole seconds and 0 means
+ * the 60 s server default, not "no wait"), so the DONE that closes the kill
+ * window can no longer land in the same batch as its START and cancel the kill
+ * (audit C27). A window shorter than ~1 s stays structurally unkillable.
  *
  * Scope: kill only. The resume (dex server + worker restart on the same DB)
  * stays the documented operator procedure — this watcher never restarts
  * infrastructure it did not start.
  *
  * Usage:
- *   bun run scripts/watch-queue-verify.ts --flow-id <id> --run-id <runId> \
- *     --events /tmp/kill-events.jsonl [--deadline-minutes 30] [--poll-seconds 60]
+ *   bun run scripts/watch-queue-verify.ts --flow-id <id> [--run-id <label>] \
+ *     [--events metrics/kill-events.jsonl] [--flow-run-id <dexRunId>] \
+ *     [--deadline-minutes 30] [--poll-seconds 60] [--catch-up-seconds 1]
  *
- * Env: DEX_SERVER_ADDRESS / DEX_BLOB_CACHE_DIR (per-process cache dir is
- * deliberate — cross-process BlobCache sharing is not the guidance).
+ * Sidecar (Contract B): JSON Lines at `--events`, default
+ * `metrics/kill-events.jsonl` (chaos-kill's DEFAULT_KILL_EVENTS_PATH). Its
+ * `run_id` is the `--run-id` label; `flow_run_id` is the REAL Dex run id read
+ * from `dexcli flow summary` (overridable with `--flow-run-id`, omitted when
+ * unknown) — never the flow id.
+ *
+ * Numeric flags are validated: --deadline-minutes is a number > 0,
+ * --poll-seconds and --catch-up-seconds are whole numbers >= 1 (the SDK takes
+ * whole seconds; 0 would mean the 60 s server default). A flag without a value
+ * (or whose value is another flag) is a usage error.
+ *
+ * Probe cadence: the stream long-poll paces the loop, the dexcli poll +
+ * flow-status probes run about once per --poll-seconds, and their failures
+ * are logged (first, then every 10th) instead of swallowed.
+ *
+ * Env: DEX_SERVER_ADDRESS; DEXCLI_BIN (default `dexcli`);
+ * DEX_WATCH_BLOB_CACHE_DIR (default `.dex-cache/watch`, under the gitignored
+ * `.dex-cache/`). The watcher deliberately does NOT read DEX_BLOB_CACHE_DIR:
+ * that is the worker's variable, and cross-process BlobCache sharing is not
+ * the guidance (audit C61).
  */
 
 import { execFile } from "node:child_process";
@@ -47,12 +79,27 @@ import { openDexClient, dexConfigFromEnv } from "../src/dex/client.js";
 import { dexCliQueries } from "../src/dashboard/queries.js";
 import { envelopeStream } from "../flows/steps/envelope.js";
 import { PortProjectFlow } from "../flows/port-project.js";
-import { chaosKill } from "./chaos-kill.js";
+import { DEFAULT_KILL_EVENTS_PATH, chaosKill } from "./chaos-kill.js";
 import {
-  isQueueVerifyStart,
   runQueueVerifyWatcher,
   type WatcherStreamEvent,
 } from "../src/watcher/queue-verify-watcher.js";
+import {
+  WATCHER_EXIT,
+  WATCHER_USAGE,
+  parseWatcherArgs,
+} from "../src/watcher/cli-args.js";
+import {
+  DRAIN_PAGE_SIZE,
+  drainRetainedBacklog,
+  toWatcherEvent,
+} from "../src/watcher/drain-backlog.js";
+import { watcherBlobCacheDir } from "../src/watcher/blob-cache-dir.js";
+import {
+  flowStatusFromWire,
+  parseFlowSummary,
+  resolveFlowRunId,
+} from "../src/watcher/flow-summary.js";
 
 const execFileP = promisify(execFile);
 
@@ -72,25 +119,10 @@ function isLongPollWakeUp(err: unknown): boolean {
   );
 }
 
-/** Coerce one retained stream message into the watcher's structural event. */
-function toWatcherEvent(message: {
-  value: unknown;
-  resumeToken: string;
-}): WatcherStreamEvent {
-  const envelope = message.value as {
-    eventKey?: string;
-    event?: { stepId?: unknown; ended_at?: unknown };
-  };
-  return {
-    eventKey: String(envelope.eventKey ?? ""),
-    stepId: typeof envelope.event?.stepId === "string" ? envelope.event.stepId : "",
-    endedAt: typeof envelope.event?.ended_at === "string" ? envelope.event.ended_at : null,
-  };
-}
-
-function argValue(flag: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(flag);
-  return i >= 0 ? process.argv[i + 1] : fallback;
+/** Collapses a (possibly multi-line, e.g. dexcli stdout) error into one log line. */
+function oneLine(err: unknown): string {
+  const text = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").trim();
+  return text.length > 400 ? `${text.slice(0, 400)}...` : text;
 }
 
 function log(line: string): void {
@@ -100,38 +132,50 @@ function log(line: string): void {
 /** Live PIDs for the dex server and the port worker (pgrep, may be empty). */
 async function targetPids(): Promise<number[]> {
   const patterns = ["dexcli dev", "run-demo.ts worker"];
-  const pids: number[] = [];
-  for (const pattern of patterns) {
-    try {
-      const { stdout } = await execFileP("pgrep", ["-f", pattern], { timeout: 5_000 });
-      for (const line of stdout.split("\n")) {
-        const pid = Number.parseInt(line.trim(), 10);
-        if (Number.isInteger(pid) && pid > 0 && !pids.includes(pid)) pids.push(pid);
+  // One pgrep per pattern, concurrently: this runs inside the kill window.
+  const found = await Promise.all(
+    patterns.map(async (pattern): Promise<number[]> => {
+      try {
+        const { stdout } = await execFileP("pgrep", ["-f", pattern], { timeout: 5_000 });
+        return stdout
+          .split("\n")
+          .map((line) => Number.parseInt(line.trim(), 10))
+          .filter((pid) => Number.isInteger(pid) && pid > 0);
+      } catch (err) {
+        // pgrep exits 1 on no match — no PIDs for this pattern. Anything else
+        // (missing binary, timeout) would make a live target look absent, so say so.
+        if ((err as { code?: unknown }).code !== 1) {
+          log(`pgrep for ${JSON.stringify(pattern)} failed: ${(err as Error).message}`);
+        }
+        return [];
       }
-    } catch {
-      // pgrep exits 1 on no match — no PIDs for this pattern.
-    }
-  }
-  return pids;
+    }),
+  );
+  return [...new Set(found.flat())];
 }
 
 async function main(): Promise<number> {
-  const flowId = argValue("--flow-id");
-  if (flowId === undefined || flowId === "") {
-    console.error("usage: watch-queue-verify.ts --flow-id <id> --run-id <runId> --events <sidecar>");
-    return 2;
+  const parsed = parseWatcherArgs(process.argv.slice(2), { eventsPath: DEFAULT_KILL_EVENTS_PATH });
+  if (!parsed.ok) {
+    console.error(`[watch-queue-verify] ${parsed.error}\n${WATCHER_USAGE}`);
+    return WATCHER_EXIT.usage;
   }
-  const runId = argValue("--run-id", "watch-queue-verify") as string;
-  const eventsPath = argValue("--events", "/tmp/kill-events.jsonl") as string;
-  const deadlineMinutes = Number.parseInt(argValue("--deadline-minutes", "30") as string, 10);
-  const pollSeconds = Number.parseInt(argValue("--poll-seconds", "60") as string, 10);
+  const {
+    flowId,
+    runId,
+    eventsPath,
+    flowRunId: flowRunIdOverride,
+    deadlineMinutes,
+    pollSeconds,
+    catchUpSeconds,
+  } = parsed.options;
 
   // Read-side stream client: a registry with EXACTLY the flow type that owns
   // envelopeStream (port.Project — one-flow stream ownership, dex Registry
   // rule), over its own blob-cache directory (per-process sharing).
   const config = {
     ...dexConfigFromEnv(),
-    blobCacheDir: process.env.DEX_BLOB_CACHE_DIR?.trim() || ".dex-cache-watch",
+    blobCacheDir: watcherBlobCacheDir(),
   };
   let runtime: Awaited<ReturnType<typeof openDexClient>> | undefined;
   try {
@@ -142,55 +186,66 @@ async function main(): Promise<number> {
     log(`stream client unavailable (${(err as Error).message}) — poll fallback only`);
   }
 
+  const dexcliBin = process.env.DEXCLI_BIN?.trim() || "dexcli";
   const cli = dexCliQueries({
-    bin: process.env.DEXCLI_BIN?.trim() || "dexcli",
+    bin: dexcliBin,
     server: config.serverAddress,
     timeoutMs: 10_000,
+  });
+
+  // The REAL Dex run id for the sidecar's flow_run_id (audit C42), learned from
+  // `dexcli flow summary` at arm and refreshed by every status probe, so the
+  // kill itself never waits on an extra fetch.
+  let observedRunId: string | null = null;
+  // The last kill's survivors, for the exit code: a target that survived SIGKILL
+  // invalidates the experiment even though the trigger fired.
+  let survivors: number[] = [];
+  const fetchFlowSummary = async () => {
+    try {
+      const out = await execFileP(
+        dexcliBin,
+        ["flow", "summary", flowId, "-server", config.serverAddress, "-output", "json"],
+        { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
+      );
+      const summary = parseFlowSummary(out.stdout);
+      if (summary.runId !== null) observedRunId = summary.runId;
+      return summary;
+    } catch (err) {
+      throw new Error(`dexcli flow summary failed: ${oneLine(err)}`);
+    }
+  };
+  // Not awaited: a slow/unreachable dexcli must not delay arming the watcher.
+  void fetchFlowSummary().catch((err: unknown) => {
+    log(`${(err as Error).message} (at arm) — flow_run_id stays unknown until a probe succeeds`);
   });
 
   try {
     // Resume token for the subscription (empty = retained head on first read).
     let resumeToken = "";
-    // US-010a drain-to-head page bound (insurance only): 500 pages of
-    // server-max size is far beyond any run's retained envelope count; a
-    // server that never exhausts nextPageToken must not hang the arm.
-    const MAX_DRAIN_PAGES = 500;
     // Arm-time backlog drain (cx8 fix): read ALL retained pages newest-first
     // until exhausted, scan them for the trigger, and leave `resumeToken` at
     // the drained HEAD so the follow phase long-polls only post-arm messages
     // (the old cursor-at-retained-head follow consumed the backlog at
     // ~1 message/pollInterval and fell ~28 min behind the ~1.5 s windows).
     // The cursor is pinned to page 1's newest message BEFORE deep paging, so
-    // even a mid-drain failure leaves the follow lane at head.
+    // even a mid-drain failure leaves the follow lane at head. The pages are
+    // stitched into STREAM ORDER by drainRetainedBacklog (audit C28).
     const drainBacklog = async (): Promise<WatcherStreamEvent[]> => {
       if (runtime === undefined) return []; // poll-only degradation
-      const events: WatcherStreamEvent[] = [];
-      let pageToken = "";
-      for (let page = 0; page < MAX_DRAIN_PAGES; page++) {
-        const res = await runtime.client.listStreamMessages(
-          flowId,
-          envelopeStream,
-          100,
-          pageToken,
-        );
-        if (page === 0) {
-          const newest = res.messages[0];
-          if (newest !== undefined) resumeToken = newest.resumeToken;
-        }
-        // Oldest-last within the page: emit in stream order.
-        for (let i = res.messages.length - 1; i >= 0; i--) {
-          const message = res.messages[i];
-          if (message !== undefined) events.push(toWatcherEvent(message));
-        }
-        if (res.nextPageToken === "") return events; // exhausted: at head
-        pageToken = res.nextPageToken;
-      }
-      log(`backlog drain hit the ${MAX_DRAIN_PAGES}-page bound — continuing from head`);
-      return events;
+      const client = runtime.client;
+      return await drainRetainedBacklog({
+        listPage: (pageToken) =>
+          client.listStreamMessages(flowId, envelopeStream, DRAIN_PAGE_SIZE, pageToken),
+        onHead: (token) => {
+          resumeToken = token;
+        },
+        log,
+      });
     };
     const result = await runQueueVerifyWatcher({
       deadlineMs: deadlineMinutes * 60_000,
       pollIntervalMs: pollSeconds * 1_000,
+      catchUpTimeoutMs: catchUpSeconds * 1_000,
       drainBacklog,
       nextStreamEvent: async (timeoutMs) => {
         if (runtime === undefined) return null; // poll-only degradation
@@ -214,51 +269,64 @@ async function main(): Promise<number> {
       poll: async () => {
         // Old watcher predicate: an ACTIVE PpQueueVerify step execution.
         const state = await cli.flowState(flowId);
-        if (!state.ok) return false;
+        // Throw (do not return false): the watcher logs probe failures, so a
+        // missing/misconfigured dexcli no longer leaves this lane silently blind.
+        if (!state.ok) throw new Error(`dexcli flow state failed: ${oneLine(state.error)}`);
         return (state.value.activeStepExecutions ?? []).some(
           (s) => s.stepType === "PpQueueVerify",
         );
       },
-      flowStatus: async () => {
-        try {
-          const out = await execFileP(
-            process.env.DEXCLI_BIN?.trim() || "dexcli",
-            ["flow", "summary", flowId, "-server", config.serverAddress, "-output", "json"],
-            { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-          );
-          const parsed = JSON.parse(out.stdout) as { flowStatus?: string };
-          if (parsed.flowStatus === "FLOW_STATUS_COMPLETED") return "completed";
-          if (parsed.flowStatus === "FLOW_STATUS_FAILED") return "failed";
-          return "running";
-        } catch {
-          return "unknown";
-        }
-      },
+      // Throws on a failed probe; the watcher logs it (rate-limited) and treats
+      // the status as "unknown".
+      flowStatus: async () => flowStatusFromWire((await fetchFlowSummary()).flowStatus),
       fire: async ({ via }) => {
         const pids = await targetPids();
-        log(`kill via ${via}: pids=${pids.join(",") || "none"} events=${eventsPath} run=${runId} flow=${flowId}`);
-        await chaosKill({
+        const flowRunId = resolveFlowRunId(flowRunIdOverride, observedRunId);
+        if (flowRunId === undefined) {
+          log("flow run id unknown — the sidecar records omit flow_run_id (run_id label only)");
+        }
+        log(`kill via ${via}: pids=${pids.join(",") || "none"} events=${eventsPath} run=${runId} flow=${flowId} flowRun=${flowRunId ?? "unknown"}`);
+        const kill = await chaosKill({
           pids,
           reason: `US-007 stream watcher: pp-queue-verify start (via ${via})`,
           runId,
           eventsPath,
-          flowRunId: flowId,
+          ...(flowRunId !== undefined ? { flowRunId } : {}),
           waitMs: 5_000,
         });
+        survivors = kill.stillAlive;
+        return {
+          killed: kill.fired,
+          detail:
+            (pids.length === 0
+              ? "pgrep found no dexcli/worker PIDs"
+              : `none of pgrep's ${pids.length} PID(s) was alive`) +
+            "; the sidecar's completed record says fired=false",
+        };
       },
       log,
     });
 
     if (result.outcome === "fired") {
+      if (survivors.length > 0) {
+        log(
+          `done: kill fired via ${result.via} but ${survivors.length} target(s) SURVIVED SIGKILL (${survivors.join(",")}) — the kill-and-resume experiment is not valid`,
+        );
+        return WATCHER_EXIT.survivor;
+      }
       log(`done: kill fired once via ${result.via}`);
-      return 0;
+      return WATCHER_EXIT.fired;
+    }
+    if (result.outcome === "no-op") {
+      log(`done: trigger seen via ${result.via} but NO kill happened (no live target PIDs)`);
+      return WATCHER_EXIT.noop;
     }
     if (result.outcome === "terminal") {
       log("done: flow terminal before trigger");
-      return 1;
+      return WATCHER_EXIT.terminal;
     }
     log("done: bounded timeout without trigger");
-    return 2;
+    return WATCHER_EXIT.timeout;
   } finally {
     await runtime?.close();
   }
@@ -272,5 +340,5 @@ main()
   })
   .catch((err: unknown) => {
     console.error("[watch-queue-verify] fatal:", err);
-    process.exit(1);
+    process.exit(WATCHER_EXIT.fatal);
   });

@@ -73,6 +73,7 @@ describe("kill sidecar (chaos-kill)", () => {
       monotonic_ms: monotonicMs(),
       killed_pids: [],
       notes: "n/a",
+      fired: false,
     });
     const raw = await readFile(eventsPath, "utf8");
     const kinds = raw.trim().split("\n").map((l) => (JSON.parse(l) as { kind: string }).kind);

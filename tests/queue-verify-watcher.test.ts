@@ -387,3 +387,72 @@ describe("queue-verify kill watcher (US-010a): drain-to-head before following", 
     expect(h.logs.some((l) => l.includes("trigger in follow batch: pp-queue-verify#1"))).toBe(true);
   });
 });
+
+// Audit C71 — a trigger whose kill action killed NOTHING (no live target PIDs)
+// must not be reported as a fired kill (the script used to print "kill fired
+// once" and exit 0 while the sidecar claimed a successful kill).
+describe("queue-verify kill watcher (C71): a no-op kill is not 'fired'", () => {
+  test("fire resolving { killed: false } yields outcome 'no-op' with 0 firings", async () => {
+    const h = harness({ events: [START_EVENT] });
+    const result = await h.run({
+      fire: async (trigger) => {
+        h.firings.push(trigger);
+        return { killed: false, detail: "pgrep found no dexcli/worker PIDs" };
+      },
+    });
+    expect(result.outcome).toBe("no-op");
+    expect(result.via).toBe("stream");
+    expect(result.firings).toBe(0);
+    expect(h.firings.length).toBe(1); // the action ran exactly once
+    expect(h.logs.some((l) => l.includes("kill was a NO-OP: pgrep found no dexcli/worker PIDs"))).toBe(true);
+  });
+
+  test("the poll lane reports a no-op the same way", async () => {
+    const h = harness({ events: [null], polls: [true] });
+    const result = await h.run({ fire: async () => ({ killed: false }) });
+    expect(result.outcome).toBe("no-op");
+    expect(result.via).toBe("poll");
+    expect(result.firings).toBe(0);
+  });
+
+  test("fire resolving { killed: true } or void stays a real 'fired' (backwards compatible)", async () => {
+    const real = harness({ events: [START_EVENT] });
+    const r1 = await real.run({ fire: async () => ({ killed: true }) });
+    expect(r1.outcome).toBe("fired");
+    expect(r1.firings).toBe(1);
+
+    const legacy = harness({ events: [START_EVENT] });
+    const r2 = await legacy.run();
+    expect(r2.outcome).toBe("fired");
+    expect(r2.firings).toBe(1);
+  });
+});
+
+// Audit review: a THROW from the kill action must surface. fireOnce used to run
+// inside the stream/drain try blocks, whose catch swallowed it after the
+// exactly-once guard was already spent; a later duplicate trigger then returned
+// a synthetic "fired" and the script exited 0 with no kill and no record.
+describe("queue-verify kill watcher: a failing kill action is never swallowed", () => {
+  const boom = async () => {
+    throw new Error("EACCES: sidecar path is not writable");
+  };
+
+  test("a throw on the follow (stream) path propagates and does not degrade the stream lane", async () => {
+    const h = harness({ events: [START_EVENT, START_EVENT], polls: [true] });
+    await expect(h.run({ fire: boom })).rejects.toThrow("EACCES");
+    expect(h.logs.some((l) => l.includes("stream subscription failed"))).toBe(false);
+  });
+
+  test("a throw on the arm-time drain path propagates and is not logged as a drain failure", async () => {
+    const h = harness({ events: [null] });
+    await expect(
+      h.run({ drainBacklog: async () => [START_EVENT], fire: boom }),
+    ).rejects.toThrow("EACCES");
+    expect(h.logs.some((l) => l.includes("backlog drain failed"))).toBe(false);
+  });
+
+  test("a throw on the poll path propagates too", async () => {
+    const h = harness({ events: [null], polls: [true] });
+    await expect(h.run({ fire: boom })).rejects.toThrow("EACCES");
+  });
+});
