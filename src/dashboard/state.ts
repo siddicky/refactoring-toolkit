@@ -11,6 +11,7 @@
  * both are accepted.
  */
 
+import { shortBranchName } from "../git/worktree-list.js";
 import { fileFromIdentity, fileFromSanitizedKey, MODEL_CALLING_ROLES, tokenTotalOf } from "../metrics/types.js";
 import type {
   BurnDownPointView,
@@ -681,7 +682,7 @@ export function deriveGridRows(
       round: null,
       worktree: wt.path,
       worktreeName: worktreeName(wt.path),
-      branch: wt.branch.replace(/^refs\/heads\//, ""),
+      branch: shortBranchName(wt.branch),
       epoch: null,
       holder: null,
       clean: wt.clean,
@@ -1369,7 +1370,7 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     commits,
     worktrees: input.git.worktrees.map((w) => ({
       path: w.path,
-      branch: w.branch.replace(/^refs\/heads\//, ""),
+      branch: shortBranchName(w.branch),
       head: w.head,
       clean: w.clean,
     })),

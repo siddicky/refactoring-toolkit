@@ -73,6 +73,7 @@ import {
 } from "../src/git/worktree.js";
 import { git } from "../src/git/exec.js";
 import { makeFixtureRepo } from "../src/git/fixture.js";
+import { parseWorktreeRecords, shortBranchName } from "../src/git/worktree-list.js";
 import {
   configureProbe,
   PROBE_LONG_STEP_OPTIONS,
@@ -1197,21 +1198,12 @@ export interface WorktreeRef {
   branch: string | null;
 }
 
-/** Parses `git worktree list --porcelain` (blank-line separated blocks). */
+/** `git worktree list --porcelain` as recovery's refs, over the shared parser (src/git/worktree-list.ts). */
 export function parseWorktreeList(porcelain: string): WorktreeRef[] {
-  const refs: WorktreeRef[] = [];
-  for (const block of porcelain.split(/\n\s*\n/)) {
-    let path: string | undefined;
-    let branch: string | null = null;
-    for (const line of block.split("\n")) {
-      if (line.startsWith("worktree ")) path = line.slice("worktree ".length).trim();
-      else if (line.startsWith("branch ")) {
-        branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
-      }
-    }
-    if (path !== undefined) refs.push({ path, branch });
-  }
-  return refs;
+  return parseWorktreeRecords(porcelain).map((w) => ({
+    path: w.path,
+    branch: w.ref === null ? null : shortBranchName(w.ref),
+  }));
 }
 
 /** Worktrees registered with the repository: durable git state, never an in-memory store. */

@@ -21,6 +21,7 @@
 import { readFile, stat } from "node:fs/promises";
 
 import { ExecError, execTool } from "../exec.js";
+import { parseWorktreeRecords } from "../git/worktree-list.js";
 import { burnDownFromUnknown } from "./state.js";
 import type {
   BurnDownSample,
@@ -226,37 +227,16 @@ export function parseGitLog(out: string): GitCommitRow[] {
 }
 
 /**
- * Parses `worktree list --porcelain`: blank-line separated records of
- * `worktree <path>`, `HEAD <sha>`, then `branch <ref>` | `detached` | `bare`
- * plus optional `locked` / `prunable <reason>` lines (ignored: a prunable
- * worktree keeps its row, and its cleanliness later resolves to unknown).
- * A detached HEAD reports branch "(detached)" (the GitWorktreeRow contract).
+ * `worktree list --porcelain` as dashboard rows, over the shared parser
+ * (src/git/worktree-list.ts). A detached HEAD reports branch "(detached)" and a
+ * bare repository "(bare)" (the GitWorktreeRow contract).
  */
 export function parseWorktreePorcelain(out: string): Array<{ path: string; head: string; branch: string }> {
-  const rows: Array<{ path: string; head: string; branch: string }> = [];
-  let current: { path: string; head: string; branch: string } | null = null;
-  const flush = () => {
-    if (current !== null) rows.push(current);
-    current = null;
-  };
-  for (const line of out.split("\n")) {
-    if (line.startsWith("worktree ")) {
-      flush();
-      current = { path: line.slice("worktree ".length).trim(), head: "", branch: "" };
-    } else if (current !== null && line.startsWith("HEAD ")) {
-      current.head = line.slice("HEAD ".length).trim();
-    } else if (current !== null && line.startsWith("branch ")) {
-      current.branch = line.slice("branch ".length).trim();
-    } else if (current !== null && line.trim() === "detached") {
-      current.branch = "(detached)";
-    } else if (current !== null && line.trim() === "bare") {
-      current.branch = "(bare)";
-    } else if (line.trim() === "") {
-      flush();
-    }
-  }
-  flush();
-  return rows;
+  return parseWorktreeRecords(out).map((w) => ({
+    path: w.path,
+    head: w.head,
+    branch: w.ref ?? (w.detached ? "(detached)" : w.bare ? "(bare)" : ""),
+  }));
 }
 
 /** Extracts a `Key: value` trailer line from a commit body. */
