@@ -465,6 +465,71 @@ describe("extractDispatchEntries dedupes multi-event executions (C47)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// B15: dex step execution ids are per flow ("PpImplement-1" in EVERY child), and
+// the dispatch events carry no flow id. The merged parent+children history must
+// therefore dedupe per source flow/run, or every child after the first anchors
+// to nothing (provenance FAILED on the default parallel topology).
+// ---------------------------------------------------------------------------
+
+describe("extractDispatchEntries dedupes per source flow/run (B15)", () => {
+  const ev = (source: string | undefined, id: string, stepType: string, file: string) => ({
+    eventId: `${source ?? "-"}-${stepType}-${id}`,
+    type: "StepExecuteCompleted",
+    ...(source !== undefined ? { historySource: source } : {}),
+    payload: {
+      context: { stepExecutionId: id, stepType, finalAttempt: 1 },
+      input: { stepInput: { file, round: 1 } },
+    },
+  });
+  /** One port.File child's dispatch events: every child runs the same step ids "<Type>-1". */
+  const child = (source: string, file: string) => [
+    ev(source, "PpChildLease-1", "PpChildLease", file),
+    ev(source, "PpImplementStart-1", "PpImplementStart", file),
+    ev(source, "PpImplement-1", "PpImplement", file),
+  ];
+  /** The envelopes a healthy child leaves: a lease record, then the implement marker + attempt 1. */
+  const childEnvelopes = (identity: string): EnvelopeEvent[] => [
+    envelope({ stepId: "pp-child-lease", role: "record", identity }),
+    ...modelExecution("pp-implement", identity, 1),
+  ];
+
+  test("two children that both ran PpImplement-1 yield one entry each, not one in total", () => {
+    const history: DispatchHistory = { events: [...child("child-a@r1", "src/a.php"), ...child("child-b@r1", "src/b.php")] };
+    const entries = extractDispatchEntries(history);
+    expect(entries.length).toBe(6);
+    expect(entries.filter((e) => e.stepType === "PpImplement").map((e) => e.identity)).toEqual(["src__a.php#1", "src__b.php#1"]);
+  });
+
+  test("the run anchors every child: no 'has no dispatch entry' failure for the second child", () => {
+    const history: DispatchHistory = { events: [...child("child-a@r1", "src/a.php"), ...child("child-b@r1", "src/b.php")] };
+    const cross = anchorForRun(history, [...childEnvelopes("src__a.php#1"), ...childEnvelopes("src__b.php#1")]);
+    expect(cross.failures).toEqual([]);
+    expect(cross.ok).toBe(true);
+  });
+
+  test("the same execution id in two RUNS of one flow (continue-as-new restarts numbering) stays distinct", () => {
+    const history: DispatchHistory = {
+      events: [ev("flow@run-1", "PpImplement-1", "PpImplement", "src/a.php"), ev("flow@run-2", "PpImplement-1", "PpImplement", "src/b.php")],
+    };
+    expect(extractDispatchEntries(history).length).toBe(2);
+  });
+
+  test("events of ONE source still collapse (started + completed of one execution stay one entry)", () => {
+    const history: DispatchHistory = {
+      events: [ev("child-a@r1", "PpImplement-1", "PpImplement", "src/a.php"), ev("child-a@r1", "PpImplement-1", "PpImplement", "src/a.php")],
+    };
+    expect(extractDispatchEntries(history).length).toBe(1);
+  });
+
+  test("untagged events (a single hand-made history) keep the original per-execution dedupe", () => {
+    const history: DispatchHistory = {
+      events: [ev(undefined, "PpImplement-1", "PpImplement", "src/a.php"), ev(undefined, "PpImplement-1", "PpImplement", "src/a.php")],
+    };
+    expect(extractDispatchEntries(history).length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // C44: the cx-5e flow-keyed accommodation is legacy scaffolding, off by default.
 // ---------------------------------------------------------------------------
 

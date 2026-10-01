@@ -50,6 +50,15 @@ export interface DispatchHistoryEvent {
   eventId?: string;
   eventTime?: string;
   type?: string;
+  /**
+   * NOT a dex wire field: the driver stamps the flow/run an event was fetched
+   * from when it merges several histories into one list (a parent plus every
+   * port.File child, or a continued flow's runs). Dex step execution ids are
+   * per flow and run ("PpImplement-1" in every child) and the events carry no
+   * flow id, so without this tag two children's executions are
+   * indistinguishable and the second one's dispatch entries vanish.
+   */
+  historySource?: string;
   payload?: {
     /** FlowStartedOrContinued and other flow-level events. */
     initialStart?: Record<string, unknown> | null;
@@ -114,11 +123,13 @@ function identityFromEvent(event: DispatchHistoryEvent): string | null {
  *
  * One step execution emits SEVERAL history events (started / execute
  * completed / waitFor ...) carrying the same context, so events are deduped
- * per (stepType, stepExecutionId, finalAttempt): an entry is one execution
- * ATTEMPT, never one event. Retries stay distinct (different finalAttempt or
- * execution id). Events without a stepExecutionId cannot be deduped and each
- * count. When duplicates disagree on identity the one that carries the file
- * +round input echo wins.
+ * per (source, stepType, stepExecutionId, finalAttempt): an entry is one
+ * execution ATTEMPT, never one event. The source is the event's
+ * {@link DispatchHistoryEvent.historySource} (flow + run) because execution
+ * ids repeat across flows and runs. Retries stay distinct (different
+ * finalAttempt or execution id). Events without a stepExecutionId cannot be
+ * deduped and each count. When duplicates disagree on identity the one that
+ * carries the file+round input echo wins.
  */
 export function extractDispatchEntries(history: DispatchHistory): DispatchEntry[] {
   const entries: DispatchEntry[] = [];
@@ -140,7 +151,7 @@ export function extractDispatchEntries(history: DispatchHistory): DispatchEntry[
       entries.push(entry);
       continue;
     }
-    const key = `${stepType}\u0000${stepExecutionId}\u0000${entry.finalAttempt}`;
+    const key = `${event.historySource ?? ""}\u0000${stepType}\u0000${stepExecutionId}\u0000${entry.finalAttempt}`;
     const existing = seen.get(key);
     if (existing === undefined) {
       seen.set(key, entry);

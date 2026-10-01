@@ -185,7 +185,10 @@ export function mergedHistory(facts: FlowFacts, run: DexRunner = runDexcli): Dis
         ? ["flow", "history", facts.flowId, "-all"]
         : ["flow", "history", facts.flowId, "-run-id", rid, "-all"];
     const h = run(args) as DispatchHistory;
-    return h.events ?? [];
+    // Step execution ids are per flow and run, so the merged list must remember
+    // where each event came from or two children's `PpImplement-1` collapse.
+    const historySource = `${facts.flowId}@${rid ?? "latest"}`;
+    return (h.events ?? []).map((event) => ({ ...event, historySource }));
   });
   return { flowId: facts.flowId, runId: facts.runId, events };
 }

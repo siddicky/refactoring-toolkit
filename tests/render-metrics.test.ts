@@ -21,6 +21,7 @@ import {
 } from "../scripts/render-metrics.js";
 import { CLI_EXIT, usageText } from "../src/cli/args.js";
 import { discoverChildFlowIds, flowFactsFromSummary } from "../src/metrics/collect.js";
+import { extractDispatchEntries } from "../src/metrics/dispatch-anchor.js";
 import eventStreamRaw from "../src/metrics/fixtures/event-stream-run-a.json" with { type: "json" };
 import historyRaw from "../src/metrics/fixtures/dex-history-run-a.json" with { type: "json" };
 import { REPO_ROOT } from "./support/paths.js";
@@ -185,6 +186,36 @@ describe("mergedHistory: first + current run, one helper for parent and children
     const h = mergedHistoryOf("child-1", run);
     expect(h.events.map((e) => e.eventId)).toEqual(["x1", "x2"]);
     expect(calls.map((c) => c[1])).toEqual(["summary", "history", "history"]);
+  });
+
+  test("B15: events are stamped with their flow and run, so two children's PpImplement-1 stay two dispatch entries", () => {
+    const dispatch = (id: string, file: string) => ({
+      eventId: id,
+      type: "StepExecuteCompleted",
+      payload: {
+        context: { stepExecutionId: "PpImplement-1", stepType: "PpImplement", finalAttempt: 1 },
+        input: { stepInput: { file, round: 1 } },
+      },
+    });
+    const { run } = fakeDex({
+      "summary:child-a": { flowId: "child-a", runId: "ra", firstRunId: "ra" },
+      "summary:child-b": { flowId: "child-b", runId: "rb", firstRunId: "rb" },
+      "history:child-a:ra": { events: [dispatch("a", "src/a.php")] },
+      "history:child-b:rb": { events: [dispatch("b", "src/b.php")] },
+    });
+    // The driver concatenates every child's events into the parent's list.
+    const events = [...mergedHistoryOf("child-a", run).events, ...mergedHistoryOf("child-b", run).events];
+    expect(new Set(events.map((e) => e.historySource)).size).toBe(2);
+    expect(extractDispatchEntries({ events }).map((e) => e.identity)).toEqual(["src__a.php#1", "src__b.php#1"]);
+  });
+
+  test("B15: the two runs of one continued flow carry distinct sources too", () => {
+    const { run } = fakeDex({
+      "history:f1:run-1": { events: [ev("a1")] },
+      "history:f1:run-2": { events: [ev("b1")] },
+    });
+    const h = mergedHistory(flowFactsFromSummary("f1", { runId: "run-2", firstRunId: "run-1" }), run);
+    expect(h.events.map((e) => e.historySource)).toEqual(["f1@run-1", "f1@run-2"]);
   });
 });
 
