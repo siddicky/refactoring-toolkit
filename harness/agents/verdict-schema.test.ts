@@ -1,8 +1,8 @@
 /**
- * Unit tests for harness/agents/verdict-schema.ts — standalone, assert-based.
- * Run: bun run harness/agents/verdict-schema.test.ts
+ * Unit tests for harness/agents/verdict-schema.ts.
  */
 
+import { describe, expect, test } from "bun:test";
 import {
   DISPOSITIONS,
   SEVERITIES,
@@ -14,7 +14,6 @@ import {
   validateFinding,
   validateVerdictRecord,
 } from "./verdict-schema.js";
-import { assertEquals, assertTrue, runTestFile } from "../../src/queues/testkit.js";
 
 function validRecord(): Record<string, unknown> {
   return {
@@ -45,124 +44,114 @@ function validRecord(): Record<string, unknown> {
   };
 }
 
-runTestFile("verdict-schema", {
-  "severity enum is exactly blocker|major|minor|nit (exhaustiveness)": () => {
-    assertEquals([...SEVERITIES], ["blocker", "major", "minor", "nit"]);
-    assertEquals(severityList(), "blocker | major | minor | nit");
+describe("verdict-schema", () => {
+  test("severity enum is exactly blocker|major|minor|nit (exhaustiveness)", () => {
+    expect([...SEVERITIES]).toStrictEqual(["blocker", "major", "minor", "nit"]);
+    expect(severityList()).toBe("blocker | major | minor | nit");
     for (const s of SEVERITIES) {
-      assertTrue(isSeverity(s), `"${s}" is a severity`);
+      expect(isSeverity(s)).toBe(true);
     }
     for (const bad of ["critical", "BLOCKER", "", "blockers", 3, null]) {
-      assertTrue(!isSeverity(bad), `non-severity ${JSON.stringify(bad)} rejected`);
+      expect(isSeverity(bad)).toBe(false);
     }
-  },
+  });
 
-  "accepts a fully valid verdict record": () => {
+  test("accepts a fully valid verdict record", () => {
     const result = validateVerdictRecord(validRecord());
-    assertTrue(result.ok, `expected ok, got ${JSON.stringify(result)}`);
-    if (result.ok) {
-      assertEquals(result.value.findings.length, 2);
-      assertEquals(result.value.findings[0]?.description, "casts user.name to any, silencing strict mode");
-      assertEquals(result.value.citation_check[0], { finding_id: "F1", p_cited: 0.97 });
-      assertEquals(result.value.file, "src/services/user-service.ts");
-    }
-    assertTrue(isCompletedVerdictRecord(validRecord()), "guard form agrees");
-  },
+    if (!result.ok) throw new Error(`expected ok, got ${JSON.stringify(result)}`);
+    expect(result.value.findings.length).toBe(2);
+    expect(result.value.findings[0]?.description).toBe("casts user.name to any, silencing strict mode");
+    expect(result.value.citation_check[0]).toStrictEqual({ finding_id: "F1", p_cited: 0.97 });
+    expect(result.value.file).toBe("src/services/user-service.ts");
+    // the guard form agrees
+    expect(isCompletedVerdictRecord(validRecord())).toBe(true);
+  });
 
-  "empty findings + empty citation_check is a completed clean review": () => {
+  test("empty findings + empty citation_check is a completed clean review", () => {
     const clean = { ...validRecord(), findings: [], citation_check: [] };
     const result = validateVerdictRecord(clean);
-    assertTrue(result.ok, "clean review must validate");
-    if (result.ok) {
-      assertEquals(result.value.findings, []);
-      assertEquals(result.value.citation_check, []);
-    }
-  },
+    if (!result.ok) throw new Error("clean review must validate");
+    expect(result.value.findings).toStrictEqual([]);
+    expect(result.value.citation_check).toStrictEqual([]);
+  });
 
-  "rejects missing required fields and reports them": () => {
+  test("rejects missing required fields and reports them", () => {
     const missing = validRecord() as Record<string, unknown>;
     delete missing.diff_id;
     delete missing.round;
     const result = validateVerdictRecord(missing);
-    assertTrue(!result.ok, "must reject");
-    if (!result.ok) {
-      const joined = result.errors.join("; ");
-      assertTrue(joined.includes("diff_id"), "reports missing diff_id");
-      assertTrue(joined.includes("round"), "reports missing round");
-    }
-  },
+    if (result.ok) throw new Error("must reject");
+    const joined = result.errors.join("; ");
+    expect(joined).toContain("diff_id");
+    expect(joined).toContain("round");
+  });
 
-  "rejects unknown severity values": () => {
+  test("rejects unknown severity values", () => {
     const bad = validRecord();
     (bad.findings as Record<string, unknown>[])[0]!.severity = "critical";
     const result = validateVerdictRecord(bad);
-    assertTrue(!result.ok, "unknown severity rejected");
-    if (!result.ok) {
-      assertTrue(
-        result.errors.join("; ").includes("severity"),
-        "error names the severity field",
-      );
-    }
-  },
+    if (result.ok) throw new Error("unknown severity must be rejected");
+    expect(result.errors.join("; ")).toContain("severity");
+  });
 
-  "citation_check is advisory: bad self-reports are dropped, never reject the verdict (C14)": () => {
+  test("citation_check is advisory: bad self-reports are dropped, never reject the verdict (C14)", () => {
     const unknownRef = validRecord();
     (unknownRef.citation_check as Record<string, unknown>[])[1]!.finding_id = "F999";
     const r1 = validateVerdictRecord(unknownRef);
-    assertTrue(r1.ok, "unknown finding ref tolerated");
-    if (r1.ok) assertEquals(r1.value.citation_check.map((c) => c.finding_id), ["F1"]);
+    if (!r1.ok) throw new Error("unknown finding ref must be tolerated");
+    expect(r1.value.citation_check.map((c) => c.finding_id)).toStrictEqual(["F1"]);
 
     const dup = validRecord();
     (dup.citation_check as Record<string, unknown>[])[1]!.finding_id = "F1";
     const r2 = validateVerdictRecord(dup);
-    assertTrue(r2.ok, "duplicate citation tolerated");
-    if (r2.ok) assertEquals(r2.value.citation_check.length, 1);
+    if (!r2.ok) throw new Error("duplicate citation must be tolerated");
+    expect(r2.value.citation_check.length).toBe(1);
 
     const outOfRange = validRecord();
     (outOfRange.citation_check as Record<string, unknown>[])[0]!.p_cited = 1.5;
     const r3 = validateVerdictRecord(outOfRange);
-    assertTrue(r3.ok, "p_cited > 1 tolerated");
-    if (r3.ok) assertEquals(r3.value.citation_check.map((c) => c.finding_id), ["F2"]);
+    if (!r3.ok) throw new Error("p_cited > 1 must be tolerated");
+    expect(r3.value.citation_check.map((c) => c.finding_id)).toStrictEqual(["F2"]);
 
     const negative = validRecord();
     (negative.citation_check as Record<string, unknown>[])[0]!.p_cited = -0.1;
-    assertTrue(validateVerdictRecord(negative).ok, "negative p_cited tolerated");
+    expect(validateVerdictRecord(negative).ok).toBe(true);
 
     const absent = validRecord();
     delete absent.citation_check;
     const r4 = validateVerdictRecord(absent);
-    assertTrue(r4.ok, "missing citation_check tolerated");
-    if (r4.ok) assertEquals(r4.value.citation_check, []);
+    if (!r4.ok) throw new Error("missing citation_check must be tolerated");
+    expect(r4.value.citation_check).toStrictEqual([]);
 
     const notArray = { ...validRecord(), citation_check: "high" };
-    assertTrue(validateVerdictRecord(notArray).ok, "non-array citation_check tolerated");
-  },
+    expect(validateVerdictRecord(notArray).ok).toBe(true);
+  });
 
-  "description and snippet are required on every finding (C12/C14)": () => {
+  test("description and snippet are required on every finding (C12/C14)", () => {
     const noDescription = validRecord();
     delete (noDescription.findings as Record<string, unknown>[])[0]!.description;
     const r1 = validateVerdictRecord(noDescription);
-    assertTrue(!r1.ok, "missing description rejected");
-    if (!r1.ok) assertTrue(r1.errors.join("; ").includes("description"), "error names description");
+    if (r1.ok) throw new Error("missing description must be rejected");
+    expect(r1.errors.join("; ")).toContain("description");
 
     const blankDescription = validRecord();
     (blankDescription.findings as Record<string, unknown>[])[0]!.description = "   ";
-    assertTrue(!validateVerdictRecord(blankDescription).ok, "blank description rejected");
+    expect(validateVerdictRecord(blankDescription).ok).toBe(false);
 
     const noSnippet = validRecord();
     (noSnippet.findings as Record<string, unknown>[])[1]!.evidence_span = { start_line: 7, end_line: 7 };
     const r2 = validateVerdictRecord(noSnippet);
-    assertTrue(!r2.ok, "missing snippet rejected");
-    if (!r2.ok) assertTrue(r2.errors.join("; ").includes("snippet"), "error names snippet");
+    if (r2.ok) throw new Error("missing snippet must be rejected");
+    expect(r2.errors.join("; ")).toContain("snippet");
 
     const emptySnippet = validRecord();
     (emptySnippet.findings as Record<string, unknown>[])[1]!.evidence_span = { start_line: 7, end_line: 7, snippet: "" };
-    assertTrue(!validateVerdictRecord(emptySnippet).ok, "empty snippet rejected");
-  },
+    expect(validateVerdictRecord(emptySnippet).ok).toBe(false);
+  });
 
-  "disposition is a closed enum with case/punctuation normalization (C14)": () => {
-    assertEquals([...DISPOSITIONS], ["fix", "wontfix"]);
-    assertEquals(dispositionList(), "fix | wontfix");
+  test("disposition is a closed enum with case/punctuation normalization (C14)", () => {
+    expect([...DISPOSITIONS]).toStrictEqual(["fix", "wontfix"]);
+    expect(dispositionList()).toBe("fix | wontfix");
     for (const [raw, expected] of [
       ["fix", "fix"],
       ["Fix", "fix"],
@@ -172,69 +161,76 @@ runTestFile("verdict-schema", {
       ["wont_fix", "wontfix"],
       ["WontFix", "wontfix"],
     ] as const) {
-      assertEquals(normalizeDisposition(raw), expected, `"${raw}" -> ${expected}`);
+      expect(normalizeDisposition(raw)).toBe(expected);
     }
     for (const bad of ["accept", "will fix", "", "   ", "fix it", 1, null, undefined]) {
-      assertEquals(normalizeDisposition(bad), null, `${JSON.stringify(bad)} is not a disposition`);
+      expect(normalizeDisposition(bad)).toBeNull();
     }
 
     const mixedCase = validRecord();
     (mixedCase.findings as Record<string, unknown>[])[0]!.disposition = "Fix";
     const r = validateVerdictRecord(mixedCase);
-    assertTrue(r.ok, "\"Fix\" validates");
-    if (r.ok) assertEquals(r.value.findings[0]?.disposition, "fix");
+    if (!r.ok) throw new Error('"Fix" must validate');
+    expect(r.value.findings[0]?.disposition).toBe("fix");
 
     const unknown = validRecord();
     (unknown.findings as Record<string, unknown>[])[0]!.disposition = "maybe later";
     const r2 = validateVerdictRecord(unknown);
-    assertTrue(!r2.ok, "unknown disposition rejected");
-    if (!r2.ok) assertTrue(r2.errors.join("; ").includes("fix | wontfix"), "error lists the enum");
-  },
+    if (r2.ok) throw new Error("unknown disposition must be rejected");
+    // the error lists the enum
+    expect(r2.errors.join("; ")).toContain("fix | wontfix");
+  });
 
-  "rejects duplicate finding ids and bad evidence spans": () => {
+  test("rejects duplicate finding ids and bad evidence spans", () => {
     const dupIds = validRecord();
     (dupIds.findings as Record<string, unknown>[])[1]!.finding_id = "F1";
-    assertTrue(!validateVerdictRecord(dupIds).ok, "duplicate finding_id rejected");
+    expect(validateVerdictRecord(dupIds).ok).toBe(false);
 
+    // end_line < start_line (the snippet is present, so only the span order can reject it)
     const inverted = validRecord();
     (inverted.findings as Record<string, unknown>[])[0]!.evidence_span = {
       start_line: 9,
       end_line: 4,
+      snippet: "user.name as any",
     };
-    assertTrue(!validateVerdictRecord(inverted).ok, "end_line < start_line rejected");
+    const r1 = validateVerdictRecord(inverted);
+    if (r1.ok) throw new Error("end_line < start_line must be rejected");
+    expect(r1.errors.join("; ")).toContain("end_line must be >= start_line");
 
+    // non-positive line (snippet present, so only the line number can reject it)
     const zero = validRecord();
     (zero.findings as Record<string, unknown>[])[0]!.evidence_span = {
       start_line: 0,
       end_line: 3,
+      snippet: "user.name as any",
     };
-    assertTrue(!validateVerdictRecord(zero).ok, "non-positive line rejected");
-  },
+    const r2 = validateVerdictRecord(zero);
+    if (r2.ok) throw new Error("non-positive line must be rejected");
+    expect(r2.errors.join("; ")).toContain("start_line");
+  });
 
-  "rejects non-object input and wrong scalar types": () => {
-    assertTrue(!validateVerdictRecord(null).ok, "null rejected");
-    assertTrue(!validateVerdictRecord("verdict").ok, "string rejected");
-    assertTrue(!validateVerdictRecord([]).ok, "array rejected");
+  test("rejects non-object input and wrong scalar types", () => {
+    expect(validateVerdictRecord(null).ok).toBe(false);
+    expect(validateVerdictRecord("verdict").ok).toBe(false);
+    expect(validateVerdictRecord([]).ok).toBe(false);
 
+    // non-integer round
     const wrongTypes = validRecord();
     wrongTypes.round = "2";
-    assertTrue(!validateVerdictRecord(wrongTypes).ok, "non-integer round rejected");
-  },
+    expect(validateVerdictRecord(wrongTypes).ok).toBe(false);
+  });
 
-  "validateFinding reports all finding-level errors with a path": () => {
+  test("validateFinding reports all finding-level errors with a path", () => {
     const result = validateFinding(
       { finding_id: "", severity: "mega", description: "", evidence_span: "nowhere", disposition: "" },
       "findings[3]",
     );
-    assertTrue(!result.ok, "bad finding rejected");
-    if (!result.ok) {
-      const joined = result.errors.join("; ");
-      assertTrue(joined.includes("findings[3]"), "error paths are prefixed");
-      assertTrue(joined.includes("finding_id"), "reports finding_id");
-      assertTrue(joined.includes("severity"), "reports severity");
-      assertTrue(joined.includes("disposition"), "reports disposition");
-      assertTrue(joined.includes("description"), "reports description");
-      assertTrue(joined.includes("evidence_span"), "reports evidence_span");
+    if (result.ok) throw new Error("bad finding must be rejected");
+    const joined = result.errors.join("; ");
+    // error paths are prefixed
+    expect(joined).toContain("findings[3]");
+    for (const field of ["finding_id", "severity", "disposition", "description", "evidence_span"]) {
+      expect(joined).toContain(field);
     }
-  },
+  });
 });

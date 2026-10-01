@@ -1,8 +1,8 @@
 /**
- * Unit tests for src/queues/vitest-queue.ts — standalone, assert-based.
- * Run: bun run src/queues/vitest-queue.test.ts
+ * Unit tests for src/queues/vitest-queue.ts.
  */
 
+import { describe, expect, test } from "bun:test";
 import {
   buildVitestQueueState,
   createNaiveClassifier,
@@ -13,7 +13,6 @@ import {
   type VitestFailureRecord,
   type VitestQueueState,
 } from "./vitest-queue.js";
-import { assertEquals, assertTrue, runTestFile } from "./testkit.js";
 
 const VITEST_SAMPLE = `
  RUN  v3.2.4 /Users/dev/refactoring-toolkit
@@ -44,53 +43,51 @@ Error: price must be positive
       Tests  2 failed | 2 passed (4)
 `;
 
-runTestFile("vitest-queue", {
-  "parses failing tests into records with name, message, and frames": () => {
+describe("vitest-queue", () => {
+  test("parses failing tests into records with name, message, and frames", () => {
     const failures = parseVitestOutput(VITEST_SAMPLE);
-    assertEquals(failures.length, 2, "two FAIL blocks");
+    // two FAIL blocks
+    expect(failures.length).toBe(2);
 
     const first = failures[0]!;
-    assertEquals(first.testFile, "tests/discount.test.ts");
-    assertEquals(first.testName, "PriceCalculator > applies member discount");
-    assertTrue(
-      first.errorMessage.startsWith("AssertionError: expected 100 to be 90"),
-      "error message captured",
-    );
-    assertTrue(
-      first.errorMessage.includes("+ Received"),
-      "diff block kept in message",
-    );
-    assertEquals(first.frames.length, 3, "three stack frames");
-    assertEquals(first.frames[0], {
+    expect(first.testFile).toBe("tests/discount.test.ts");
+    expect(first.testName).toBe("PriceCalculator > applies member discount");
+    // error message captured, and the diff block is kept in it
+    expect(first.errorMessage.startsWith("AssertionError: expected 100 to be 90")).toBe(true);
+    expect(first.errorMessage).toContain("+ Received");
+    // three stack frames
+    expect(first.frames.length).toBe(3);
+    expect(first.frames[0]).toStrictEqual({
       file: "tests/discount.test.ts",
       line: 18,
       column: 26,
     });
-    assertEquals(first.frames[1], {
+    expect(first.frames[1]).toStrictEqual({
       file: "src/pricing/discount.ts",
       line: 41,
       column: 5,
     });
 
     const second = failures[1]!;
-    assertEquals(second.testName, "PriceCalculator > rejects negative price");
-    assertEquals(second.errorMessage, "Error: price must be positive");
-    assertEquals(second.frames[0]!.file, "src/pricing/discount.ts");
-  },
+    expect(second.testName).toBe("PriceCalculator > rejects negative price");
+    expect(second.errorMessage).toBe("Error: price must be positive");
+    expect(second.frames[0]!.file).toBe("src/pricing/discount.ts");
+  });
 
-  "ignores per-file summary bullets and ANSI escapes": () => {
+  test("ignores per-file summary bullets and ANSI escapes", () => {
     // The `×` bullet WITHOUT a " > " separator must not spawn a record; the
     // full FAIL block is the authoritative record.
     const failures = parseVitestOutput(VITEST_SAMPLE);
-    assertEquals(failures.length, 2);
+    expect(failures.length).toBe(2);
 
     const ansiSample = "\x1b[31m FAIL \x1b[0m tests/a.test.ts > suite > t\nError: boom\n";
     const parsed = parseVitestOutput(ansiSample);
-    assertEquals(parsed.length, 1, "ANSI-stripped FAIL line still starts a record");
-    assertEquals(parsed[0]!.testFile, "tests/a.test.ts");
-  },
+    // ANSI-stripped FAIL line still starts a record
+    expect(parsed.length).toBe(1);
+    expect(parsed[0]!.testFile).toBe("tests/a.test.ts");
+  });
 
-  "C26: bullets never start records, FAIL blocks do (no duplicates when streams merge)": () => {
+  test("C26: bullets never start records, FAIL blocks do (no duplicates when streams merge)", () => {
     // vitest 3.x: per-file bullets (with a describe path) go to stdout, the
     // FAIL block to stderr; read together they must yield ONE record.
     const merged = [
@@ -112,15 +109,18 @@ runTestFile("vitest-queue", {
       "",
     ].join("\n");
     const records = parseVitestOutput(merged);
-    assertEquals(records.length, 1, "one FAIL block = one record");
-    assertEquals(records[0]!.testName, "Suite > case");
-    assertEquals(records[0]!.frames.length, 2, "frames survive");
-    assertEquals(records[0]!.errorMessage, "AssertionError: expected 1 to be 2", "banner/footer rules stay out of the message");
+    // one FAIL block = one record
+    expect(records.length).toBe(1);
+    expect(records[0]!.testName).toBe("Suite > case");
+    // frames survive
+    expect(records[0]!.frames.length).toBe(2);
+    // banner/footer rules stay out of the message
+    expect(records[0]!.errorMessage).toBe("AssertionError: expected 1 to be 2");
     // Bullets alone (the stdout-only shape the flow used to parse) carry no record.
-    assertEquals(parseVitestOutput("   × Suite > case 3ms\n     → expected 1 to be 2\n"), []);
-  },
+    expect(parseVitestOutput("   × Suite > case 3ms\n     → expected 1 to be 2\n")).toStrictEqual([]);
+  });
 
-  "C26: summary lines are anchored (Failed Tests banner / FAIL header cannot overwrite them)": () => {
+  test("C26: summary lines are anchored (Failed Tests banner / FAIL header cannot overwrite them)", () => {
     const merged = [
       " Test Files  1 failed (1)",
       "      Tests  1 failed | 2 passed (3)",
@@ -129,14 +129,14 @@ runTestFile("vitest-queue", {
       "Error: boom",
     ].join("\n");
     const summary = parseVitestSummary(merged);
-    assertEquals(summary?.tests, { passed: 2, failed: 1, total: 3 });
-    assertEquals(summary?.testFiles, { passed: 0, failed: 1, total: 1 });
+    expect(summary?.tests).toStrictEqual({ passed: 2, failed: 1, total: 3 });
+    expect(summary?.testFiles).toStrictEqual({ passed: 0, failed: 1, total: 1 });
     // ANSI-colored summary lines still anchor once escapes are stripped.
     const colored = "\x1b[2m Test Files \x1b[22m \x1b[31m1 failed\x1b[39m (1)\n\x1b[2m      Tests \x1b[22m \x1b[31m1 failed\x1b[39m | 2 passed (3)\n";
-    assertEquals(parseVitestSummary(colored)?.tests, { passed: 2, failed: 1, total: 3 });
-  },
+    expect(parseVitestSummary(colored)?.tests).toStrictEqual({ passed: 2, failed: 1, total: 3 });
+  });
 
-  "C26: a collection-failure header drops the `[ file ]` suffix": () => {
+  test("C26: a collection-failure header drops the `[ file ]` suffix", () => {
     const records = parseVitestOutput(
       [
         " FAIL  tests/broken.test.ts [ tests/broken.test.ts ]",
@@ -145,32 +145,30 @@ runTestFile("vitest-queue", {
         "",
       ].join("\n"),
     );
-    assertEquals(records.length, 1);
-    assertEquals(records[0]!.testFile, "tests/broken.test.ts");
-    assertEquals(records[0]!.testName, "");
-    assertEquals(records[0]!.frames, [{ file: "tests/broken.test.ts", line: 2, column: 1 }]);
+    expect(records.length).toBe(1);
+    expect(records[0]!.testFile).toBe("tests/broken.test.ts");
+    expect(records[0]!.testName).toBe("");
+    expect(records[0]!.frames).toStrictEqual([{ file: "tests/broken.test.ts", line: 2, column: 1 }]);
     // A TEST name that merely ends in brackets keeps them.
     const named = parseVitestOutput(" FAIL  tests/a.test.ts > handles [ edge ]\nError: x\n");
-    assertEquals(named[0]!.testName, "handles [ edge ]");
-  },
+    expect(named[0]!.testName).toBe("handles [ edge ]");
+  });
 
-  "empty and clean outputs yield no records": () => {
-    assertEquals(parseVitestOutput(""), []);
-    assertEquals(parseVitestOutput("Tests  3 passed (3)\n"), []);
-  },
+  test("empty and clean outputs yield no records", () => {
+    expect(parseVitestOutput("")).toStrictEqual([]);
+    expect(parseVitestOutput("Tests  3 passed (3)\n")).toStrictEqual([]);
+  });
 
-  "naive classifier: stack touching ported output is port-caused": () => {
+  test("naive classifier: stack touching ported output is port-caused", () => {
     const classifier = createNaiveClassifier();
     const failures = parseVitestOutput(VITEST_SAMPLE);
     const result = classifier.classify(failures[0]!);
-    assertEquals(result.failureClass, "port-caused");
-    assertTrue(
-      result.reason.includes("src/pricing/discount.ts"),
-      "reason names the deciding frame",
-    );
-  },
+    expect(result.failureClass).toBe("port-caused");
+    // reason names the deciding frame
+    expect(result.reason).toContain("src/pricing/discount.ts");
+  });
 
-  "naive classifier: fixture-only stack is fixture-problem": () => {
+  test("naive classifier: fixture-only stack is fixture-problem", () => {
     const classifier = createNaiveClassifier();
     const fixtureFailure: VitestFailureRecord = {
       testFile: "tests/setup.test.ts",
@@ -183,14 +181,12 @@ runTestFile("vitest-queue", {
       raw: "FAIL  tests/setup.test.ts > harness > broken fixture",
     };
     const result = classifier.classify(fixtureFailure);
-    assertEquals(result.failureClass, "fixture-problem");
-    assertTrue(
-      result.reason.includes("tests/setup.test.ts"),
-      "reason names the fixture frame",
-    );
-  },
+    expect(result.failureClass).toBe("fixture-problem");
+    // reason names the fixture frame
+    expect(result.reason).toContain("tests/setup.test.ts");
+  });
 
-  "naive classifier: unknown roots fall back to configured class": () => {
+  test("naive classifier: unknown roots fall back to configured class", () => {
     const unknownFailure: VitestFailureRecord = {
       testFile: "node_modules/.cache/gen.test.ts",
       testName: "gen > case",
@@ -198,20 +194,15 @@ runTestFile("vitest-queue", {
       frames: [{ file: "/opt/vendor/lib/gen.ts", line: 1, column: 1 }],
       raw: "",
     };
-    assertEquals(
-      createNaiveClassifier().classify(unknownFailure).failureClass,
-      "port-caused",
-      "default unknown fallback is port-caused",
-    );
-    assertEquals(
-      createNaiveClassifier({ unknown: "fixture-problem" }).classify(unknownFailure)
-        .failureClass,
+    // default unknown fallback is port-caused
+    expect(createNaiveClassifier().classify(unknownFailure).failureClass).toBe("port-caused");
+    // unknown fallback is configurable
+    expect(createNaiveClassifier({ unknown: "fixture-problem" }).classify(unknownFailure).failureClass).toBe(
       "fixture-problem",
-      "unknown fallback is configurable",
     );
-  },
+  });
 
-  "custom classifier implementations satisfy the same interface": () => {
+  test("custom classifier implementations satisfy the same interface", () => {
     const alwaysFixture: FailureClassification = {
       failureClass: "fixture-problem",
       attributedFile: "tests/discount.test.ts",
@@ -219,22 +210,17 @@ runTestFile("vitest-queue", {
     };
     const classifier: FailureClassifier = { classify: () => alwaysFixture };
     const failures = parseVitestOutput(VITEST_SAMPLE);
-    assertEquals(
-      classifier.classify(failures[1]!).failureClass,
-      "fixture-problem",
-      "the FailureClassifier seam accepts any implementation",
-    );
-  },
+    // the FailureClassifier seam accepts any implementation
+    expect(classifier.classify(failures[1]!).failureClass).toBe("fixture-problem");
+  });
 
-  "queue state is attribute-serializable (JSON round-trip)": () => {
-    const state: VitestQueueState = buildVitestQueueState(
-      parseVitestOutput(VITEST_SAMPLE),
-      2,
-    );
-    assertEquals(state.total, 2);
-    assertEquals(state.iteration, 2);
-    assertEquals(state.kind, "vitest-queue");
+  test("queue state is attribute-serializable (JSON round-trip)", () => {
+    const state: VitestQueueState = buildVitestQueueState(parseVitestOutput(VITEST_SAMPLE), 2);
+    expect(state.total).toBe(2);
+    expect(state.iteration).toBe(2);
+    expect(state.kind).toBe("vitest-queue");
     const restored = JSON.parse(JSON.stringify(state)) as VitestQueueState;
-    assertEquals(restored, state, "JSON round-trip preserves state exactly");
-  },
+    // JSON round-trip preserves state exactly
+    expect(restored).toStrictEqual(state);
+  });
 });
