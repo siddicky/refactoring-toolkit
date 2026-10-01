@@ -20,10 +20,6 @@ import type {
   WaveEntry,
 } from "./state.js";
 
-// ---------------------------------------------------------------------------
-// Keys + pure helpers (unit-tested in tests/phase2-flow.test.ts)
-// ---------------------------------------------------------------------------
-
 export const safe = (file: string): string => file.replace(/\//g, "__");
 
 export const markerKeyOf = (file: string, round: number): string => `${safe(file)}#${round}`;

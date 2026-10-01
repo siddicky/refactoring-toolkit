@@ -46,12 +46,21 @@ import type { JudgmentClient } from "../src/typesafe/client.js";
 
 type Stores = Map<unknown, Map<string, unknown>>;
 
-/** Minimal dex Context over in-memory attribute stores (no declared-load enforcement). */
-function ctxOver(stores: Stores): Context {
+/**
+ * Minimal dex Context over in-memory attribute stores. With `loads`, reads of a map
+ * outside that list throw, like dex does for a map a step did not declare.
+ */
+function ctxOver(stores: Stores, loads?: readonly unknown[]): Context {
   return {
     attempt: 1,
     flowId: "shared-helpers",
-    getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
+    runId: "run-1",
+    getAttribute: (attr: unknown, instance: string) => {
+      if (loads !== undefined && !loads.includes(attr)) {
+        throw new Error(`AttributeMap instance was not loaded: ${String(attr)}/${instance}`);
+      }
+      return stores.get(attr)?.get(instance);
+    },
     setAttribute: (attr: unknown, value: unknown, instance: string) => {
       const store = stores.get(attr) ?? new Map<string, unknown>();
       store.set(instance, value);
@@ -368,16 +377,7 @@ function replyingHarness(reply: string): AgentSessionClient {
 /** A Context that, like dex, only serves attribute maps the step declared in executeLoadAttributeMaps. */
 function declaredCtx(stores: Stores, step: { getStepOptions?: () => unknown }): Context {
   const options = step.getStepOptions?.() as { executeLoadAttributeMaps?: readonly unknown[] } | undefined;
-  const declared = options?.executeLoadAttributeMaps ?? [];
-  const open = ctxOver(stores) as unknown as Record<string, (...args: never[]) => unknown>;
-  return {
-    ...open,
-    runId: "run-1",
-    getAttribute: (attr: unknown, instance: string) => {
-      if (!declared.includes(attr)) throw new Error(`AttributeMap instance was not loaded: ${String(attr)}/${instance}`);
-      return stores.get(attr)?.get(instance);
-    },
-  } as unknown as Context;
+  return ctxOver(stores, options?.executeLoadAttributeMaps ?? []);
 }
 
 const FRI: FileRoundInput = {

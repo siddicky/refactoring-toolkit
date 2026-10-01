@@ -20,9 +20,10 @@ import ts from "typescript";
 
 import * as entry from "../flows/port-project.js";
 import { releaseStepLink } from "../flows/port/links.js";
+import { PORT_FLOW_ENTRY } from "./helpers/port-flow-source.js";
 
 const ROOT = join(import.meta.dir, "..");
-const ENTRY = "flows/port-project.ts";
+const ENTRY = PORT_FLOW_ENTRY;
 
 /** Runtime exports of flows/port-project.ts (sorted with the default string order). */
 const VALUE_EXPORTS: readonly string[] = [

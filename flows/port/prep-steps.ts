@@ -91,10 +91,6 @@ export const PrepStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
   route: (_ctx, _input, out) => goTo(SymbolStart, out),
 });
 
-// ---------------------------------------------------------------------------
-// Phase 3 — prep-analysis steps (spec map + per-symbol table + prep review)
-// ---------------------------------------------------------------------------
-
 const PREP_SPEC_FILE = "PORTING.spec.md";
 
 export const SymbolStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<PortRunInput>({

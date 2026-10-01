@@ -26,26 +26,19 @@
 import type { EnvelopeStepClass } from "../steps/envelope.js";
 import type { FileRoundInput } from "./state.js";
 
-/** A late-bound step class: bound once by its defining module, read at route time. */
-export interface StepLink<Input> {
-  bind(step: EnvelopeStepClass<Input>): void;
-  get(): EnvelopeStepClass<Input>;
-}
-
-function stepLink<Input>(name: string): StepLink<Input> {
-  let bound: EnvelopeStepClass<Input> | undefined;
-  return {
-    bind: (step) => {
-      bound = step;
-    },
-    get: () => {
-      if (bound === undefined) {
-        throw new Error(`${name} step is not linked: flows/port/project-steps.ts was never loaded`);
-      }
-      return bound;
-    },
-  };
-}
+let releaseStep: EnvelopeStepClass<FileRoundInput> | undefined;
 
 /** IntegrateStep (file-steps) -> ReleaseStep (project-steps), sequential mode only. */
-export const releaseStepLink: StepLink<FileRoundInput> = stepLink<FileRoundInput>("PpRelease");
+export const releaseStepLink = {
+  /** Called once by project-steps, right after ReleaseStep is defined. */
+  bind(step: EnvelopeStepClass<FileRoundInput>): void {
+    releaseStep = step;
+  },
+  /** Read by IntegrateStep's route; throws instead of routing to `undefined`. */
+  get(): EnvelopeStepClass<FileRoundInput> {
+    if (releaseStep === undefined) {
+      throw new Error("PpRelease step is not linked: flows/port/project-steps.ts was never loaded");
+    }
+    return releaseStep;
+  },
+};
