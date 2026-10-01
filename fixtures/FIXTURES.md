@@ -183,18 +183,24 @@ state-machine map (dunning), fluent APIs via `__call`.
 Optional live-demo input for the same porting flow; not wired into the
 Phase 2/Phase 7 defaults, which point at `php-sample/` and `stub-prep.md`.
 `run-demo.ts demo --files creatorex` expands to the 10 port units (5 source
-files + 5 PHPUnit test files), so it needs this fixture's prep stub and source
-root:
+files + 5 PHPUnit test files) and implies this fixture's prep stub and source
+root, so this is the whole command:
 
 ```sh
-bun run scripts/run-demo.ts demo --dir <targetRepoDir> \
-  --files creatorex \
-  --prep fixtures/creatorex-middleware/prep-stub.md \
-  --source-root fixtures/creatorex-middleware
+bun run scripts/run-demo.ts demo --dir <targetRepoDir> --files creatorex
 ```
 
-Without `--prep` and `--source-root` the run falls back to the php-sample
-defaults and the prep step finds no source-map rows for the creatorex files.
+An explicit `--prep` or `--source-root` still wins over the implied one. Any
+other `--files` value uses the php-sample defaults (`stub-prep.md`,
+`php-sample/`), which have no source-map rows for the creatorex files; `demo`
+reports that in its preflight, before it contacts dex. Both fixture locations
+are found from the script, not the current directory.
+
+`--dir` must be an existing git repository with a commit. Add `--init-fixture`
+to have `demo` (or `round`) create a throwaway README-only repository at a path
+that does not exist yet (`src/git/fixture.ts`); an existing directory is never
+touched. The `round` command, the Phase-0 probe, expects exactly that kind of
+repository.
 
 `creatorex-middleware/prep-stub.md` is the stub prep artifact: a hand-written
 source map (the test files are explicit rows, because `parsePrepSourceMap`
