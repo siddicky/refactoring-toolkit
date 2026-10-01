@@ -10,7 +10,9 @@
  *
  * `tokens` is REQUIRED (non-null) for model-calling roles (agent, review,
  * judgment) and null-as-not-applicable for non-model roles (commit, queue,
- * diff-capture, integration, record). A missing required token value is a
+ * diff-capture, integration, record, and the verdict-check / prioritize
+ * roles, whose live Jev spend is reported via pp-jev-usage, not the
+ * envelope — see NAIVE_JUDGMENT_ROLES). A missing required token value is a
  * provenance failure, never zero.
  *
  * Phase 0(g) note: attribute writes are staged with a step's decision. Whether
@@ -276,10 +278,15 @@ export function requiresTokens(role: EnvelopeRole): boolean {
 }
 
 /**
- * Roles that sit at TypeSafe integration points but are CODE-ONLY in Phase 2
- * (naive verdict-check / naive prioritize): they call no model, so their
- * tokens are null-as-not-applicable. When Phase 3 swaps in Jev these steps
- * move to the model-calling `judgment` role and tokens become required.
+ * Roles at TypeSafe integration points that keep a NON-model role: the naive
+ * verdict-check / prioritize defaults call no model, and their envelopes keep
+ * `tokens: null` EVEN WHEN a live Jev client is configured. The live Jev
+ * swap-in did not move these steps to the model-calling `judgment` role (an
+ * earlier plan said it would). Their live Jev spend — and that of vitest
+ * triage — is recorded in the write-only `pp-jev-usage` attribute
+ * (flows/port-project.ts recordJevUsage) and is reported separately by
+ * render-metrics as Jev (judgment) tokens; it is NOT part of the envelope
+ * token totals, so `validateProvenance` cannot flag it.
  */
 export const NAIVE_JUDGMENT_ROLES: readonly EnvelopeRole[] = ["verdict-check", "prioritize"];
 

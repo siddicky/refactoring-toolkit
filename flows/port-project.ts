@@ -63,6 +63,7 @@ import {
   OpencodePromptError,
   type AgentSessionClient,
 } from "../src/harness/opencode.js";
+import { git } from "../src/git/exec.js";
 import {
   commitLeaseChanges,
   findCommitByOpId,
@@ -118,8 +119,10 @@ import {
 import { portJevLive } from "./runtime-hooks.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
 import { createJevFailureClassifier } from "../src/typesafe/vitest-triage.js";
+import { CITATION_MIN_P_JEV, CITATION_MIN_P_NAIVE } from "../src/judgment-registry.js";
 import {
   buildRetryContextDiagnosis,
+  type CitationCheckResult,
   type DiffDocument,
   type Finding as MetricsFinding,
   type TokenUsage,
@@ -139,7 +142,6 @@ import {
   composeImplementerTurn,
   composeReviewerRepairTurn,
   composeReviewerTurn,
-  demoteReviewerLane,
   extractCodeFence,
   extractJsonObject,
   extractSpecMap,
@@ -201,6 +203,18 @@ export interface FileRoundInput {
   queueFixErrors?: ReadonlyArray<QueueVerifyError>;
   /** v1.1: vitest failures triaged to this file (fix rounds in child flows). */
   queueFixVitest?: ReadonlyArray<ClassifiedVitestFailure>;
+  /**
+   * Run-level fields of the PortRunInput this file-round was leased from.
+   * LeaseStep spreads the run input into the FileRoundInput, so they ride the
+   * sequential per-file pipeline; ReleaseStep rebuilds the run input from
+   * them (baseInput) — dropping them silently turned `--dispatch sequential`
+   * into parallel after the first file. Absent in per-file SubFlow children,
+   * which end at ChildReleaseStep and never rebuild a run input.
+   */
+  prepPath?: string;
+  files?: readonly string[];
+  maxRounds?: number;
+  dispatchMode?: "sequential" | "parallel";
 }
 
 export interface PortRunConfig {
@@ -344,9 +358,27 @@ export interface ReviewTuple {
  */
 export type ReviewVerdict = ReviewTuple | VerdictTombstone;
 
+/** Which implementation produced a Lane-B gate's scores/order (provenance). */
+export type JudgmentChecker = "naive" | "jev" | "naive-fallback";
+
+/** One reviewer's citation-gate scores, with the checker that produced them. */
+export interface CitationGateRecord {
+  reviewer: string;
+  checker: JudgmentChecker;
+  /** Why live Jev was abandoned (checker "naive-fallback"); null otherwise. */
+  fallbackReason: string | null;
+  /** p_cited per checked finding (kept AND dropped) — the gate's audit trail. */
+  scores: Array<{ finding_id: string; p_cited: number }>;
+}
+
 export interface KeptFindings {
   findings: MetricsFinding[];
-  dropped: Array<{ finding_id: string; reviewer: string; reason: string }>;
+  /** `p_cited` is set on citation-gate drops (the score the gate applied). */
+  dropped: Array<{ finding_id: string; reviewer: string; reason: string; p_cited?: number }>;
+  /** Lane-B "citation-check" provenance (absent on records predating it). */
+  citationGate?: CitationGateRecord[];
+  /** Lane-B "prioritize" provenance (set by PrioritizeStep). */
+  prioritize?: { checker: JudgmentChecker; fallbackReason: string | null };
 }
 
 export interface OutPathRef {
@@ -426,6 +458,16 @@ export const ppWave = new AttributeMap<WaveDispatchRecord>("pp-wave", jsonCodec<
 export const ppWaveChildren = new AttributeMap<WaveChildrenRecord>("pp-wave-children", jsonCodec<WaveChildrenRecord>());
 
 const PP_LEASE_INSTANCE = "pool";
+
+/**
+ * WorktreePool lease cap handed to every pool the flow builds (sequential
+ * Lease/Release here; each per-file child builds its own). The pool enforces
+ * the cap per LEASE STORE, and every parallel child owns its own pp-lease
+ * store, so in parallel mode the effective concurrency bound is the wave
+ * planner's slice width (CHILD_SLOT_CAP, derived from this constant), not
+ * this pool cap.
+ */
+export const LEASE_SLOT_CAP = 2;
 
 /** Persistence schema fragment for getPersistenceSchema(). */
 export function portPersistenceSchema(): {
@@ -633,6 +675,100 @@ async function recordJevUsage(ctx: Context, stepId: string, tokens: number): Pro
   ppJevUsage.set(ctx, "usage", log);
 }
 
+// Lane-B gates with a fail-open fallback (registry: citation-check, prioritize)
+// ---------------------------------------------------------------------------
+
+/**
+ * The citation gate's keep decision — the single authority for the port-loop
+ * gate (VerdictCheckStep) and the prep gate (PrepVerdictCheckStep). Thresholds
+ * live in src/judgment-registry.ts next to the registry entry that documents
+ * them: the naive checker is binary (keep iff 1), the live Jev checker returns
+ * a probability (keep iff >= CITATION_MIN_P_JEV).
+ */
+export function citationKept(pCited: number, checker: JudgmentChecker): boolean {
+  return pCited >= (checker === "jev" ? CITATION_MIN_P_JEV : CITATION_MIN_P_NAIVE);
+}
+
+/** Counts System One tokens across every call, including calls that fail later. */
+function countingJevClient(client: JudgmentClient): { client: JudgmentClient; tokens: () => number } {
+  let total = 0;
+  return {
+    client: {
+      kind: client.kind,
+      systemOne: async (request) => {
+        const r = await client.systemOne(request);
+        total += r.usage.input_tokens + r.usage.output_tokens;
+        return r;
+      },
+    },
+    tokens: () => total,
+  };
+}
+
+function failureReason(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).slice(0, 300);
+}
+
+/** A Lane-B gate's result plus how it was produced. */
+export interface JevGateResult<T> {
+  value: T;
+  checker: JudgmentChecker;
+  fallbackReason: string | null;
+  /** Live Jev tokens spent, including before a failure (0 on the naive path). */
+  jevTokens: number;
+}
+
+/**
+ * Runs `live` against the Jev client when one is configured, else (or when it
+ * FAILS — client error, no answer for a finding) the deterministic `naive`
+ * default. Failing open is deliberate: a thrown step is retried by dex and
+ * re-bills the batch. The degradation is returned for the caller to record.
+ */
+async function withJevFallback<T>(
+  jev: JudgmentClient | undefined,
+  live: (client: JudgmentClient) => Promise<T>,
+  naive: () => T,
+): Promise<JevGateResult<T>> {
+  if (jev === undefined) return { value: naive(), checker: "naive", fallbackReason: null, jevTokens: 0 };
+  const counting = countingJevClient(jev);
+  try {
+    const value = await live(counting.client);
+    return { value, checker: "jev", fallbackReason: null, jevTokens: counting.tokens() };
+  } catch (err) {
+    const fallbackReason = failureReason(err);
+    // Failing open must not be silent: a persistent client/auth defect would
+    // otherwise degrade the whole run to naive with no signal beyond the
+    // durable pp-kept record.
+    console.warn(`[lane-b] live Jev failed; using the naive default (${fallbackReason})`);
+    return { value: naive(), checker: "naive-fallback", fallbackReason, jevTokens: counting.tokens() };
+  }
+}
+
+/** Citation scores for one reviewer's verdict (registry "citation-check"). */
+export function runCitationGate(
+  verdict: MetricsVerdictRecord,
+  diff: DiffDocument,
+  jev: JudgmentClient | undefined,
+): Promise<JevGateResult<CitationCheckResult[]>> {
+  return withJevFallback(
+    jev,
+    (client) => createCitationChecker(client).check(verdict, diff),
+    () => naiveCitationCheck(verdict, diff),
+  );
+}
+
+/** Fixer-queue ordering (registry "prioritize"); nothing to rank stays naive. */
+export function runPrioritizeGate(
+  findings: readonly MetricsFinding[],
+  jev: JudgmentClient | undefined,
+): Promise<JevGateResult<MetricsFinding[]>> {
+  return withJevFallback(
+    findings.length === 0 ? undefined : jev,
+    (client) => createJevPrioritizer(client).prioritize(findings),
+    () => naivePrioritize(findings),
+  );
+}
+
 // Vitest triage (Lane-B "vitest-triage", declared in src/judgment-registry.ts)
 // ---------------------------------------------------------------------------
 
@@ -773,11 +909,15 @@ export function composeAgentTurn(def: AgentDefinition, turn: string): string {
   return [def.prompt, "", toolPolicyBlock(def), "", turn].join("\n\n");
 }
 
+/**
+ * Stages everything in the lease worktree and returns the staged diff. Goes
+ * through src/git/exec.ts so the 30s timeout and 64 MiB buffer apply (a bare
+ * promisified execFile has Node's 1 MiB default buffer and no timeout).
+ */
 async function gitDiffStaged(worktreePath: string): Promise<string> {
-  const { stdout } = await execFileP("git", ["add", "-A"], { cwd: worktreePath });
-  void stdout;
-  const res = await execFileP("git", ["diff", "--cached"], { cwd: worktreePath });
-  return res.stdout;
+  const runner = git(worktreePath);
+  await runner.run(["add", "-A"]);
+  return runner.run(["diff", "--cached"]);
 }
 
 async function writeOutFile(worktreePath: string, outPath: string, content: string): Promise<void> {
@@ -895,8 +1035,9 @@ async function diagnoseAmbiguousThrow(input: {
  *   the Tier-0 degenerateReply guard applies to it). Repair success = the
  *   repaired verdict passes schema AND is not suspect. Repair failure =
  *   TOMBSTONE;
- * - attempt EXHAUSTION (deterministic: ctx.attempt >= maxAttempts, the step's
- *   own retry policy) converts the final attempt's failure into a TOMBSTONE
+ * - attempt EXHAUSTION (deterministic: ctx.attempt >= maxAttempts, the
+ *   in-step bound REVIEW_STEP_MAX_ATTEMPTS — independent of the step's dex
+ *   executeRetry budget) converts that attempt's failure into a TOMBSTONE
  *   instead of a throw — with the failed turn's usage when the failure shape
  *   exposed it (the Tier-0 degenerate class does). A no-usage exhaustion
  *   (nothing measurable to anchor — provenance never zero) stays fatal:
@@ -935,7 +1076,16 @@ function inStepMemoKey(input: {
   stepId?: string;
   diff: ReviewTurnDiff;
 }): string {
-  return `${input.ctx.flowId}/${input.ctx.runId}:${input.stepId ?? `pp-review-${input.reviewerId}`}:${input.diff.diffId}`;
+  return `${input.ctx.flowId}/${input.ctx.runId}:${input.stepId ?? reviewStepIdOf(input.reviewerId)}:${input.diff.diffId}`;
+}
+
+/**
+ * Envelope step id of a port-loop review step for a reviewer id
+ * ("reviewer-A" -> "pp-review-a", matching ReviewAStep's stepId). Callers in
+ * other loops (prep review) pass their own explicit `stepId`.
+ */
+function reviewStepIdOf(reviewerId: string): string {
+  return `pp-review-${reviewerId.replace(/^reviewer-/, "").toLowerCase()}`;
 }
 
 /** Test seam: clears the in-step verbatim memo (per-test isolation). */
@@ -943,7 +1093,16 @@ export function resetInStepVerdictMemo(): void {
   inStepVerdictTexts.clear();
 }
 
-/** Review-step retry policy (dex executeRetry) — the exhaustion bound. */
+/**
+ * In-step exhaustion bound for a review turn: on dex attempt >= this value a
+ * failing turn with measurable provider usage becomes a TOMBSTONE instead of
+ * a throw. It is NOT the step's dex retry budget: the review steps run
+ * MODEL_STEP_OPTIONS (RESTART_WINDOW_RETRY, 8 attempts, sized to outlive a
+ * worker restart), and connection-refused attempts during a restart also
+ * count toward dex's attempt number. The two bounds are deliberately
+ * independent (stage 3c, BUILD_NOTES); a usage-less failure at or past this
+ * bound still throws and is retried within the dex budget.
+ */
 export const REVIEW_STEP_MAX_ATTEMPTS = 3;
 
 /** Sums two usage splits (original turn + repair turn burned tokens). */
@@ -983,7 +1142,7 @@ export async function runReviewTurn(input: {
   attempt?: number;
   /** The durable step's id (diagnosis turn identity: `<stepId>@<identity>`). */
   stepId?: string;
-  /** The step's retry policy bound (default REVIEW_STEP_MAX_ATTEMPTS). */
+  /** In-step exhaustion bound (default REVIEW_STEP_MAX_ATTEMPTS); not dex's retry budget. */
   maxAttempts?: number;
 }): Promise<{
   verdict: ReviewVerdict;
@@ -1017,11 +1176,14 @@ async function runReviewTurnOnce(input: {
   turnDiagnosis: TurnDiagnosis | null;
 }> {
   const harness = requireHarness();
+  // The envelope step this turn runs inside — the fence owner, the memo key
+  // and every diagnosis turn label name the SAME id as the step's envelope.
+  const stepId = input.stepId ?? reviewStepIdOf(input.reviewerId);
   const label = fenceLabel(input.file, input.round, input.epoch);
   const session = await harness.createSession(label);
   sessionFenceMap.set(input.ctx, label, {
     sessionId: session.id,
-    stepId: `pp-review-${input.reviewerId}`,
+    stepId,
     epoch: input.epoch,
     label,
     persistedAtUtc: new Date().toISOString(),
@@ -1084,9 +1246,6 @@ async function runReviewTurnOnce(input: {
     // runs the reviewer lane (gpt-6-luna @ high), attempt >= 2 demotes to the
     // fallback model or the executor lane. See src/harness/lanes.ts.
     const routing = reviewLaneRouting(attemptNo);
-    // Lane LABEL from the same f(attempt) policy (generic instantiation) — used
-    // only in diagnosis records, never for decisions (AC-B2).
-    const lane = demoteReviewerLane<"default" | "demoted">(attemptNo, "default", "demoted");
     const result = await runAgentTurn({
       def: REVIEWER,
       sessionId: session.id,
@@ -1112,7 +1271,7 @@ async function runReviewTurnOnce(input: {
       attemptNo >= 2
         ? buildRetryContextDiagnosis({
             file: input.file,
-            stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+            stepId,
             identity: markerKeyOf(input.file, input.round),
             reviewer: input.reviewerId,
             attempt: attemptNo,
@@ -1140,7 +1299,7 @@ async function runReviewTurnOnce(input: {
         file: input.file,
         round: input.round,
         reviewerId: input.reviewerId,
-        stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+        stepId,
         attempt: attemptNo,
         usage: result.usage,
         text: result.text,
@@ -1178,7 +1337,7 @@ async function runReviewTurnOnce(input: {
         file: input.file,
         round: input.round,
         reviewerId: input.reviewerId,
-        stepId: input.stepId ?? `pp-review-${input.reviewerId}`,
+        stepId,
         attempt: attemptNo,
         usage: result.usage,
         text: result.text,
@@ -1308,8 +1467,8 @@ function emptyRecordWith(
  * the same longer SCHEDULE — the exhaustion semantics are unchanged (the
  * final attempt still fails the step/flow), and policies outside the
  * marker/model/review scope keep their existing bounds (PpPrep stays at 1 —
- * a bad run input is permanent; the in-step REVIEW_STEP_MAX_ATTEMPTS repair
- * bound is untouched).
+ * a bad run input is permanent). The in-step REVIEW_STEP_MAX_ATTEMPTS
+ * tombstone bound is independent of this retry budget and untouched.
  */
 const RESTART_WINDOW_RETRY = {
   maximumAttempts: 8,
@@ -1443,7 +1602,7 @@ const LeaseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInpu
       input.repoRoot,
       input.worktreeRoot,
       bindLeaseStore(ctx, ppLease),
-      2,
+      LEASE_SLOT_CAP,
     );
     // Idempotent per (file, epoch): a lease surviving a kill is reused.
     const existing = pool.store().get(current.file);
@@ -1625,6 +1784,7 @@ const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
     const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-A",
+      stepId: "pp-review-a",
       file: fri.file,
       round: fri.round,
       epoch: fri.epoch,
@@ -1659,6 +1819,7 @@ const ReviewBStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
     const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-B",
+      stepId: "pp-review-b",
       file: fri.file,
       round: fri.round,
       epoch: fri.epoch,
@@ -1686,6 +1847,7 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
     if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
     const kept: MetricsFinding[] = [];
     const dropped: KeptFindings["dropped"] = [];
+    const gate: CitationGateRecord[] = [];
     for (const reviewerId of ["reviewer-A", "reviewer-B"] as const) {
       const key = verdictKeyOf(fri.file, fri.round, reviewerId);
       const verdict = ppVerdict.get(ctx, key);
@@ -1704,36 +1866,32 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
         });
         continue;
       }
-      // Citation check: LIVE Jev nouls when configured (Phase 3 swap-in,
-      // createCitationChecker seam), else the naive code-only default. A
-      // finding survives iff its cited evidence appears in the reviewed diff
-      // (p_cited === 1) and its disposition asks for a fix.
-      const jevClient = liveJevClient();
-      let citations;
-      if (jevClient !== undefined) {
-        let jt = 0;
-        const counting: JudgmentClient = {
-          kind: jevClient.kind,
-          systemOne: async (request) => {
-            const r = await jevClient.systemOne(request);
-            jt += r.usage.input_tokens + r.usage.output_tokens;
-            return r;
-          },
-        };
-        citations = await createCitationChecker(counting).check(verdict.metrics, diff.doc);
-        if (jt > 0) await recordJevUsage(ctx, `pp-verdict-check:${fri.file}#${fri.round}`, jt);
-      } else {
-        citations = naiveCitationCheck(verdict.metrics, diff.doc);
+      // Citation check (Lane-B "citation-check"): LIVE Jev nouls when
+      // configured (Phase 3 swap-in, createCitationChecker seam), else the
+      // naive code-only default; a Jev failure fails OPEN to the naive check
+      // (never a thrown, re-billed step). A finding survives iff its cited
+      // evidence scores at least the checker's threshold (citationKept) and
+      // its disposition asks for a fix.
+      const outcome = await runCitationGate(verdict.metrics, diff.doc, liveJevClient());
+      if (outcome.jevTokens > 0) {
+        await recordJevUsage(ctx, `pp-verdict-check:${fri.file}#${fri.round}`, outcome.jevTokens);
       }
-      for (const check of citations) {
+      gate.push({
+        reviewer: reviewerId,
+        checker: outcome.checker,
+        fallbackReason: outcome.fallbackReason,
+        scores: outcome.value.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
+      });
+      for (const check of outcome.value) {
         const agentFinding = verdict.agent.findings.find((f) => f.finding_id === check.finding_id);
         const metricsFinding = verdict.metrics.findings.find((f) => f.finding_id === check.finding_id);
         if (agentFinding === undefined || metricsFinding === undefined) continue;
-        if (check.p_cited < 1) {
+        if (!citationKept(check.p_cited, outcome.checker)) {
           dropped.push({
             finding_id: check.finding_id,
             reviewer: reviewerId,
             reason: `citation check failed (p_cited=${check.p_cited})`,
+            p_cited: check.p_cited,
           });
           continue;
         }
@@ -1748,7 +1906,7 @@ const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
         kept.push(metricsFinding);
       }
     }
-    ppKept.set(ctx, keptKeyOf(fri.file, fri.round), { findings: kept, dropped });
+    ppKept.set(ctx, keptKeyOf(fri.file, fri.round), { findings: kept, dropped, citationGate: gate });
     return {
       output: { ...fri, keptCount: kept.length },
       tokens: null,
@@ -1769,26 +1927,17 @@ const PrioritizeStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<File
   inner: async (ctx, fri) => {
     const kept = ppKept.get(ctx, keptKeyOf(fri.file, fri.round));
     if (kept === undefined) throw new Error(`kept findings missing for ${fri.file}#${fri.round}`);
-    let ordered = kept.findings;
-    const jevClient = liveJevClient();
-    if (jevClient !== undefined && ordered.length > 0) {
-      let jt = 0;
-      const counting: JudgmentClient = {
-        kind: jevClient.kind,
-        systemOne: async (request) => {
-          const r = await jevClient.systemOne(request);
-          jt += r.usage.input_tokens + r.usage.output_tokens;
-          return r;
-        },
-      };
-      ordered = await createJevPrioritizer(counting).prioritize(ordered);
-      if (jt > 0) await recordJevUsage(ctx, `pp-prioritize:${fri.file}#${fri.round}`, jt);
-    } else {
-      ordered = naivePrioritize(ordered);
+    // Lane-B "prioritize": live Jev rerank when configured, naive severity
+    // order otherwise; a Jev failure fails OPEN to the naive order and the
+    // degradation rides the pp-kept record (never a thrown, re-billed step).
+    const outcome = await runPrioritizeGate(kept.findings, liveJevClient());
+    if (outcome.jevTokens > 0) {
+      await recordJevUsage(ctx, `pp-prioritize:${fri.file}#${fri.round}`, outcome.jevTokens);
     }
     ppKept.set(ctx, keptKeyOf(fri.file, fri.round), {
       ...kept,
-      findings: ordered,
+      findings: outcome.value,
+      prioritize: { checker: outcome.checker, fallbackReason: outcome.fallbackReason },
     });
     return { output: fri, tokens: null };
   },
@@ -1870,6 +2019,17 @@ const CommitStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoun
   stepId: "pp-commit",
   role: "commit",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  // This step is the COMMIT-TIME subset of the recovery decision table: keyed
+  // dedup (op-ID scan across ALL branches) plus the C1 cross-branch
+  // reachability fix. It deliberately does NOT call reconcile()/applyReconcile()
+  // (src/git/worktree.ts): those are the round-START recovery table that
+  // `recover-port` (scripts/run-demo.ts) applies to a worktree before
+  // re-dispatch. At commit time the lease worktree is dirty BY DESIGN (the
+  // implementer's uncommitted output), and reconcile's `redone` arm resets a
+  // dirty worktree to the lease base — wiring it in here would wipe the
+  // round's own work. The `poisoned` rows (marker committed but no keyed
+  // commit; no-op marker beside a keyed commit) are therefore raised by
+  // recovery, not by this step.
   inner: async (ctx, fri) => {
     const opId = operationId(fri.file, fri.round);
     const key = markerKeyOf(fri.file, fri.round);
@@ -1968,12 +2128,24 @@ const ReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRou
   stepId: "pp-release",
   role: "record",
   identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
-  stepOptions: { executeLoadAttributeMaps: [ppQueue, ppMarker] },
+  // ppLease: the lease is READ and removed through bindLeaseStore below.
+  stepOptions: { executeLoadAttributeMaps: [ppQueue, ppMarker, ppLease] },
   inner: async (ctx, fri) => {
     const queue = ppQueue.get(ctx, "queue");
     if (queue.current === null) {
       throw new Error("release inconsistency: no current file-round");
     }
+    // Give the lease slot back (mirrors ChildReleaseStep). Without this the
+    // sequential loop accumulated one pp-lease record per file at the same
+    // epoch and the third file failed "worktree cap (2) reached". The merge
+    // into integration happened in IntegrateStep, so dropping the worktree
+    // here is safe; the lease branch stays for keyed-commit reachability.
+    await new WorktreePool(
+      fri.repoRoot,
+      fri.worktreeRoot,
+      bindLeaseStore(ctx, ppLease),
+      LEASE_SLOT_CAP,
+    ).release(fri.file);
     const marker = ppMarker.get(ctx, markerKeyOf(fri.file, fri.round));
     ppQueue.set(ctx, "queue", {
       ...queue,
@@ -2024,6 +2196,12 @@ const FinalStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInpu
   },
 });
 
+/**
+ * Rebuilds the run input after a sequential file-round. The run-level fields
+ * (dispatchMode, maxRounds, prepPath, files) are carried on the FileRoundInput
+ * by LeaseStep's spread; the stub values below apply only to a FileRoundInput
+ * that never came from a run input.
+ */
 function baseInput(fri: FileRoundInput): PortRunInput {
   return {
     repoRoot: fri.repoRoot,
@@ -2031,9 +2209,10 @@ function baseInput(fri: FileRoundInput): PortRunInput {
     integrationWorktreePath: fri.integrationWorktreePath,
     epoch: fri.epoch,
     sourceRoot: fri.sourceRoot,
-    prepPath: "",
-    files: [],
-    maxRounds: 1,
+    prepPath: fri.prepPath ?? "",
+    files: fri.files ?? [],
+    maxRounds: fri.maxRounds ?? 1,
+    ...(fri.dispatchMode !== undefined ? { dispatchMode: fri.dispatchMode } : {}),
   };
 }
 
@@ -2193,17 +2372,14 @@ const PrepDiffCaptureStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
       const specPath = join(tmp, "spec.md");
       await writeFile(baselinePath, seed.stubRaw);
       await writeFile(specPath, draft.specText);
-      let raw = "";
-      try {
-        const { stdout } = await execFileP(
-          "git",
-          ["diff", "--no-index", "--", baselinePath, specPath],
-          { maxBuffer: 32 * 1024 * 1024 },
-        );
-        raw = stdout;
-      } catch (err) {
-        raw = (err as { stdout?: string }).stdout ?? "";
+      // Exit 1 (files differ) carries the diff on stdout; a real failure
+      // exits >= 2 with NOTHING on stdout. The old catch-all swallowed every
+      // failure into an empty diff, which reviewers then "reviewed".
+      const res = await git(tmp).tryRun(["diff", "--no-index", "--", baselinePath, specPath]);
+      if (!res.ok && res.stdout.length === 0) {
+        throw new Error(`prep diff failed: git diff --no-index: ${res.stderr.trim()}`);
       }
+      const raw = res.stdout;
       const doc: DiffDocument = {
         diff_id: `prep-diff-${state.prepIteration}`,
         file: PREP_SPEC_FILE,
@@ -2251,6 +2427,7 @@ const PrepReviewAStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-A",
+      stepId: "pp-prep-review-a",
       file: PREP_SPEC_FILE,
       round: state.prepIteration,
       epoch: input.epoch,
@@ -2287,6 +2464,7 @@ const PrepReviewBStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
       ctx,
       reviewerId: "reviewer-B",
+      stepId: "pp-prep-review-b",
       file: PREP_SPEC_FILE,
       round: state.prepIteration,
       epoch: input.epoch,
@@ -2313,6 +2491,7 @@ const PrepVerdictCheckStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     }
     const kept: MetricsFinding[] = [];
     const dropped: KeptFindings["dropped"] = [];
+    const gate: CitationGateRecord[] = [];
     for (const reviewerId of ["reviewer-A", "reviewer-B"] as const) {
       const key = verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, reviewerId);
       const verdict = ppPrepVerdict.get(ctx, key);
@@ -2329,15 +2508,26 @@ const PrepVerdictCheckStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
         });
         continue;
       }
-      for (const check of naiveCitationCheck(verdict.metrics, diff.doc)) {
+      // The prep gate is deliberately NAIVE-only (registry "prep-citation-check"):
+      // the spec-map diff is reviewed against a deterministic baseline and
+      // never consults a judgment client.
+      const citations = naiveCitationCheck(verdict.metrics, diff.doc);
+      gate.push({
+        reviewer: reviewerId,
+        checker: "naive",
+        fallbackReason: null,
+        scores: citations.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
+      });
+      for (const check of citations) {
         const agentFinding = verdict.agent.findings.find((f) => f.finding_id === check.finding_id);
         const metricsFinding = verdict.metrics.findings.find((f) => f.finding_id === check.finding_id);
         if (agentFinding === undefined || metricsFinding === undefined) continue;
-        if (check.p_cited < 1) {
+        if (!citationKept(check.p_cited, "naive")) {
           dropped.push({
             finding_id: check.finding_id,
             reviewer: reviewerId,
             reason: `citation check failed (p_cited=${check.p_cited})`,
+            p_cited: check.p_cited,
           });
           continue;
         }
@@ -2352,7 +2542,7 @@ const PrepVerdictCheckStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
         kept.push(metricsFinding);
       }
     }
-    ppPrepFindings.set(ctx, "findings", { findings: kept, dropped });
+    ppPrepFindings.set(ctx, "findings", { findings: kept, dropped, citationGate: gate });
     // Counter ownership lives in PrepLoopDecision (single place decides a
     // revision; the increment rides with that decision — no double-count).
     void state;
@@ -3111,8 +3301,10 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
 // implement/fix → reviews → commit) against their OWN attribute stores; the
 // parent integrates serially after the join (the shared integration worktree
 // never races) and appends git-derived done entries. Caps: one lease per
-// child, wave width ≤ PARALLEL_SLOTS (= the WorktreePool cap) — concurrency
-// is bounded at the wave planner, never widened.
+// child, wave width ≤ CHILD_SLOT_CAP. The WorktreePool cap is enforced per
+// lease STORE and every child owns its own pp-lease store, so it can never
+// trip across siblings: concurrency is bounded ONLY by the wave planner's
+// slice width, never widened.
 // ---------------------------------------------------------------------------
 
 /** Input of one per-file child flow (PortFileFlow). */
@@ -3133,7 +3325,8 @@ export interface PortFileInput {
   queueFixVitest: ReadonlyArray<ClassifiedVitestFailure>;
 }
 
-const CHILD_SLOT_CAP = 2;
+/** Wave width: one child per lease slot (the only cross-child concurrency bound). */
+const CHILD_SLOT_CAP = LEASE_SLOT_CAP;
 
 function childInputOf(
   base: PortRunInput,
@@ -3400,7 +3593,7 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
       input.repoRoot,
       input.worktreeRoot,
       bindLeaseStore(ctx, ppLease),
-      2,
+      LEASE_SLOT_CAP,
     );
     const existing = pool.store().get(input.file);
     if (existing !== undefined && !pool.isStale(existing, input.epoch)) {
@@ -3424,7 +3617,9 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
     }
     const acquired = await pool.acquire(input.file, input.epoch, `pp-child-${input.epoch}`);
     if (!acquired.acquired) {
-      // Slot contention (wave width ≤ cap makes this rare): retryable.
+      // The child's store holds no sibling leases, so the pool cap cannot
+      // trip here; a refusal means this file's own lease is already held in
+      // this store (concurrent re-acquire): retryable.
       throw new Error(`child lease failed for ${input.file}: ${acquired.reason}`);
     }
     return {
@@ -3537,7 +3732,7 @@ const ChildReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<
       fri.repoRoot,
       fri.worktreeRoot,
       bindLeaseStore(ctx, ppLease),
-      2,
+      LEASE_SLOT_CAP,
     );
     await pool.release(fri.file);
     const marker = ppMarker.get(ctx, markerKeyOf(fri.file, fri.round));
