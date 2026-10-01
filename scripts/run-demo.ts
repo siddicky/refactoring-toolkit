@@ -760,6 +760,17 @@ export function probePortInUse(port: number, host = "127.0.0.1", timeoutMs = 500
   });
 }
 
+/**
+ * Environment handed to the serve-status child. The port travels as
+ * STATUS_PORT, the variable serve-status reads FIRST (src/dashboard/config.ts);
+ * the generic PORT is only its deprecated fallback, so it is never what we pass
+ * (an ambient PORT is ignored whenever STATUS_PORT is set). The port serve-status
+ * resolves from this env is therefore always the one launchDashboard probes and logs.
+ */
+export function dashboardChildEnv(env: NodeJS.ProcessEnv, dir: string, port: number): NodeJS.ProcessEnv {
+  return { ...env, STATUS_REPO_ROOT: dir, STATUS_PORT: String(port) };
+}
+
 export type DashboardLaunch =
   | { status: "started"; pid: number; port: number; logPath: string; message: string }
   | { status: "in-use"; port: number; message: string }
@@ -793,7 +804,7 @@ export async function launchDashboard(
   const logPath = join(tmpdir(), `run-demo-dashboard-${port}.log`);
   const logFd = openSync(logPath, "a");
   const child = spawn(process.execPath, [serveStatus], {
-    env: { ...env, STATUS_REPO_ROOT: dir, PORT: String(port) },
+    env: dashboardChildEnv(env, dir, port),
     detached: true,
     stdio: ["ignore", logFd, logFd],
   });

@@ -11,9 +11,12 @@
  *   agent-write:mid:<file>#<round>      — crash the worker mid agent write
  *
  * The `agent` role steps call the harness injected via configureProbe(). With
- * OPENCODE_BASE_URL the real opencode harness is used; otherwise run-demo.ts
- * injects an explicit StubHarness (a labeled test double — its token numbers
- * are deterministic test fixtures, never reported as live usage).
+ * a reachable opencode server (OPENCODE_BASE_URL, or the default
+ * http://127.0.0.1:4096) the real harness is used; under --harness auto an
+ * unreachable server falls back to a labelled StubHarness with a loud warning;
+ * --harness stub is explicit (src/harness/select.ts). The stub is a labeled
+ * test double — its token numbers are deterministic test fixtures, never
+ * reported as live usage.
  */
 
 import {

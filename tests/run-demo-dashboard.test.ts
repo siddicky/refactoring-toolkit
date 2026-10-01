@@ -68,8 +68,8 @@ async function fakeServeStatus(body: string): Promise<string> {
 
 const LISTENING_SCRIPT = `
 import { createServer } from "node:net";
-createServer().listen(Number(process.env.PORT), "127.0.0.1", () => {
-  console.log("fake serve-status up repo=" + process.env.STATUS_REPO_ROOT + " port=" + process.env.PORT);
+createServer().listen(Number(process.env.STATUS_PORT), "127.0.0.1", () => {
+  console.log("fake serve-status up repo=" + process.env.STATUS_REPO_ROOT + " port=" + process.env.STATUS_PORT);
 });
 `;
 
