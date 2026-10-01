@@ -13,7 +13,8 @@ import {
   type DispatchEntry,
   type DispatchHistory,
 } from "./dispatch-anchor.js";
-import { type EnvelopeEvent } from "./types.js";
+import { renderReport } from "./render.js";
+import type { EnvelopeEvent } from "./types.js";
 import historyARaw from "./fixtures/dex-history-run-a.json" with { type: "json" };
 import runAEnvelopesRaw from "./fixtures/event-stream-run-a.json" with { type: "json" };
 
@@ -51,7 +52,7 @@ function entry(
 }
 
 /** A minimal consistent per-file model execution: marker + attempt-N envelope. */
-function modelExecution(stepId: string, stepType: string, identity: string, attempt: number): EnvelopeEvent[] {
+function modelExecution(stepId: string, identity: string, attempt: number): EnvelopeEvent[] {
   const role = stepId === "pp-review-a" || stepId === "pp-review-b" ? "review" : "agent";
   const out: EnvelopeEvent[] = [
     envelope({ stepId, role, attempt: 0, outcome: "interrupted", ended_at: null, tokens: null, wall_clock_ms: null, identity }),
@@ -111,7 +112,7 @@ describe("extractDispatchEntries (dexcli history -> dispatch entries)", () => {
   test("recorded run-a history extracts 57 entries including 3 non-agent kinds", () => {
     const entries = extractDispatchEntries(historyA);
     expect(entries.length).toBe(57);
-    expect(entries.filter((e) => classifyDispatchStepType(e.stepType) === "non-agent").length).toBe(3);
+    expect(entries.filter((e) => classifyDispatchStepType(e.stepType).kind === "non-agent").length).toBe(3);
   });
 });
 
@@ -133,19 +134,27 @@ describe("identity + step table helpers", () => {
     expect(model?.role).toBe("agent");
     expect(specForStepType("PpImplementStart")?.role).toBe("agent");
     expect(specForStepType("Nope")).toBeNull();
-    // Phase 3/4 (worker-1b mirror): implement, review-a, review-b, fixer,
+    // The model steps: implement, review-a, review-b, fixer,
     // symbol-table, prep-generate, prep-review-a, prep-review-b, prep-revise,
     // queue-fix.
     expect(PORT_FLOW_STEPS.filter((s) => s.kind === "model").length).toBe(10);
   });
 
   test("classifyDispatchStepType: flow steps, non-agent dex kinds (case-insensitive), unknown", () => {
-    expect(classifyDispatchStepType("PpCommit")).toBe("flow-step");
+    expect(classifyDispatchStepType("PpCommit").kind).toBe("flow-step");
     for (const kind of NON_AGENT_DEX_KINDS) {
-      expect(classifyDispatchStepType(kind)).toBe("non-agent");
-      expect(classifyDispatchStepType(kind.toUpperCase())).toBe("non-agent");
+      expect(classifyDispatchStepType(kind)).toEqual({ kind: "non-agent" });
+      expect(classifyDispatchStepType(kind.toUpperCase())).toEqual({ kind: "non-agent" });
     }
-    expect(classifyDispatchStepType("PpEvil")).toBe("unknown");
+    expect(classifyDispatchStepType("PpEvil")).toEqual({ kind: "unknown" });
+  });
+
+  test("a flow-step classification carries the spec it was found under, for every step type in the table", () => {
+    // anchorDispatch uses this spec directly; it used to look the spec up a second time and skip the entry if
+    // that lookup came back empty, a branch no classification could reach.
+    for (const spec of PORT_FLOW_STEPS) {
+      expect(classifyDispatchStepType(spec.stepType)).toEqual({ kind: "flow-step", spec });
+    }
   });
 });
 
@@ -155,7 +164,7 @@ describe("identity + step table helpers", () => {
 
 describe("anchorDispatch — clean mappings", () => {
   test("retry fan-out: 1 envelope (final attempt) : N dispatch entries anchors clean", () => {
-    const envelopes = modelExecution("pp-implement", "PpImplement", "src__X.php#1", 2);
+    const envelopes = modelExecution("pp-implement", "src__X.php#1", 2);
     const entries = [
       entry("PpImplementStart", 1, "src__X.php#1"),
       entry("PpImplement", 1, "src__X.php#1"),
@@ -186,7 +195,7 @@ describe("anchorDispatch — clean mappings", () => {
     expect(result.unexplained_dispatch_entries).toBe(0);
   });
 
-  test("live shape (worker-1c): the start mini-step's own ':start' envelope anchors under its marker spec", () => {
+  test("live shape: the start mini-step's own ':start' envelope anchors under its marker spec", () => {
     // Live stream per model step X: X#0 (attempt-0 marker, role = target role),
     // X:start#1 (the mini-step's OWN envelope, role record), X#1 (the model
     // envelope) — plus dispatch entries for the Start and model step types.
@@ -226,7 +235,7 @@ describe("anchorDispatch — clean mappings", () => {
 
 describe("anchorDispatch — failures", () => {
   test("envelope without a dispatch entry of matching type fails", () => {
-    const envelopes = modelExecution("pp-implement", "PpImplement", "src__X.php#1", 1);
+    const envelopes = modelExecution("pp-implement", "src__X.php#1", 1);
     const result = anchorDispatch(envelopes, [entry("PpImplementStart", 1, "src__X.php#1")]);
     expect(result.ok).toBe(false);
     expect(
@@ -247,7 +256,7 @@ describe("anchorDispatch — failures", () => {
   });
 
   test("dispatch finalAttempt beyond the envelope attempt fails (lost envelope for the final attempt)", () => {
-    const envelopes = modelExecution("pp-review-a", "PpReviewA", "src__Y.php#1", 1);
+    const envelopes = modelExecution("pp-review-a", "src__Y.php#1", 1);
     const entries = [
       entry("PpReviewAStart", 1, "src__Y.php#1"),
       entry("PpReviewA", 2, "src__Y.php#1"),
@@ -262,7 +271,7 @@ describe("anchorDispatch — failures", () => {
   });
 
   test("envelope attempt exceeding every dispatched finalAttempt fails", () => {
-    const envelopes = modelExecution("pp-fixer", "PpFixer", "src__Z.php#1", 3);
+    const envelopes = modelExecution("pp-fixer", "src__Z.php#1", 3);
     const entries = [
       entry("PpFixerStart", 1, "src__Z.php#1"),
       entry("PpFixer", 1, "src__Z.php#1"),
@@ -279,8 +288,8 @@ describe("anchorDispatch — failures", () => {
 
   test("identity-keyed reconciliation across files: a missing dispatch for one file fails only that identity", () => {
     const envelopes = [
-      ...modelExecution("pp-implement", "PpImplement", "src__A.php#1", 1),
-      ...modelExecution("pp-implement", "PpImplement", "src__B.php#1", 1),
+      ...modelExecution("pp-implement", "src__A.php#1", 1),
+      ...modelExecution("pp-implement", "src__B.php#1", 1),
     ];
     const entries = [
       entry("PpImplementStart", 1, "src__A.php#1"),
@@ -315,7 +324,7 @@ describe("anchorDispatch — failures", () => {
 
   test("marker dispatch entry without its attempt-0 marker envelope fails (presence, not equality)", () => {
     const result = anchorDispatch(
-      modelExecution("pp-implement", "PpImplement", "src__X.php#1", 1),
+      modelExecution("pp-implement", "src__X.php#1", 1),
       [
         entry("PpImplement", 1, "src__X.php#1"),
         entry("PpImplementStart", 1, "src__W.php#9"), // marker dispatched for another identity
@@ -364,7 +373,7 @@ describe("anchorDispatch — failures", () => {
 });
 
 // ---------------------------------------------------------------------------
-// integration entry (worker-1b evidence run)
+// integration entry (an evidence run)
 // ---------------------------------------------------------------------------
 
 describe("anchorForRun (recorded fixtures, end to end)", () => {
@@ -381,5 +390,235 @@ describe("anchorForRun (recorded fixtures, end to end)", () => {
     const cross = anchorForRun({ events: [] }, []);
     expect(Object.keys(cross).sort()).toEqual(["anchor", "failures", "ok"]);
     expect(cross.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C47: dispatch entries count step execution ATTEMPTS, not history events.
+// ---------------------------------------------------------------------------
+
+describe("extractDispatchEntries dedupes multi-event executions (C47)", () => {
+  const ev = (type: string, id: string, stepType: string, finalAttempt: number, echo?: { file: string; round: number }) => ({
+    eventId: `${type}-${id}-${finalAttempt}`,
+    type,
+    payload: {
+      context: { stepExecutionId: id, stepType, finalAttempt },
+      ...(echo !== undefined ? { input: { stepInput: echo } } : {}),
+    },
+  });
+
+  test("one execution emitting started + execute-completed + waitFor events is ONE entry", () => {
+    const history: DispatchHistory = {
+      events: [
+        ev("StepStarted", "x1", "PpImplement", 1),
+        ev("StepExecuteCompleted", "x1", "PpImplement", 1),
+        ev("StepWaitForStarted", "x1", "PpImplement", 1),
+        ev("StepWaitForCompleted", "x1", "PpImplement", 1),
+      ],
+    };
+    expect(extractDispatchEntries(history).length).toBe(1);
+  });
+
+  test("retries stay distinct: a new finalAttempt (same or new execution id) is a new entry", () => {
+    const history: DispatchHistory = {
+      events: [
+        ev("StepExecuteFailed", "x1", "PpReviewA", 1),
+        ev("StepExecuteFailed", "x1", "PpReviewA", 2),
+        ev("StepExecuteCompleted", "x1", "PpReviewA", 3),
+        ev("StepWaitForCompleted", "x1", "PpReviewA", 3),
+        ev("StepStarted", "x2", "PpReviewA", 1),
+      ],
+    };
+    const entries = extractDispatchEntries(history);
+    expect(entries.map((e) => `${e.stepExecutionId}@${e.finalAttempt}`)).toEqual(["x1@1", "x1@2", "x1@3", "x2@1"]);
+  });
+
+  test("the duplicate that carries the file+round echo supplies the identity", () => {
+    const history: DispatchHistory = {
+      events: [
+        ev("StepStarted", "x1", "PpImplement", 1),
+        ev("StepExecuteCompleted", "x1", "PpImplement", 1, { file: "src/A.php", round: 2 }),
+      ],
+    };
+    const entries = extractDispatchEntries(history);
+    expect(entries.length).toBe(1);
+    expect(entries[0]?.identity).toBe("src__A.php#2");
+  });
+
+  test("events without a stepExecutionId cannot be deduped and each count", () => {
+    const history: DispatchHistory = {
+      events: [{ payload: { context: { stepType: "PpPrep" } } }, { payload: { context: { stepType: "PpPrep" } } }],
+    };
+    expect(extractDispatchEntries(history).length).toBe(2);
+  });
+
+  test("dispatch_entries_total in the anchor result counts executions, not events (multi-event history)", () => {
+    const history: DispatchHistory = {
+      events: [
+        ev("StepStarted", "m1", "PpImplementStart", 1, { file: "src/A.php", round: 1 }),
+        ev("StepExecuteCompleted", "m1", "PpImplementStart", 1, { file: "src/A.php", round: 1 }),
+        ev("StepStarted", "i1", "PpImplement", 1, { file: "src/A.php", round: 1 }),
+        ev("StepExecuteCompleted", "i1", "PpImplement", 1, { file: "src/A.php", round: 1 }),
+        ev("StepWaitForCompleted", "i1", "PpImplement", 1, { file: "src/A.php", round: 1 }),
+      ],
+    };
+    const identity = "src__A.php#1";
+    const cross = anchorForRun(history, [
+      envelope({ stepId: "pp-implement", role: "agent", attempt: 0, outcome: "interrupted", ended_at: null, wall_clock_ms: null, identity }),
+      envelope({ stepId: "pp-implement", role: "agent", attempt: 1, tokens: 10, identity }),
+    ]);
+    expect(cross.anchor.dispatch_entries_total).toBe(2);
+    expect(cross.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B15: dex step execution ids are per flow ("PpImplement-1" in EVERY child), and
+// the dispatch events carry no flow id. The merged parent+children history must
+// therefore dedupe per source flow/run, or every child after the first anchors
+// to nothing (provenance FAILED on the default parallel topology).
+// ---------------------------------------------------------------------------
+
+describe("extractDispatchEntries dedupes per source flow/run (B15)", () => {
+  const ev = (source: string | undefined, id: string, stepType: string, file: string) => ({
+    eventId: `${source ?? "-"}-${stepType}-${id}`,
+    type: "StepExecuteCompleted",
+    ...(source !== undefined ? { historySource: source } : {}),
+    payload: {
+      context: { stepExecutionId: id, stepType, finalAttempt: 1 },
+      input: { stepInput: { file, round: 1 } },
+    },
+  });
+  /** One port.File child's dispatch events: every child runs the same step ids "<Type>-1". */
+  const child = (source: string, file: string) => [
+    ev(source, "PpChildLease-1", "PpChildLease", file),
+    ev(source, "PpImplementStart-1", "PpImplementStart", file),
+    ev(source, "PpImplement-1", "PpImplement", file),
+  ];
+  /** The envelopes a healthy child leaves: a lease record, then the implement marker + attempt 1. */
+  const childEnvelopes = (identity: string): EnvelopeEvent[] => [
+    envelope({ stepId: "pp-child-lease", role: "record", identity }),
+    ...modelExecution("pp-implement", identity, 1),
+  ];
+
+  test("two children that both ran PpImplement-1 yield one entry each, not one in total", () => {
+    const history: DispatchHistory = { events: [...child("child-a@r1", "src/a.php"), ...child("child-b@r1", "src/b.php")] };
+    const entries = extractDispatchEntries(history);
+    expect(entries.length).toBe(6);
+    expect(entries.filter((e) => e.stepType === "PpImplement").map((e) => e.identity)).toEqual(["src__a.php#1", "src__b.php#1"]);
+  });
+
+  test("the run anchors every child: no 'has no dispatch entry' failure for the second child", () => {
+    const history: DispatchHistory = { events: [...child("child-a@r1", "src/a.php"), ...child("child-b@r1", "src/b.php")] };
+    const cross = anchorForRun(history, [...childEnvelopes("src__a.php#1"), ...childEnvelopes("src__b.php#1")]);
+    expect(cross.failures).toEqual([]);
+    expect(cross.ok).toBe(true);
+  });
+
+  test("the same execution id in two RUNS of one flow (continue-as-new restarts numbering) stays distinct", () => {
+    const history: DispatchHistory = {
+      events: [ev("flow@run-1", "PpImplement-1", "PpImplement", "src/a.php"), ev("flow@run-2", "PpImplement-1", "PpImplement", "src/b.php")],
+    };
+    expect(extractDispatchEntries(history).length).toBe(2);
+  });
+
+  test("events of ONE source still collapse (started + completed of one execution stay one entry)", () => {
+    const history: DispatchHistory = {
+      events: [ev("child-a@r1", "PpImplement-1", "PpImplement", "src/a.php"), ev("child-a@r1", "PpImplement-1", "PpImplement", "src/a.php")],
+    };
+    expect(extractDispatchEntries(history).length).toBe(1);
+  });
+
+  test("untagged events (a single hand-made history) keep the original per-execution dedupe", () => {
+    const history: DispatchHistory = {
+      events: [ev(undefined, "PpImplement-1", "PpImplement", "src/a.php"), ev(undefined, "PpImplement-1", "PpImplement", "src/a.php")],
+    };
+    expect(extractDispatchEntries(history).length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C44: the cx-5e flow-keyed accommodation is legacy scaffolding, off by default.
+// ---------------------------------------------------------------------------
+
+describe("anchorDispatch flow-keyed accommodation (legacyFlowKeyedEnvelopes, C44)", () => {
+  const leaseEnv = (attempt: number, identity: string | null) =>
+    envelope({ stepId: "pp-child-lease", role: "record", attempt, identity });
+  const A = "src__A.php#1";
+  const B = "src__B.php#1";
+  const C = "src__C.php#1";
+
+  test("identity-keyed envelopes anchor per child: A attempt 2 and B attempt 1 pass in strict mode", () => {
+    const result = anchorDispatch(
+      [leaseEnv(2, A), leaseEnv(1, B)],
+      [entry("PpChildLease", 2, A), entry("PpChildLease", 1, B)],
+    );
+    expect(result.ok).toBe(true);
+    expect(result.failures).toEqual([]);
+  });
+
+  test("two flow-keyed envelopes no longer collapse into one MAX-attempt group that is compared to every child", () => {
+    const envelopes = [leaseEnv(2, null), leaseEnv(1, null)];
+    const entries = [entry("PpChildLease", 2, A), entry("PpChildLease", 1, B)];
+    // Legacy: the collapsed MAX attempt 2 is compared to B's finalAttempt 1 -> a FALSE failure
+    // for an otherwise consistent pair of children.
+    const legacy = anchorDispatch(envelopes, entries, { legacyFlowKeyedEnvelopes: true });
+    expect(legacy.failures.join("\n")).toContain(
+      "envelope pp-child-lease (src__B.php#1) attempt 2 exceeds max dispatched finalAttempt 1",
+    );
+    // Strict: flow-keyed evidence for identity-bearing dispatches is reported as unanchored, not misjudged.
+    const strict = anchorDispatch(envelopes, entries);
+    expect(strict.ok).toBe(false);
+    expect(strict.failures.join("\n")).toContain("envelope pp-child-lease (<flow-level>) has no dispatch entry of type PpChildLease");
+    expect(strict.failures.join("\n")).not.toContain("exceeds max dispatched finalAttempt");
+  });
+
+  test("one flow-keyed envelope cannot vouch for three children (legacy false pass becomes a strict failure)", () => {
+    const envelopes = [leaseEnv(1, null)];
+    const entries = [entry("PpChildLease", 1, A), entry("PpChildLease", 1, B), entry("PpChildLease", 1, C)];
+    expect(anchorDispatch(envelopes, entries, { legacyFlowKeyedEnvelopes: true }).ok).toBe(true);
+    const strict = anchorDispatch(envelopes, entries);
+    expect(strict.ok).toBe(false);
+    const text = strict.failures.join("\n");
+    for (const id of [A, B, C]) {
+      expect(text).toContain(`dispatch entry(ies) of type PpChildLease (${id}) reached finalAttempt 1 with no matching envelope`);
+    }
+  });
+
+  test("a flow-keyed completion envelope no longer borrows an identity-bearing start marker (M4) in strict mode", () => {
+    const marker = envelope({ stepId: "pp-implement", role: "agent", attempt: 0, outcome: "interrupted", ended_at: null, wall_clock_ms: null, identity: A });
+    const completion = envelope({ stepId: "pp-implement", role: "agent", attempt: 1, tokens: 10, identity: null });
+    const entries = [entry("PpImplementStart", 1, A), entry("PpImplement", 1, A)];
+    const legacy = anchorDispatch([marker, completion], entries, { legacyFlowKeyedEnvelopes: true });
+    expect(legacy.model_steps_missing_start_marker).toBe(0);
+    const strict = anchorDispatch([marker, completion], entries);
+    expect(strict.model_steps_missing_start_marker).toBe(1);
+    expect(strict.failures.join("\n")).toContain("model step pp-implement (<flow-level>) has no attempt-0 start marker");
+  });
+
+  test("genuinely flow-level steps (identity null on both sides) are unaffected by the gate", () => {
+    const result = anchorDispatch(
+      [envelope({ stepId: "pp-prep", role: "record", attempt: 1, identity: null })],
+      [entry("PpPrep", 1, null)],
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  test("renderReport threads the option through: the same legacy evidence fails strict and passes with the flag", () => {
+    const history: DispatchHistory = {
+      events: [A, B, C].map((id, i) => ({
+        eventId: `e${i}`,
+        type: "StepStarted",
+        payload: {
+          context: { stepExecutionId: `lease-${i}`, stepType: "PpChildLease", finalAttempt: 1 },
+          input: { stepInput: { file: `src/${id.split("__")[1]?.split("#")[0]}`, round: 1 } },
+        },
+      })),
+    };
+    const envelopes = [leaseEnv(1, null)];
+    const strict = renderReport({ envelopes, verdicts: [], burnDown: [], history });
+    expect(strict.json.dispatch_anchor?.ok).toBe(false);
+    const legacy = renderReport({ envelopes, verdicts: [], burnDown: [], history, legacyFlowKeyedEnvelopes: true });
+    expect(legacy.json.dispatch_anchor?.ok).toBe(true);
   });
 });

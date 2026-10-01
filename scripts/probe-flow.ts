@@ -4,16 +4,22 @@
  * worktree operations, session fencing) against a live dex server; they are
  * retained as upgrade regression suites when the wider toolkit lands.
  *
- * Deterministic fault injection (exit 0d): set PORTING_KIT_FAULT to one of
+ * Deterministic fault injection (exit 0d): set PORTING_KIT_FAULT (or pass
+ * `worker --fault`) to one of
  *   commit:post-commit:<file>#<round>   — crash the worker AFTER the keyed
  *                                         git commit lands, BEFORE the
  *                                         completion marker decision persists
  *   agent-write:mid:<file>#<round>      — crash the worker mid agent write
+ * The full table of faults (also the port flows') and the validation of the
+ * spec is FAULT_KINDS in flows/runtime-hooks.ts.
  *
  * The `agent` role steps call the harness injected via configureProbe(). With
- * OPENCODE_BASE_URL the real opencode harness is used; otherwise run-demo.ts
- * injects an explicit StubHarness (a labeled test double — its token numbers
- * are deterministic test fixtures, never reported as live usage).
+ * a reachable opencode server (OPENCODE_BASE_URL, or the default
+ * http://127.0.0.1:4096) the real harness is used; under --harness auto an
+ * unreachable server falls back to a labelled StubHarness with a loud warning;
+ * --harness stub is explicit (src/harness/select.ts). The stub is a labeled
+ * test double — its token numbers are deterministic test fixtures, never
+ * reported as live usage.
  */
 
 import {
@@ -26,6 +32,7 @@ import {
 import type { Context, Flow, StepDecision } from "@superdurable/dex";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import type { OptionTable } from "../src/cli/args.js";
 import {
   envelopeStepClass,
   envelopeStream,
@@ -45,10 +52,44 @@ import {
   operationId,
   type CompletionMarker,
 } from "../src/git/worktree.js";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { crashPortWorker, faultMatches } from "../flows/runtime-hooks.js";
+import type { AnyFlow } from "../src/dex/client.js";
+import { git } from "../src/git/exec.js";
+import { identityKeyOf } from "../src/file-keys.js";
 
-const execFileP = promisify(execFile);
+// ---------------------------------------------------------------------------
+// Command-line inputs. This module has no argv of its own (run-demo.ts drives
+// the probe flows); the options that feed its inputs are declared here and
+// spread into run-demo's `round` / `long-step` command tables, so the defaults
+// and bounds live next to the code that consumes them.
+// ---------------------------------------------------------------------------
+
+/** `run-demo.ts round`: the file, round number and epoch of the probe PortRound flow's RoundInput. */
+export const PROBE_ROUND_OPTIONS = {
+  file: {
+    kind: "string",
+    metavar: "path",
+    default: "src/a.php",
+    description: "file the probe round writes, relative to the repository",
+  },
+  round: { kind: "int", min: 1, default: 1, description: "round number (the op-ID is <file>#<round>)" },
+  epoch: { kind: "int", min: 1, default: 1, description: "session-fence epoch of the lease" },
+} as const satisfies OptionTable;
+
+/** setTimeout fires at once for a delay above 2^31-1 ms, so a larger --ms would not sleep. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** `run-demo.ts long-step`: how long the probe LongStep flow's single step sleeps. */
+export const PROBE_LONG_STEP_OPTIONS = {
+  ms: {
+    kind: "int",
+    min: 0,
+    max: MAX_TIMER_MS,
+    default: 90_000,
+    metavar: "ms",
+    description: "how long the step sleeps; the multi-minute kill target of exit 0(c)",
+  },
+} as const satisfies OptionTable;
 
 // ---------------------------------------------------------------------------
 // Probe-durable attributes
@@ -64,7 +105,7 @@ export const capturedDiffs = new AttributeMap<string>("captured-diff", stringCod
 
 /** AttributeMap instances prohibit `/`. */
 export function markerKey(file: string, round: number): string {
-  return `${file.replace(/\//g, "__")}#${round}`;
+  return identityKeyOf(file, round);
 }
 
 export function probePersistenceSchema(): {
@@ -83,25 +124,13 @@ export function probePersistenceSchema(): {
 // Deterministic fault injection
 // ---------------------------------------------------------------------------
 
-export type FaultSpec = string | undefined;
+// The armed fault is the one the port flows use (flows/runtime-hooks.ts:
+// configurePortFault / faultMatches / crashPortWorker, and the FAULT_KINDS
+// table that validates the spec): one mechanism, one process-wide spec.
+let HARNESS: AgentSessionClient | undefined;
 
-let FAULT: FaultSpec = undefined;
-let HARNESS: AgentSessionClient | undefined = undefined;
-
-export function configureProbe(harness: AgentSessionClient, fault: FaultSpec): void {
+export function configureProbe(harness: AgentSessionClient): void {
   HARNESS = harness;
-  FAULT = fault;
-}
-
-export function faultMatches(kind: string, opId: string): boolean {
-  return FAULT === `${kind}:${opId}`;
-}
-
-/** Deterministic crash point: SIGKILL this worker process. */
-export function crashSelf(where: string): never {
-  console.error(`[fault-injection] deterministic SIGKILL at ${where} (pid ${process.pid})`);
-  process.kill(process.pid, "SIGKILL");
-  throw new Error(`unreachable after SIGKILL at ${where}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -121,8 +150,7 @@ export interface RoundInput {
 
 async function gitDiff(worktreePath: string): Promise<string> {
   try {
-    const { stdout } = await execFileP("git", ["diff", "HEAD"], { cwd: worktreePath });
-    return stdout;
+    return await git(worktreePath).run(["diff", "HEAD"]);
   } catch (err) {
     return `<<diff failed: ${(err as Error).message}>>`;
   }
@@ -226,7 +254,7 @@ const ProbeAgentWriteStep = envelopeStepClass<RoundInput, { tokensTotal: number 
       const target = `${input.worktreePath}/${input.file}`;
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, input.writtenContent.slice(0, Math.max(1, input.writtenContent.length >> 1)));
-      crashSelf(`agent-write:mid:${opId}`);
+      crashPortWorker(`agent-write:mid:${opId}`);
     }
 
     const promptResult = await HARNESS.prompt(
@@ -292,7 +320,7 @@ const ProbeCommitStep = envelopeStepClass<RoundInput, { opId: string; dedup: boo
     // a side effect; the marker decision has NOT persisted. The retry (next
     // worker) must dedup via the op-ID lookup above, never re-commit.
     if (res.sha !== null && faultMatches("commit:post-commit", opId)) {
-      crashSelf(`commit:post-commit:${opId}`);
+      crashPortWorker(`commit:post-commit:${opId}`);
     }
 
     completionMarkers.set(ctx, key, {
@@ -341,12 +369,7 @@ const ProbeIntegrateStep = envelopeStepClass<RoundInput, { integratedSha: string
 });
 
 async function leaseBranchOf(input: RoundInput): Promise<string> {
-  const { stdout } = await execFileP(
-    "git",
-    ["rev-parse", "--abbrev-ref", "HEAD"],
-    { cwd: input.worktreePath },
-  );
-  return stdout.trim();
+  return (await git(input.worktreePath).run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
 }
 
 function tokenSum(usage: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number }): number {
@@ -376,7 +399,7 @@ export class PortRoundFlow implements Flow<RoundInput> {
   }
 }
 
-export function probeFlows(): Flow<any>[] {
+export function probeFlows(): AnyFlow[] {
   return [new HelloFlow(), new LongStepFlow(), new PortRoundFlow()];
 }
 

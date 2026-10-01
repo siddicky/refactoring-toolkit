@@ -14,26 +14,38 @@
  * 3. Healthy negatives pass through: ~235-output-token valid verdict
  *    (wave-5 Sisyphus signature), text-present/output-0 (the case the
  *    deliberately DROPPED ≤8-output-token arm would have misclassified),
- *    aborted-no-text (recovery path, handled at flows/port-project.ts:563).
+ *    aborted-no-text (recovery path: returned as aborted:true, handled by
+ *    flows/port/agent-turns.ts runAgentTurn).
  * 4. Demotion policy = pure function of (attempt): attempt >= 2 on a review
  *    turn demotes OPENCODE_REVIEWER_MODEL to the fallback lane.
  * 5. WriteStream outage cannot fail a durable step (try/catch-swallow).
  */
 
-import { describe, expect, test, afterEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   OpencodeHarness,
   OpencodePromptError,
   degenerateReply,
   type TokenUsage,
 } from "../src/harness/opencode.js";
+import { isDemotedAttempt } from "../src/harness/lanes.js";
 import { demoteReviewerLane } from "../src/harness/runtime.js";
 import {
   configureEnvelopeStreamPublisher,
-  envelopeStep,
+  envelopeStepClass,
   type EnvelopeStreamMessage,
 } from "../flows/steps/envelope.js";
-import type { Context } from "@superdurable/dex";
+import { stagingContext } from "./support/dex-context.js";
+import { clearHarnessEnv } from "./support/env.js";
+
+// The harness reads OPENCODE_PROMPT_* at call time and lane routing reads
+// OPENCODE_*: start every test from a clean env regardless of the operator's
+// .env (audit C22/C78).
+let restoreEnv: () => void;
+beforeEach(() => {
+  restoreEnv = clearHarnessEnv();
+});
+afterEach(() => restoreEnv());
 
 // ---------------------------------------------------------------------------
 // SDK-boundary double: raw {info, parts} shapes, real extractors downstream.
@@ -144,7 +156,7 @@ const DEGENERATE_FIXTURES: ReadonlyArray<{ label: string; fixture: RawMessage }>
 describe("Tier-0 degenerate-turn detection (raw SDK shapes through the real extractors)", () => {
   test("all ten degenerate no-text fixtures throw retryable OpencodePromptError", async () => {
     expect(DEGENERATE_FIXTURES.length).toBe(10);
-    for (const { label, fixture } of DEGENERATE_FIXTURES) {
+    for (const { fixture } of DEGENERATE_FIXTURES) {
       const h = harness(fixture);
       let caught: unknown;
       try {
@@ -211,11 +223,12 @@ describe("Tier-0 degenerate-turn detection (raw SDK shapes through the real extr
     expect(reply.text.length).toBeGreaterThan(0);
   });
 
-  test("aborted-no-text is NOT classified Tier-0: it surfaces as the ODW upstream-failure retryable class (runAgentTurn:563 stays the abort handler)", async () => {
-    // Observed seam reality: an aborted assistant message carries
-    // info.error = MessageAbortedError, and the ODW finding-1 check bails
-    // BEFORE the Tier-0 guard — so an abort must never be misreported as a
-    // degenerate turn (the Tier-0 predicate also excludes aborted shapes).
+  test("aborted-no-text is NOT classified Tier-0: it is returned as aborted:true (runAgentTurn is the abort handler), never a degenerate turn", async () => {
+    // An aborted assistant message carries info.error = MessageAbortedError.
+    // The seam classifies the abort BEFORE the generic upstream-error check
+    // (INT-6), and the Tier-0 predicate also excludes aborted shapes — so an
+    // abort is neither misreported as an upstream failure nor as a degenerate
+    // turn; the flow sees `aborted` and decides.
     const h = harness({
       info: {
         tokens: { input: 500, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -224,17 +237,10 @@ describe("Tier-0 degenerate-turn detection (raw SDK shapes through the real extr
       },
       parts: [],
     });
-    let caught: unknown;
-    try {
-      await h.prompt("ses_aborted", "review this diff");
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(OpencodePromptError);
-    const e = caught as OpencodePromptError;
-    expect(e.retryable).toBe(true);
-    expect(e.message).toContain("upstream failure");
-    expect(e.message).not.toContain("degenerate turn");
+    const reply = await h.prompt("ses_aborted", "review this diff");
+    expect(reply.aborted).toBe(true);
+    expect(reply.text).toBe("");
+    expect(reply.usage?.input).toBe(500);
   });
 });
 
@@ -243,10 +249,12 @@ describe("Tier-0 degenerate-turn detection (raw SDK shapes through the real extr
 // ---------------------------------------------------------------------------
 
 describe("reviewer-lane demotion policy (pure f(attempt))", () => {
+  // demoteReviewerLane is a generic labeller over the ONE threshold,
+  // isDemotedAttempt (lanes.ts); lane routing itself is covered in lanes.test.ts.
   const luna = { providerID: "openai", modelID: "gpt-6-luna" };
   const glm = { providerID: "zai", modelID: "glm-5.3-flash" };
 
-  test("attempt 1 (and undefined) keeps the OPENCODE_REVIEWER_MODEL default lane", () => {
+  test("attempt 1 (and undefined / 0) keeps the default lane", () => {
     expect(demoteReviewerLane(1, luna, glm)).toEqual(luna);
     expect(demoteReviewerLane(undefined, luna, glm)).toEqual(luna);
     expect(demoteReviewerLane(0, luna, glm)).toEqual(luna);
@@ -257,10 +265,10 @@ describe("reviewer-lane demotion policy (pure f(attempt))", () => {
     expect(demoteReviewerLane(3, luna, glm)).toEqual(glm);
   });
 
-  test("fallback unset -> the demoted lane IS the implementer lane (no override)", () => {
-    expect(demoteReviewerLane(2, luna, undefined)).toBeUndefined();
-    // No default override configured: policy is a no-op either way.
-    expect(demoteReviewerLane(1, undefined, glm)).toBeUndefined();
+  test("labels turns without restating the rule: agrees with isDemotedAttempt for every attempt", () => {
+    for (const a of [undefined, 0, 1, 2, 3, 9]) {
+      expect(demoteReviewerLane(a, "default", "demoted")).toBe(isDemotedAttempt(a) ? "demoted" : "default");
+    }
   });
 
   test("policy depends on NOTHING but the attempt: same inputs, same answer", () => {
@@ -276,28 +284,14 @@ describe("reviewer-lane demotion policy (pure f(attempt))", () => {
 // ---------------------------------------------------------------------------
 
 describe("envelope telemetry stream (US-002)", () => {
-  function fakeContext(): {
-    context: Context;
-    staged: Array<{ instance: string; value: unknown }>;
-  } {
-    const staged: Array<{ instance: string; value: unknown }> = [];
-    const context = {
-      attempt: 1,
-      flowId: "gate-outage-flow",
-      setAttribute: (attr: unknown, value: unknown, instance: string) => {
-        void attr;
-        staged.push({ instance, value });
-      },
-    } as unknown as Context;
-    return { context, staged };
-  }
+  const fakeContext = () => stagingContext({ flowId: "gate-outage-flow" });
 
-  const step = envelopeStep<{ n: number }, { n: number }>({
+  const step = new (envelopeStepClass<{ n: number }, { n: number }>({
     stepType: "ProbeStreamOutage",
     stepId: "pp-stream-outage",
     role: "record",
     inner: async (_ctx, input) => ({ output: { n: input.n }, tokens: null }),
-  });
+  }))();
 
   afterEach(() => {
     configureEnvelopeStreamPublisher(undefined);
@@ -353,7 +347,7 @@ describe("envelope telemetry stream (US-002)", () => {
 // same predicate and that Tier-1 evidence has zero control-flow consumers.
 // ---------------------------------------------------------------------------
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -379,7 +373,7 @@ describe("US-003 fixture directory (checked-in raw SDK shapes)", () => {
     const manifest = JSON.parse(
       readFileSync(join(FIXTURE_DIR, "manifest.json"), "utf8"),
     );
-    const listed = manifest.cases.map((c: { id: string }) => c.id + ".json");
+    const listed = manifest.cases.map((c: { id: string }) => `${c.id}.json`);
     expect(listed.sort()).toEqual(files);
   });
 

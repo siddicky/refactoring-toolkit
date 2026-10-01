@@ -11,7 +11,6 @@
  *   kill smokes (PORTING_KIT_FAULT env), same mechanism as the Phase 0 probe.
  */
 
-import { execFileSync } from "node:child_process";
 import type { JudgmentClient } from "../src/typesafe/client.js";
 import type { TurnHealthAssessor } from "../src/metrics/types.js";
 
@@ -60,30 +59,81 @@ export function faultMatches(kind: string, target: string): boolean {
   return PORT_FAULT === `${kind}:${target}`;
 }
 
+/**
+ * Every fault the worker can inject, in one table (B13). A fault is armed by an
+ * exact string `<kind>:<target>` (see {@link faultMatches}); a spec nothing
+ * matches arms nothing and the rehearsal "passes" vacuously, so the worker
+ * validates the spec against this table before it starts.
+ */
+export interface FaultKind {
+  kind: string;
+  /** The flows that contain the crash point; a fault for the other flows never fires. */
+  flows: "probe" | "port";
+  /** The target shape, for the usage text. */
+  target: string;
+  accepts: (target: string) => boolean;
+  /** Where the worker dies (or what it injects). */
+  effect: string;
+}
+
+const isFileRound = (target: string): boolean => /^.+#[1-9]\d*$/.test(target);
+const isSeed = (target: string): boolean => target === "seed";
+
+export const FAULT_KINDS: readonly FaultKind[] = [
+  {
+    kind: "commit:post-commit",
+    flows: "probe",
+    target: "<file>#<round>",
+    accepts: isFileRound,
+    effect: "SIGKILL after the keyed git commit lands, before the completion marker persists",
+  },
+  {
+    kind: "agent-write:mid",
+    flows: "probe",
+    target: "<file>#<round>",
+    accepts: isFileRound,
+    effect: "SIGKILL in the middle of the agent's file write",
+  },
+  {
+    kind: "symbol-table:post",
+    flows: "port",
+    target: "seed",
+    accepts: isSeed,
+    effect: "SIGKILL after the symbol-table Jev loop, before its durable write",
+  },
+  {
+    kind: "queue-verify:inject-error",
+    flows: "port",
+    target: "seed",
+    accepts: isSeed,
+    effect: "queue verify iteration 1 sees one synthetic tsc error, so a fix round runs (no crash)",
+  },
+];
+
+/** One line per fault kind, for a usage text. */
+export function faultKindsUsage(): string {
+  return FAULT_KINDS.map((k) => `${k.kind}:${k.target} (--flows ${k.flows}: ${k.effect})`).join("; ");
+}
+
+/** Why `spec` could never fire for `flows`, or null when it can. */
+export function faultSpecProblem(spec: string, flows: "probe" | "port"): string | null {
+  const kind = FAULT_KINDS.find((k) => spec.startsWith(`${k.kind}:`));
+  if (kind === undefined) {
+    return `unknown fault ${JSON.stringify(spec)}; use one of: ${faultKindsUsage()}`;
+  }
+  const target = spec.slice(kind.kind.length + 1);
+  if (!kind.accepts(target)) {
+    return `fault ${kind.kind} takes the target ${kind.target} (got ${JSON.stringify(target)})`;
+  }
+  if (kind.flows !== flows) {
+    return `fault ${kind.kind} belongs to the ${kind.flows} flows and the worker runs --flows ${flows}, so it would never fire`;
+  }
+  return null;
+}
+
 /** Deterministic crash point: SIGKILL this worker process (kill smokes). */
 export function crashPortWorker(where: string): never {
   console.error(`[fault-injection] deterministic SIGKILL at ${where} (pid ${process.pid})`);
   process.kill(process.pid, "SIGKILL");
   throw new Error(`unreachable after SIGKILL at ${where}`);
-}
-
-/**
- * Resolves tsc/vitest binaries for the toolkit-owned queue steps WITHOUT
- * network: prefers the toolkit's own node_modules (.bin) and falls back to
- * bare names. Used by scripts/flows that run queues on the integration
- * checkout; exported for tests.
- */
-export function queueBin(rootDir: string, name: "tsc" | "vitest"): string | null {
-  for (const candidate of [
-    `${rootDir}/node_modules/.bin/${name}`,
-    name,
-  ]) {
-    try {
-      execFileSync(candidate, ["--version"], { stdio: "ignore", timeout: 30_000 });
-      return candidate;
-    } catch {
-      // try next candidate
-    }
-  }
-  return null;
 }

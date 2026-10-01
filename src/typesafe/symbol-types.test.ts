@@ -40,7 +40,9 @@ describe("phpTypeToTsType (recall mapping)", () => {
     expect(phpTypeToTsType("int|string")).toBe("number | string");
     expect(phpTypeToTsType("int[]")).toBe("number[]");
     expect(phpTypeToTsType("array<string, int>")).toBe("unknown[]");
-    expect(phpTypeToTsType("iterable<User>")).toBe("User[]");
+    expect(phpTypeToTsType("iterable<User>")).toBe("Iterable<User>");
+    expect(phpTypeToTsType("iterable")).toBe("Iterable<unknown>");
+    expect(phpTypeToTsType("list<int>")).toBe("number[]");
     expect(phpTypeToTsType("App\\Support\\Money")).toBe("Money");
   });
 });

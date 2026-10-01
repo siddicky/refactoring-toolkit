@@ -28,24 +28,42 @@ import {
 } from "./dispatch-anchor.js";
 import {
   fileFromIdentity,
+  isFiredKill,
   isModelCallingRole,
+  isStartMarker,
+  PREP_SPEC_FILE,
+  sanitizeFileKey,
   type CitationCheckResult,
+  type CitationGateView,
   type EnvelopeEvent,
   type EnvelopeRole,
   type Finding,
-  type KillEvent,
+  type JevUsageEntry,
+  type KillEventDiagnostics,
   type KillEventsFile,
   type QueueBurnDownEvent,
   type QueueKind,
-  type TokenUsage,
+  type ReportKillEvent,
+  type TscRunAccounting,
   type VerdictRecord,
   type VerdictTombstone,
   type VitestRunAccounting,
   tokenTotalOf,
 } from "./types.js";
 
-/** The fixer step id (mirror of flows/port-project.ts) for AC2 retry counts. */
-const FIXER_STEP_ID = "pp-fixer";
+/**
+ * The fixer step id for AC2 retry counts: a hand-kept mirror of the flow's
+ * fixer step (the metrics layer never imports flows), pinned against the real
+ * step by tests/mirror-drift.test.ts.
+ */
+export const FIXER_STEP_ID = "pp-fixer";
+
+/** The single provenance failure an empty evidence stream produces. */
+const NO_EVIDENCE_FAILURE =
+  "NO EVIDENCE: the envelope stream is empty, so nothing was verified (wrong flow id, attributes not read, or a flow with no steps yet)";
+
+/** Legacy driver pseudo-file marking an aggregate burn-down row (now `file: null`). */
+const TOTAL_PSEUDO_FILE = "(total)";
 
 export interface MetricsRenderInput {
   envelopes: readonly EnvelopeEvent[];
@@ -56,34 +74,45 @@ export interface MetricsRenderInput {
    * with ZERO completed records and >= 2 tombstones is DEGRADED.
    */
   tombstones?: ReadonlyArray<VerdictTombstone & { file: string; round: number }>;
+  /**
+   * The citation gate's own scores per reviewer and round (`pp-kept`), so the
+   * report can show the p_cited the gate APPLIED next to the deterministic
+   * review-time check on the verdict record (C14).
+   */
+  citationGates?: readonly CitationGateView[];
   burnDown: readonly QueueBurnDownEvent[];
+  /**
+   * Live TypeSafe Jev usage from the flows' `pp-jev-usage` attribute (parent +
+   * children). Reported separately: these steps keep non-model roles, so their
+   * spend never reaches the model-calling token/cost totals.
+   */
+  jevUsage?: readonly JevUsageEntry[];
   /** Merged kill-events.json sidecar; null/undefined when the run had no kill. */
   killEvents?: KillEventsFile | null;
+  /** Sidecar read diagnostics (malformed lines, other-run exclusions) from kill-events.ts. */
+  killEventDiagnostics?: KillEventDiagnostics | null;
   /**
    * dexcli history JSON (`flow history -output json`). When present the Phase 5
    * typed dispatch anchoring runs as part of the AC2 cross-check and its
    * failures join the provenance failures.
    */
   history?: DispatchHistory | null;
+  /**
+   * Render PRE-identityOf evidence (cx-5e style flow-keyed envelopes for
+   * per-file steps) with the lossy legacy anchoring. Default false.
+   */
+  legacyFlowKeyedEnvelopes?: boolean;
   /** Optional UTC ISO-8601 stamp for the report header (supplied by the caller). */
   generatedAt?: string;
 }
 
-export interface DispatchAnchorSummary {
-  ok: boolean;
-  failures: string[];
-  envelopes_anchored: number;
-  dispatch_entries_total: number;
-  non_agent_dispatch_entries: number;
-  unexplained_dispatch_entries: number;
-  model_steps_missing_start_marker: number;
-  groups: DispatchAnchorResult["groups"];
-}
-
 export interface ReportJson {
   generated_at: string | null;
+  /** false when any provenance failure exists, including NO EVIDENCE (empty stream). */
   provenance_ok: boolean;
   provenance_failures: string[];
+  /** True when the envelope stream was empty: the report verifies nothing. */
+  no_evidence: boolean;
   summary: {
     files: string[];
     envelope_count: number;
@@ -100,7 +129,13 @@ export interface ReportJson {
     exhausted_attempt_tombstones: number;
     /** Total over model-calling roles, real attempts only; null when none. */
     tokens_model_roles: number | null;
-    wall_clock_ms_total: number;
+    /**
+     * SUM of every real step's own duration. Parallel waves overlap, so this
+     * can exceed the elapsed time — it is step time, not wall clock.
+     */
+    step_time_ms_total: number;
+    /** Elapsed time: first envelope start to last envelope end; null when unknown. */
+    wall_clock_span_ms: number | null;
     /**
      * US-010: what the run was actually verified BY. `tsc_verified` is the
      * last burn-down iteration's typecheck result (null = no tsc samples);
@@ -108,8 +143,12 @@ export interface ReportJson {
      * run's evidence is typecheck-only at best).
      */
     verification: {
+      /** null = no tsc samples OR the final tsc run did not run (see `tsc`). */
       tsc_final_error_count: number | null;
+      /** null = unknown: no tsc samples, or tsc NOT RUN (never a pass). */
       tsc_verified: boolean | null;
+      /** Contract A accounting of the final tsc iteration; absent on legacy rows / no samples. */
+      tsc?: TscRunAccounting;
       vitest: VitestRunAccounting | null;
     };
   };
@@ -121,7 +160,14 @@ export interface ReportJson {
     /** True when the round reached verdict-check with every reviewer discarded. */
     degraded: boolean;
     tombstones: Array<{ reviewer: string; reason: string; attempt: number }>;
+    /**
+     * The deterministic citation check stamped on the verdict records at review
+     * time. NOT what the gate decided on when live Jev is configured: see
+     * `citation_gate`.
+     */
     citation_checks: CitationCheckResult[];
+    /** The gate's own p_cited and decision per reviewer; empty when no gate record exists (older evidence). */
+    citation_gate: Array<Omit<CitationGateView, "file" | "round">>;
   }>;
   tokens_by_file_role: Array<{
     file: string;
@@ -136,8 +182,9 @@ export interface ReportJson {
    * envelopes that carry the full TokenUsage object. Roles whose envelopes
    * only carry bare totals appear with calls counted but split fields null.
    * `cost_estimated` is true when at least one model call reported tokens
-   * without a provider-reported cost (plan-authed lane) — renderers prefix
-   * such totals with `~`.
+   * without a provider-reported cost (plan-authed lane, or a bare token total
+   * with no split) — the USD total is then a lower bound and renderers prefix
+   * it with `~`. `costed_calls` / `uncosted_calls` make the basis explicit.
    */
   usage_by_role: Array<{
     role: EnvelopeRole;
@@ -148,10 +195,34 @@ export interface ReportJson {
     reasoning_tokens: number | null;
     output_tokens: number | null;
     cost_usd: number | null;
+    /** Calls with a provider-reported cost (cost_usd > 0). */
+    costed_calls: number;
+    /** Calls with tokens but no provider-reported cost (cost_usd absent/0, or a bare total). */
+    uncosted_calls: number;
   }>;
   cost_total_usd: number | null;
   cost_estimated: boolean;
-  /** Retries = fixer (stepId pp-fixer) envelope events with attempt > 1, per file. */
+  costed_calls: number;
+  uncosted_calls: number;
+  /**
+   * Live Jev (judgment-model) spend from `pp-jev-usage`, kept OUT of
+   * `tokens_model_roles` and `cost_total_usd` (verdict-check / prioritize /
+   * vitest-triage are non-model roles). Tokens only: the usage record carries
+   * no cost, so none is claimed. null = none recorded (naive path / no spend).
+   * Counts only step attempts whose write committed (0(g)): a retried attempt's
+   * spend is not durable and is not included.
+   */
+  jev_usage: {
+    calls: number;
+    total_tokens: number;
+    cost_usd: null;
+    by_step: Array<{ step: string; calls: number; tokens: number }>;
+  } | null;
+  /**
+   * Fixer retries per file: for each fixer target (file#round) the highest
+   * durable attempt minus one, summed per file. Only the successful attempt's
+   * envelope is durable (0(g)), so max(attempt) is the attempt count.
+   */
   fixer_retries: Array<{ file: string; retries: number }>;
   queue_burn_down: Array<{
     queue: QueueKind;
@@ -164,12 +235,17 @@ export interface ReportJson {
        * state + reason, never a bare 0.
        */
       vitest?: VitestRunAccounting;
+      /** Contract A tsc accounting for this iteration; not-run => count is vacuous. */
+      tsc?: TscRunAccounting;
+      /** Breakdown rows only; `error_count` above is the authoritative total. */
       per_file: Array<{ file: string; error_count: number }>;
     }>;
   }>;
   kill_events: KillEventsFile | null;
+  /** Malformed sidecar lines / events excluded as another run's; null = clean or no sidecar. */
+  kill_event_diagnostics: KillEventDiagnostics | null;
   /** Present only when `history` was supplied to the renderer. */
-  dispatch_anchor: DispatchAnchorSummary | null;
+  dispatch_anchor: DispatchAnchorResult | null;
 }
 
 export interface RenderedReport {
@@ -194,7 +270,7 @@ export function validateProvenance(envelopes: readonly EnvelopeEvent[]): string[
       failures.push(`envelope ${env.stepId} has attempt ${env.attempt} < 0`);
       continue;
     }
-    if (env.attempt === 0) {
+    if (isStartMarker(env)) {
       if (tokens !== null) {
         failures.push(`envelope ${env.stepId} is an attempt-0 start marker but carries token usage`);
       }
@@ -239,12 +315,17 @@ export function runProvenanceCrossCheck(input: {
   envelopes: readonly EnvelopeEvent[];
   history: DispatchHistory;
   requireStartMarkers?: boolean;
+  /** Accept the lossy cx-5e flow-keyed anchoring (old evidence only; default off). */
+  legacyFlowKeyedEnvelopes?: boolean;
 }): ProvenanceCrossCheck {
   const envelopeFailures = validateProvenance(input.envelopes);
   const cross = anchorForRun(input.history, input.envelopes, {
     ...(input.requireStartMarkers === undefined
       ? {}
       : { requireStartMarkers: input.requireStartMarkers }),
+    ...(input.legacyFlowKeyedEnvelopes === undefined
+      ? {}
+      : { legacyFlowKeyedEnvelopes: input.legacyFlowKeyedEnvelopes }),
   });
   const failures = [...envelopeFailures, ...cross.failures].sort((a, b) =>
     a < b ? -1 : a > b ? 1 : 0,
@@ -253,46 +334,95 @@ export function runProvenanceCrossCheck(input: {
 }
 
 /**
- * Recover the grouping target for an envelope: explicit file/round first,
- * else parse the M2 identity (`file#round`); null for flow-level steps.
- * The live factory leaves file/round null on per-file steps — identity is
- * the authoritative target key.
+ * Recover the grouping target for an envelope: an explicit file/round first
+ * (hand-built and legacy events), else parse the M2 identity (`file#round`);
+ * null for flow-level steps. The live factory writes no file/round on any
+ * event, so there the identity is the authoritative target key.
  */
-function envelopeTarget(env: EnvelopeEvent): { file: string; round: number | null } | null {
-  if (env.file !== null) return { file: env.file, round: env.round };
+function envelopeTarget(
+  env: EnvelopeEvent,
+  canonicalFile: (file: string) => string,
+): { file: string; round: number | null } | null {
+  if (env.file != null) return { file: canonicalFile(env.file), round: env.round ?? null };
   if (env.identity !== null) {
     const parsed = fileFromIdentity(env.identity);
-    if (parsed !== null) return { file: parsed.file, round: env.round ?? parsed.round };
+    if (parsed !== null) {
+      return { file: canonicalFile(parsed.file), round: env.round ?? parsed.round };
+    }
   }
   return null;
+}
+
+/**
+ * Resolves a (possibly lossy) recovered file path to the AUTHORITATIVE one: a
+ * verdict record carries the true `file`, while the sanitized identity's
+ * "__" -> "/" inverse corrupts any path containing "__" (src/__tests__/Foo.php
+ * -> src//tests//Foo.php) and would split one file-round in two. The
+ * sanitized forms are compared (sanitize(inverse(x)) === x always holds); two
+ * distinct authoritative files that sanitize identically are ambiguous and
+ * left alone.
+ */
+function canonicalFileResolver(verdicts: readonly VerdictRecord[]): (file: string) => string {
+  const bySanitized = new Map<string, string | null>();
+  for (const v of verdicts) {
+    const key = sanitizeFileKey(v.file);
+    const known = bySanitized.get(key);
+    bySanitized.set(key, known === undefined || known === v.file ? v.file : null);
+  }
+  return (file) => bySanitized.get(sanitizeFileKey(file)) ?? file;
 }
 
 function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function summarizeAnchor(anchor: DispatchAnchorResult): DispatchAnchorSummary {
+/**
+ * Group key for a Jev usage entry: `<step>:<file>#<round>` collapses to the
+ * step; other ids (`pp-queue-verify:vitest-triage`) stay whole.
+ */
+function jevStepOf(stepId: string): string {
+  const colon = stepId.indexOf(":");
+  return colon > 0 && stepId.slice(colon + 1).includes("#") ? stepId.slice(0, colon) : stepId;
+}
+
+function summarizeJevUsage(entries: readonly JevUsageEntry[]): ReportJson["jev_usage"] {
+  if (entries.length === 0) return null;
+  const byStep = new Map<string, { calls: number; tokens: number }>();
+  let total = 0;
+  for (const e of entries) {
+    const step = jevStepOf(e.stepId);
+    const agg = byStep.get(step) ?? { calls: 0, tokens: 0 };
+    agg.calls += 1;
+    agg.tokens += e.tokens;
+    byStep.set(step, agg);
+    total += e.tokens;
+  }
   return {
-    ok: anchor.ok,
-    failures: anchor.failures,
-    envelopes_anchored: anchor.envelopes_anchored,
-    dispatch_entries_total: anchor.dispatch_entries_total,
-    non_agent_dispatch_entries: anchor.non_agent_dispatch_entries,
-    unexplained_dispatch_entries: anchor.unexplained_dispatch_entries,
-    model_steps_missing_start_marker: anchor.model_steps_missing_start_marker,
-    groups: anchor.groups,
+    calls: entries.length,
+    total_tokens: total,
+    cost_usd: null,
+    by_step: [...byStep.entries()]
+      .map(([step, agg]) => ({ step, calls: agg.calls, tokens: agg.tokens }))
+      .sort((p, q) => compareStrings(p.step, q.step)),
   };
 }
 
 function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck | null): ReportJson {
   const { envelopes, verdicts, burnDown } = input;
-  const provenanceFailures = cross === null ? validateProvenance(envelopes) : cross.failures;
+  const noEvidence = envelopes.length === 0;
+  // An empty envelope stream verifies NOTHING (wrong flow id, attributes not
+  // read, a flow with no steps yet): it must never read as a vacuous pass.
+  const provenanceFailures = [
+    ...(cross === null ? validateProvenance(envelopes) : cross.failures),
+    ...(noEvidence ? [NO_EVIDENCE_FAILURE] : []),
+  ];
+  const canonicalFile = canonicalFileResolver(verdicts);
 
   // ---- universe of file+round pairs (envelopes + verdicts) ---------------
   const fileRoundKeys = new Set<string>();
   const files = new Set<string>();
   for (const env of envelopes) {
-    const target = envelopeTarget(env);
+    const target = envelopeTarget(env, canonicalFile);
     if (target === null || target.round === null) continue; // flow-level step
     fileRoundKeys.add(`${target.file}\u0000${target.round}`);
     files.add(target.file);
@@ -301,7 +431,8 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     fileRoundKeys.add(`${v.file}\u0000${v.round}`);
     files.add(v.file);
   }
-  for (const t of input.tombstones ?? []) {
+  const tombstones = (input.tombstones ?? []).map((t) => ({ ...t, file: canonicalFile(t.file) }));
+  for (const t of tombstones) {
     fileRoundKeys.add(`${t.file}\u0000${t.round}`);
     files.add(t.file);
   }
@@ -317,7 +448,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
 
   // ---- US-006 tombstones grouped by file+round ---------------------------
   const tombstonesByGroup = new Map<string, Array<VerdictTombstone>>();
-  for (const t of input.tombstones ?? []) {
+  for (const t of tombstones) {
     const key = `${t.file}\u0000${t.round}`;
     const list = tombstonesByGroup.get(key);
     if (list) list.push(t);
@@ -341,6 +472,15 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     const citationChecks: CitationCheckResult[] = records.flatMap((r) =>
       r.citation_check.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
     );
+    const citationGate = (input.citationGates ?? [])
+      .filter((g) => canonicalFile(g.file) === file && g.round === round)
+      .map((g) => ({
+        reviewer: g.reviewer,
+        checker: g.checker,
+        fallbackReason: g.fallbackReason,
+        scores: g.scores,
+      }))
+      .sort((p, q) => compareStrings(p.reviewer, q.reviewer));
     fileRounds.push({
       file,
       round,
@@ -355,6 +495,7 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
         .map((t) => ({ reviewer: t.reviewer, reason: t.reason, attempt: t.attempt }))
         .sort((p, q) => compareStrings(p.reviewer, q.reviewer)),
       citation_checks: citationChecks,
+      citation_gate: citationGate,
     });
   }
   fileRounds.sort((p, q) => (p.file !== q.file ? compareStrings(p.file, q.file) : p.round - q.round));
@@ -370,8 +511,8 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   }
   const fileRoleAggs = new Map<string, FileRoleAgg>();
   for (const env of envelopes) {
-    if (env.attempt === 0) continue; // M4 start markers are not step work
-    const file = envelopeTarget(env)?.file ?? "(flow)";
+    if (isStartMarker(env)) continue; // M4 start markers are not step work
+    const file = envelopeTarget(env, canonicalFile)?.file ?? "(flow)";
     const key = `${file}\u0000${env.role}`;
     let agg = fileRoleAggs.get(key);
     if (!agg) {
@@ -410,11 +551,17 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     reasoning: number;
     output: number;
     cost: number;
-    costReported: boolean;
+    costedCalls: number;
+    uncostedCalls: number;
   }
   const usageAggs = new Map<EnvelopeRole, UsageAgg>();
   for (const env of envelopes) {
-    if (env.attempt === 0 || !isModelCallingRole(env.role)) continue;
+    if (isStartMarker(env) || !isModelCallingRole(env.role)) continue;
+    // A step that ran no model call (skipped, no tokens: a queue-fix with
+    // nothing to fix reports tokens 0) is neither a call nor an uncosted one:
+    // counting it overstated `calls` and turned an exact cost into a lower
+    // bound with a note about tokens that never flowed (B22).
+    if (env.outcome === "skipped" && (env.tokens === null || tokenTotalOf(env.tokens) === 0)) continue;
     let agg = usageAggs.get(env.role);
     if (!agg) {
       agg = {
@@ -427,12 +574,18 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
         reasoning: 0,
         output: 0,
         cost: 0,
-        costReported: false,
+        costedCalls: 0,
+        uncostedCalls: 0,
       };
       usageAggs.set(env.role, agg);
     }
     agg.calls += 1;
-    if (env.tokens === null || typeof env.tokens === "number") continue;
+    if (env.tokens === null) continue;
+    if (typeof env.tokens === "number") {
+      // Bare token total: tokens flowed but no provider cost can be attached.
+      agg.uncostedCalls += 1;
+      continue;
+    }
     agg.splitCalls += 1;
     agg.input += env.tokens.input_tokens;
     agg.output += env.tokens.output_tokens;
@@ -441,7 +594,9 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     agg.cacheWrite += env.tokens.cache_write_tokens ?? 0;
     if (typeof env.tokens.cost_usd === "number" && env.tokens.cost_usd > 0) {
       agg.cost += env.tokens.cost_usd;
-      agg.costReported = true;
+      agg.costedCalls += 1;
+    } else {
+      agg.uncostedCalls += 1;
     }
   }
   const usageByRole = [...usageAggs.values()]
@@ -453,24 +608,34 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
       cache_write_tokens: agg.splitCalls > 0 ? agg.cacheWrite : null,
       reasoning_tokens: agg.splitCalls > 0 ? agg.reasoning : null,
       output_tokens: agg.splitCalls > 0 ? agg.output : null,
-      cost_usd: agg.costReported ? agg.cost : agg.splitCalls > 0 ? 0 : null,
+      cost_usd: agg.costedCalls > 0 ? agg.cost : agg.splitCalls > 0 ? 0 : null,
+      costed_calls: agg.costedCalls,
+      uncosted_calls: agg.uncostedCalls,
     }))
     .sort((p, q) => compareStrings(p.role, q.role));
   const anySplit = [...usageAggs.values()].some((agg) => agg.splitCalls > 0);
-  const anyReportedCost = [...usageAggs.values()].some((agg) => agg.costReported);
+  const costedCalls = [...usageAggs.values()].reduce((sum, agg) => sum + agg.costedCalls, 0);
+  const uncostedCalls = [...usageAggs.values()].reduce((sum, agg) => sum + agg.uncostedCalls, 0);
   const costTotalUsd = [...usageAggs.values()].reduce((sum, agg) => sum + agg.cost, 0);
-  // Estimated when tokens flowed on a lane the provider did not bill per-call
-  // (plan-authed): the honest total is "~$0", never a silent null.
-  const costEstimated = anySplit && !anyReportedCost;
   const costTotal = anySplit ? costTotalUsd : null;
+  // Estimated (a lower bound) whenever ANY call carried tokens without a
+  // provider-reported cost — a mixed lane must not read as an exact total.
+  // A plan-authed lane is the all-uncosted case: the honest total is "~$0".
+  const costEstimated = costTotal !== null && uncostedCalls > 0;
 
   // ---- totals over eligible (model-calling, real-attempt) steps ----------
   let modelTokens: number | null = null;
-  let wallClockTotal = 0;
+  let stepTimeTotal = 0;
+  let spanStart: number | null = null;
+  let spanEnd: number | null = null;
   let startMarkerCount = 0;
   let interruptedRealCount = 0;
   for (const env of envelopes) {
-    if (env.attempt === 0) {
+    const startedAt = Date.parse(env.started_at);
+    if (!Number.isNaN(startedAt)) spanStart = spanStart === null ? startedAt : Math.min(spanStart, startedAt);
+    const endedAt = env.ended_at === null ? Number.NaN : Date.parse(env.ended_at);
+    if (!Number.isNaN(endedAt)) spanEnd = spanEnd === null ? endedAt : Math.max(spanEnd, endedAt);
+    if (isStartMarker(env)) {
       startMarkerCount++;
       continue;
     }
@@ -479,46 +644,68 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
       const tokens = tokenTotalOf(env.tokens);
       if (tokens !== null) modelTokens = (modelTokens ?? 0) + tokens;
     }
-    if (env.wall_clock_ms !== null) wallClockTotal += env.wall_clock_ms;
+    if (env.wall_clock_ms !== null) stepTimeTotal += env.wall_clock_ms;
   }
 
   // ---- fixer retries -------------------------------------------------------
-  const retriesByFile = new Map<string, number>();
+  // Per target (identity) the highest durable attempt minus one; the durable
+  // envelope of a fixer that succeeded on attempt 3 is attempt 3 alone.
+  const maxAttemptByTarget = new Map<string, Map<string, number>>();
   for (const env of envelopes) {
-    if (env.stepId !== FIXER_STEP_ID || env.attempt === 0) continue;
-    const file = envelopeTarget(env)?.file;
+    if (env.stepId !== FIXER_STEP_ID || isStartMarker(env)) continue;
+    const file = envelopeTarget(env, canonicalFile)?.file;
     if (file === undefined) continue;
-    if (env.attempt > 1) {
-      retriesByFile.set(file, (retriesByFile.get(file) ?? 0) + 1);
-    } else if (!retriesByFile.has(file)) {
-      retriesByFile.set(file, 0);
-    }
+    const targets = maxAttemptByTarget.get(file) ?? new Map<string, number>();
+    const target = env.identity ?? "(flow)";
+    targets.set(target, Math.max(targets.get(target) ?? 0, env.attempt));
+    maxAttemptByTarget.set(file, targets);
   }
-  const fixerRetries = [...retriesByFile.entries()]
-    .map(([file, retries]) => ({ file, retries }))
+  const fixerRetries = [...maxAttemptByTarget.entries()]
+    .map(([file, targets]) => ({
+      file,
+      retries: [...targets.values()].reduce((sum, attempt) => sum + Math.max(0, attempt - 1), 0),
+    }))
     .sort((p, q) => compareStrings(p.file, q.file));
 
   // ---- queue burn-down ------------------------------------------------------
+  // The flow's aggregate row (file null) is AUTHORITATIVE for an iteration's
+  // total; per-file rows (tsc: capped by the flow) are breakdown only. The sum
+  // of per-file rows is only the fallback when no aggregate row exists.
+  interface IterationAgg {
+    total: number | null;
+    perFile: Array<{ file: string; error_count: number }>;
+    /** US-010: vitest accounting for this iteration (first sample with one wins). */
+    vitest?: VitestRunAccounting;
+    /** Contract A: tsc accounting (rides on the tsc total row; first wins). */
+    tsc?: TscRunAccounting;
+  }
   interface QueueAgg {
     queue: QueueKind;
-    iterations: Map<number, Array<{ file: string; error_count: number }>>;
-    /** US-010: vitest accounting per iteration (first sample with one wins). */
-    vitestByIteration: Map<number, VitestRunAccounting>;
+    iterations: Map<number, IterationAgg>;
   }
+  const iterationCount = (it: IterationAgg): number =>
+    it.total ?? it.perFile.reduce((sum, e) => sum + e.error_count, 0);
   const queueAggs = new Map<QueueKind, QueueAgg>();
   for (const sample of burnDown) {
     let agg = queueAggs.get(sample.queue);
     if (!agg) {
-      agg = { queue: sample.queue, iterations: new Map(), vitestByIteration: new Map() };
+      agg = { queue: sample.queue, iterations: new Map() };
       queueAggs.set(sample.queue, agg);
     }
-    const list = agg.iterations.get(sample.iteration);
-    const entry = { file: sample.file, error_count: sample.error_count };
-    if (list) list.push(entry);
-    else agg.iterations.set(sample.iteration, [entry]);
-    if (sample.vitest !== undefined && !agg.vitestByIteration.has(sample.iteration)) {
-      agg.vitestByIteration.set(sample.iteration, sample.vitest);
+    let it = agg.iterations.get(sample.iteration);
+    if (!it) {
+      it = { total: null, perFile: [] };
+      agg.iterations.set(sample.iteration, it);
     }
+    if (sample.file === null || sample.file === TOTAL_PSEUDO_FILE) {
+      // Each flow writes one aggregate row per iteration; rows from distinct
+      // flows (parent + children) are independent counts and add up.
+      it.total = (it.total ?? 0) + sample.error_count;
+    } else {
+      it.perFile.push({ file: sample.file, error_count: sample.error_count });
+    }
+    if (sample.vitest !== undefined && it.vitest === undefined) it.vitest = sample.vitest;
+    if (sample.tsc !== undefined && it.tsc === undefined) it.tsc = sample.tsc;
   }
   const burnDownJson: ReportJson["queue_burn_down"] = [...queueAggs.values()]
     .sort((p, q) => compareStrings(p.queue, q.queue))
@@ -526,34 +713,41 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
       queue: agg.queue,
       iterations: [...agg.iterations.entries()]
         .sort((p, q) => p[0] - q[0])
-        .map(([iteration, perFile]) => ({
+        .map(([iteration, it]) => ({
           iteration,
-          error_count: perFile.reduce((sum, e) => sum + e.error_count, 0),
-          ...(agg.vitestByIteration.has(iteration)
-            ? { vitest: agg.vitestByIteration.get(iteration)! }
-            : {}),
-          per_file: [...perFile].sort((p, q) => compareStrings(p.file, q.file)),
+          error_count: iterationCount(it),
+          ...(it.vitest !== undefined ? { vitest: it.vitest } : {}),
+          ...(it.tsc !== undefined ? { tsc: it.tsc } : {}),
+          per_file: [...it.perFile].sort((p, q) => compareStrings(p.file, q.file)),
         })),
     }));
 
   // ---- US-010 verification: what the run was verified BY --------------------
   const tscAgg = queueAggs.get("tsc");
   let tscFinalErrorCount: number | null = null;
+  let tscFinalAccounting: TscRunAccounting | null = null;
   if (tscAgg !== undefined && tscAgg.iterations.size > 0) {
     const last = Math.max(...tscAgg.iterations.keys());
-    tscFinalErrorCount = (tscAgg.iterations.get(last) ?? []).reduce(
-      (sum, e) => sum + e.error_count,
-      0,
-    );
+    const lastIteration = tscAgg.iterations.get(last);
+    if (lastIteration !== undefined) {
+      tscFinalAccounting = lastIteration.tsc ?? null;
+      // A tsc run that did not RUN has no trustworthy count: never 0, never PASS.
+      tscFinalErrorCount =
+        tscFinalAccounting?.state === "not-run" ? null : iterationCount(lastIteration);
+    }
   }
-  const vitAgg = queueAggs.get("vitest");
-  const vitestVerification =
-    vitAgg !== undefined && vitAgg.vitestByIteration.size > 0
-      ? (vitAgg.vitestByIteration.get(Math.max(...vitAgg.vitestByIteration.keys())) ?? null)
-      : null;
+  const vitestIterations = [...(queueAggs.get("vitest")?.iterations.entries() ?? [])].filter(
+    ([, it]) => it.vitest !== undefined,
+  );
+  const lastVitest = vitestIterations.sort((p, q) => p[0] - q[0]).at(-1);
+  const vitestVerification = lastVitest?.[1].vitest ?? null;
   const verification: ReportJson["summary"]["verification"] = {
     tsc_final_error_count: tscFinalErrorCount,
-    tsc_verified: tscFinalErrorCount === null ? null : tscFinalErrorCount === 0,
+    tsc_verified:
+      tscFinalErrorCount === null
+        ? null
+        : tscFinalErrorCount === 0 && (tscFinalAccounting?.unlocated ?? 0) === 0,
+    ...(tscFinalAccounting !== null ? { tsc: tscFinalAccounting } : {}),
     vitest: vitestVerification,
   };
 
@@ -561,8 +755,9 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     generated_at: input.generatedAt ?? null,
     provenance_ok: provenanceFailures.length === 0,
     provenance_failures: provenanceFailures,
+    no_evidence: noEvidence,
     summary: {
-      files: [...files].sort(compareStrings),
+      files: [...files].filter((f) => f !== PREP_SPEC_FILE).sort(compareStrings),
       envelope_count: envelopes.length,
       start_marker_count: startMarkerCount,
       interrupted_envelope_count: interruptedRealCount,
@@ -573,7 +768,8 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
         t.reason.startsWith("attempt-exhausted"),
       ).length,
       tokens_model_roles: modelTokens,
-      wall_clock_ms_total: wallClockTotal,
+      step_time_ms_total: stepTimeTotal,
+      wall_clock_span_ms: spanStart !== null && spanEnd !== null && spanEnd >= spanStart ? spanEnd - spanStart : null,
       verification,
     },
     file_rounds: fileRounds,
@@ -581,10 +777,14 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
     usage_by_role: usageByRole,
     cost_total_usd: costTotal,
     cost_estimated: costEstimated,
+    costed_calls: costedCalls,
+    uncosted_calls: uncostedCalls,
+    jev_usage: summarizeJevUsage(input.jevUsage ?? []),
     fixer_retries: fixerRetries,
     queue_burn_down: burnDownJson,
     kill_events: input.killEvents ?? null,
-    dispatch_anchor: cross === null ? null : summarizeAnchor(cross.anchor),
+    kill_event_diagnostics: input.killEventDiagnostics ?? null,
+    dispatch_anchor: cross === null ? null : cross.anchor,
   };
 }
 
@@ -598,18 +798,24 @@ function pFmt(p: number): string {
   return p.toFixed(2);
 }
 
-/** Cost cell: `~$0.0000` marks a plan-authed lane (tokens, no per-call cost). */
-function costCell(costUsd: number | null): string {
+/**
+ * Cost cell: `~` marks an estimate — the role has at least one call whose
+ * tokens carry no provider-reported cost (plan-authed lane or bare total), so
+ * the USD figure is a lower bound; `~$0` is the all-uncosted case.
+ */
+function costCell(costUsd: number | null, estimated: boolean): string {
   if (costUsd === null) return "n/a";
-  return costUsd > 0 ? `$${costUsd.toFixed(4)}` : "~$0";
+  return costUsd > 0 ? `${estimated ? "~" : ""}$${costUsd.toFixed(4)}` : "~$0";
 }
 
-function killEventLine(e: KillEvent): string {
+function killEventLine(e: ReportKillEvent): string {
   if (e.kind === "kill-intent") {
     return `- kill-intent run=${e.run_id} utc=${e.utc} monotonic_ms=${e.monotonic_ms} target_pids=${e.target_pids.join(",")}`;
   }
   const note = e.note === null ? "" : ` note=${mdCell(e.note)}`;
-  return `- kill-completed run=${e.run_id} utc=${e.utc} monotonic_ms=${e.monotonic_ms} resumed=${e.resumed}${note}`;
+  const killed = e.killed_pids === undefined ? "" : ` killed_pids=${e.killed_pids.join(",")}`;
+  const noop = isFiredKill(e) ? "" : " NO-OP (nothing was killed; not a kill-and-resume)";
+  return `- kill-completed run=${e.run_id} utc=${e.utc} monotonic_ms=${e.monotonic_ms} resumed=${e.resumed}${killed}${noop}${note}`;
 }
 
 function renderMarkdown(report: ReportJson): string {
@@ -623,9 +829,11 @@ function renderMarkdown(report: ReportJson): string {
 
   lines.push("## Provenance");
   lines.push(
-    report.provenance_ok
-      ? "- status: OK"
-      : `- status: FAILED (${report.provenance_failures.length} failure(s))`,
+    report.no_evidence
+      ? "- status: NO EVIDENCE (the envelope stream is empty — nothing was verified)"
+      : report.provenance_ok
+        ? "- status: OK"
+        : `- status: FAILED (${report.provenance_failures.length} failure(s))`,
   );
   for (const failure of report.provenance_failures) lines.push(`- ${mdCell(failure)}`);
   lines.push("");
@@ -653,7 +861,19 @@ function renderMarkdown(report: ReportJson): string {
       ? "- tokens (model-calling roles): n/a"
       : `- tokens (model-calling roles): ${tokens}`,
   );
-  lines.push(`- total wall clock: ${report.summary.wall_clock_ms_total} ms`);
+  lines.push(
+    report.jev_usage === null
+      ? "- judgment (Jev) tokens: none recorded (naive judgment path or no live Jev spend)"
+      : `- judgment (Jev) tokens: ${report.jev_usage.total_tokens} (separate from model-calling roles; see Judgment (Jev) section)`,
+  );
+  lines.push(
+    `- step time: ${report.summary.step_time_ms_total} ms (sum of per-step durations; parallel steps overlap, so this can exceed elapsed time)`,
+  );
+  lines.push(
+    report.summary.wall_clock_span_ms === null
+      ? "- elapsed wall clock: n/a"
+      : `- elapsed wall clock: ${report.summary.wall_clock_span_ms} ms (first envelope start to last envelope end)`,
+  );
   lines.push("");
 
   lines.push("## Findings and agreement");
@@ -683,20 +903,34 @@ function renderMarkdown(report: ReportJson): string {
     for (const t of fr.tombstones) {
       lines.push(`- tombstone: ${mdCell(t.reviewer)} discarded at attempt ${t.attempt} — ${mdCell(t.reason)}`);
     }
+    // The gate's own score first: it is what decided which findings reached the
+    // fixer. The verdict record's check is the deterministic one stamped at
+    // review time and can disagree with a live Jev gate (C14).
+    for (const g of fr.citation_gate) {
+      const via = g.checker === "naive-fallback" ? `naive-fallback: ${mdCell(g.fallbackReason ?? "no reason recorded")}` : g.checker;
+      const scores = g.scores
+        .map((s) => `${mdCell(s.finding_id)}=${pFmt(s.p_cited)} ${s.outcome === "kept" ? "kept" : s.outcome === "dropped-citation" ? "dropped (citation)" : "dropped (disposition)"}`)
+        .join(", ");
+      lines.push(`- citation gate (${via}) ${mdCell(g.reviewer)}: ${scores === "" ? "no findings scored" : scores}`);
+    }
     if (fr.citation_checks.length > 0) {
       const checks = fr.citation_checks
         .map((c) => `${c.finding_id}=${pFmt(c.p_cited)}`)
         .join(", ");
-      lines.push(`- citation checks: ${checks}`);
+      lines.push(
+        fr.citation_gate.length > 0
+          ? `- review-time citation checks (deterministic, before the gate): ${checks}`
+          : `- citation checks (deterministic, at review time; no gate record): ${checks}`,
+      );
     }
   }
   lines.push("");
 
-  lines.push("## Tokens and wall clock per file and role");
+  lines.push("## Tokens and step time per file and role");
   if (report.tokens_by_file_role.length === 0) {
     lines.push("_no envelope events in the stream_");
   } else {
-    lines.push("| file | role | steps | tokens | wall clock ms |");
+    lines.push("| file | role | steps | tokens | step time ms |");
     lines.push("| --- | --- | --- | --- | --- |");
     for (const agg of report.tokens_by_file_role) {
       const tokensCell = agg.tokens === null ? "n/a" : String(agg.tokens);
@@ -715,7 +949,7 @@ function renderMarkdown(report: ReportJson): string {
     for (const u of report.usage_by_role) {
       const cell = (v: number | null): string => (v === null ? "n/a" : String(v));
       lines.push(
-        `| ${u.role} | ${u.calls} | ${cell(u.input_tokens)} | ${cell(u.cache_read_tokens)} | ${cell(u.cache_write_tokens)} | ${cell(u.reasoning_tokens)} | ${cell(u.output_tokens)} | ${costCell(u.cost_usd)} |`,
+        `| ${u.role} | ${u.calls} | ${cell(u.input_tokens)} | ${cell(u.cache_read_tokens)} | ${cell(u.cache_write_tokens)} | ${cell(u.reasoning_tokens)} | ${cell(u.output_tokens)} | ${costCell(u.cost_usd, u.uncosted_calls > 0)} |`,
       );
     }
     const total =
@@ -726,8 +960,27 @@ function renderMarkdown(report: ReportJson): string {
     lines.push(`- total cost: ${total}`);
     if (report.cost_estimated) {
       lines.push(
-        "- `~` = estimated: tokens flowed on a lane whose provider reports no per-call cost (plan-authed); the USD total is not exact.",
+        `- \`~\` = estimated: ${report.uncosted_calls} of ${report.costed_calls + report.uncosted_calls} model call(s) carried tokens with no provider-reported cost (plan-authed lane or bare token total); the USD total is a lower bound, not exact.`,
       );
+    }
+  }
+  lines.push("");
+
+  lines.push("## Judgment (Jev) tokens and cost");
+  if (report.jev_usage === null) {
+    lines.push("_none recorded (naive judgment path or no live Jev spend)_");
+  } else {
+    lines.push(
+      `- total: ${report.jev_usage.total_tokens} tokens over ${report.jev_usage.calls} call(s) — NOT included in the model-calling token total or the USD total above`,
+    );
+    lines.push(
+      "- cost: not reported (the pp-jev-usage record carries tokens only); no USD figure is claimed. Only committed step attempts are recorded, so retried attempts under-count.",
+    );
+    lines.push("");
+    lines.push("| step | calls | tokens |");
+    lines.push("| --- | --- | --- |");
+    for (const s of report.jev_usage.by_step) {
+      lines.push(`| ${mdCell(s.step)} | ${s.calls} | ${s.tokens} |`);
     }
   }
   lines.push("");
@@ -762,6 +1015,14 @@ function renderMarkdown(report: ReportJson): string {
           it.vitest.state === "ran"
             ? `${it.error_count} failed (${it.vitest.passed ?? "?"} passed / ${it.vitest.total ?? "?"} total)`
             : `NOT RUN — ${mdCell(it.vitest.reason ?? "reason unrecorded")}`;
+      } else if (q.queue === "tsc" && it.tsc !== undefined) {
+        // Contract A: a not-run tsc iteration NEVER presents as a bare count.
+        total =
+          it.tsc.state === "ran"
+            ? it.tsc.unlocated > 0
+              ? `${it.error_count} (+${it.tsc.unlocated} unlocated)`
+              : String(it.error_count)
+            : `NOT RUN — ${mdCell(it.tsc.reason ?? "reason unrecorded")}`;
       } else {
         total = String(it.error_count);
       }
@@ -773,13 +1034,19 @@ function renderMarkdown(report: ReportJson): string {
   // US-010: typecheck-verified vs test-verified are DIFFERENT evidence claims.
   lines.push("## Verification");
   const verification = report.summary.verification;
-  if (verification.tsc_verified === null) {
+  if (verification.tsc?.state === "not-run") {
+    lines.push(
+      `- typecheck (tsc): NOT RUN (${mdCell(verification.tsc.reason ?? "reason unrecorded")}) — typecheck status unknown, never a pass`,
+    );
+  } else if (verification.tsc_verified === null) {
     lines.push("- typecheck (tsc): no queue samples — typecheck status unknown");
   } else if (verification.tsc_verified) {
     lines.push("- typecheck (tsc): PASS at final iteration (0 remaining errors)");
   } else {
+    const unlocated = verification.tsc?.unlocated ?? 0;
+    const unlocatedNote = unlocated > 0 ? ` (+${unlocated} unlocated diagnostic(s))` : "";
     lines.push(
-      `- typecheck (tsc): ${verification.tsc_final_error_count} error(s) remain at final iteration — NOT typecheck-clean`,
+      `- typecheck (tsc): ${verification.tsc_final_error_count} error(s)${unlocatedNote} remain at final iteration — NOT typecheck-clean`,
     );
   }
   if (verification.vitest === null) {
@@ -802,6 +1069,24 @@ function renderMarkdown(report: ReportJson): string {
     lines.push("_none recorded_");
   } else {
     for (const event of report.kill_events.events) lines.push(killEventLine(event));
+    const completions = report.kill_events.events.filter((e) => e.kind === "kill-completed");
+    if (completions.length > 0) {
+      const fired = completions.filter(isFiredKill).length;
+      lines.push(`- kills fired: ${fired}; no-op completions: ${completions.length - fired}`);
+    }
+  }
+  const diag = report.kill_event_diagnostics;
+  if (diag !== null) {
+    if (diag.malformed_lines > 0) {
+      lines.push(
+        `- sidecar: ${diag.malformed_lines} malformed line(s) NOT counted as kill events (${diag.malformed_examples.map(mdCell).join("; ")})`,
+      );
+    }
+    if (diag.excluded_events > 0) {
+      lines.push(
+        `- sidecar: ${diag.excluded_events} event(s) excluded — not anchored to this flow's run ids (another run's kill, or a legacy record without flow_run_id; pass --all-runs to include them)`,
+      );
+    }
   }
   lines.push("");
   lines.push(`- interrupted envelopes: ${report.summary.interrupted_envelope_count}`);
@@ -829,7 +1114,13 @@ export function renderReport(input: MetricsRenderInput): RenderedReport {
   const cross =
     input.history === undefined || input.history === null
       ? null
-      : runProvenanceCrossCheck({ envelopes: input.envelopes, history: input.history });
+      : runProvenanceCrossCheck({
+          envelopes: input.envelopes,
+          history: input.history,
+          ...(input.legacyFlowKeyedEnvelopes === undefined
+            ? {}
+            : { legacyFlowKeyedEnvelopes: input.legacyFlowKeyedEnvelopes }),
+        });
   const json = buildReportJson(input, cross);
   return { markdown: renderMarkdown(json), json };
 }

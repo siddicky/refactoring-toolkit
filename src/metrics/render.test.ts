@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { renderReport, runProvenanceCrossCheck, validateProvenance } from "./render.js";
-import { type EnvelopeEvent, type KillEventsFile, type QueueBurnDownEvent, type VerdictRecord } from "./types.js";
+import {
+  type EnvelopeEvent,
+  identityKeyOf,
+  type KillEventsFile,
+  type QueueBurnDownEvent,
+  type VerdictRecord,
+} from "./types.js";
 import runARaw from "./fixtures/event-stream-run-a.json" with { type: "json" };
 import runBRaw from "./fixtures/event-stream-run-b.json" with { type: "json" };
 import killARaw from "./fixtures/kill-events-run-a.json" with { type: "json" };
@@ -91,7 +97,14 @@ describe("renderReport against recorded fixture events (run-a + dex history)", (
     expect(rendered.json.summary.interrupted_envelope_count).toBe(1);
     expect(rendered.json.summary.verdict_record_count).toBe(8);
     expect(rendered.json.summary.tokens_model_roles).toBe(15640);
-    expect(rendered.json.summary.wall_clock_ms_total).toBe(1049996);
+    // Sum of step durations (overlapping work double counts) is NOT elapsed time.
+    expect(rendered.json.summary.step_time_ms_total).toBe(1049996);
+    const starts = runA.envelopes.map((e) => Date.parse(e.started_at));
+    const ends = runA.envelopes.flatMap((e) => (e.ended_at === null ? [] : [Date.parse(e.ended_at)]));
+    expect(rendered.json.summary.wall_clock_span_ms).toBe(Math.max(...ends) - Math.min(...starts));
+    expect(rendered.markdown).toContain("- step time: 1049996 ms");
+    expect(rendered.markdown).toContain(`- elapsed wall clock: ${rendered.json.summary.wall_clock_span_ms} ms`);
+    expect(rendered.markdown).not.toContain("total wall clock");
     expect(rendered.json.summary.files).toEqual([
       "src/Auth/LdapAuth.php",
       "src/Util/Csv.php",
@@ -195,7 +208,7 @@ describe("renderReport against recorded fixture events (run-a + dex history)", (
     expect(rendered.markdown).toContain("### src/Auth/LdapAuth.php — round 1 (agreement: disagree)");
     expect(rendered.markdown).toContain("(agreement: agree-clean)");
     expect(rendered.markdown).toContain("(agreement: unreviewed)");
-    expect(rendered.markdown).toContain("- citation checks: F1=1.00, F2=1.00");
+    expect(rendered.markdown).toContain("- citation checks (deterministic, at review time; no gate record): F1=1.00, F2=1.00");
     expect(rendered.markdown).toContain("F5=0.40");
     expect(rendered.markdown).toContain("tokens (model-calling roles): 15640");
     expect(rendered.markdown).toContain("- envelopes: 54 (start markers: 15, interrupted: 1)");
@@ -399,7 +412,14 @@ describe("renderReport usage_by_role (cost honesty)", () => {
     const agent = rendered.json.usage_by_role.find((u) => u.role === "agent");
     expect(agent?.input_tokens).toBeNull(); // bare-total envelope: no split
     expect(agent?.calls).toBe(1);
-    expect(rendered.json.cost_estimated).toBe(false);
+    // Mixed lane: one review call reported cost_usd 0 and one agent call is a
+    // bare 123-token total, so the USD total understates and MUST carry `~`.
+    expect(rendered.json.cost_estimated).toBe(true);
+    expect(rendered.json.costed_calls).toBe(1);
+    expect(rendered.json.uncosted_calls).toBe(2);
+    expect(review?.uncosted_calls).toBe(1);
+    expect(agent?.uncosted_calls).toBe(1);
+    expect(rendered.markdown).toContain("- total cost: ~$0.0300");
     // token totals normalize the object form across ALL split fields.
     expect(rendered.json.summary.tokens_model_roles).toBe(4000 + 100 + 32 + 3500 + 8 + 6000 + 200 + 5000 + 123);
     expect(rendered.markdown).toContain("## Cost per role (provider-reported split)");
@@ -416,5 +436,466 @@ describe("renderReport usage_by_role (cost honesty)", () => {
     expect(rendered.json.cost_total_usd).toBe(0);
     expect(rendered.markdown).toContain("`~` = estimated");
     expect(rendered.markdown).toContain("~$0");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C41: the flow's aggregate (file null) row is authoritative for the iteration
+// total; per-file rows are breakdown only (the flow caps them at 8 files).
+// ---------------------------------------------------------------------------
+
+describe("renderReport queue burn-down totals (aggregate row authoritative)", () => {
+  const row = (
+    queue: QueueBurnDownEvent["queue"],
+    file: string | null,
+    iteration: number,
+    error_count: number,
+  ): QueueBurnDownEvent => ({
+    queue,
+    file,
+    iteration,
+    error_count,
+    recorded_at: `2026-09-26T10:0${iteration}:00Z`,
+  });
+  const render = (burnDown: QueueBurnDownEvent[]) =>
+    renderReport({ envelopes: [], verdicts: [], burnDown });
+
+  test("total row wins over the capped per-file rows (12 errors, 8 files shown)", () => {
+    // Shape the flow writes: tsc-<iter> total + byFile.slice(0, 8) rows.
+    const rows: QueueBurnDownEvent[] = [
+      row("tsc", null, 1, 12),
+      ...["a", "b", "c", "d", "e", "f", "g", "h"].map((f) => row("tsc", `src/${f}.php`, 1, 1)),
+    ];
+    const rendered = render(rows);
+    const tsc = rendered.json.queue_burn_down[0];
+    expect(tsc?.queue).toBe("tsc");
+    expect(tsc?.iterations[0]?.error_count).toBe(12);
+    expect(tsc?.iterations[0]?.per_file.length).toBe(8);
+    expect(rendered.json.summary.verification.tsc_final_error_count).toBe(12);
+    expect(rendered.json.summary.verification.tsc_verified).toBe(false);
+  });
+
+  test("aggregate-only rows (vitest style) give empty per_file and never leak a (total) pseudo-file", () => {
+    const rendered = render([row("tsc", null, 3, 0), row("vitest", null, 3, 2)]);
+    for (const q of rendered.json.queue_burn_down) {
+      for (const it of q.iterations) expect(it.per_file).toEqual([]);
+    }
+    expect(rendered.markdown).not.toContain("(total)");
+    expect(rendered.json.summary.verification.tsc_final_error_count).toBe(0);
+    expect(rendered.json.summary.verification.tsc_verified).toBe(true);
+  });
+
+  test("legacy (total) pseudo-file rows are treated as the total, not a file", () => {
+    const rendered = render([row("tsc", "(total)", 1, 5), row("tsc", "src/a.php", 1, 3)]);
+    const it = rendered.json.queue_burn_down[0]?.iterations[0];
+    expect(it?.error_count).toBe(5);
+    expect(it?.per_file).toEqual([{ file: "src/a.php", error_count: 3 }]);
+  });
+
+  test("without an aggregate row the per-file rows are summed (recorded fixtures)", () => {
+    const rendered = render([row("tsc", "src/a.php", 1, 3), row("tsc", "src/b.php", 1, 4)]);
+    expect(rendered.json.queue_burn_down[0]?.iterations[0]?.error_count).toBe(7);
+  });
+
+  test("per-iteration totals decrease monotonically without zig-zag (one y per iteration)", () => {
+    const rendered = render([
+      row("tsc", null, 1, 12),
+      row("tsc", "src/a.php", 1, 7),
+      row("tsc", "src/b.php", 1, 5),
+      row("tsc", null, 2, 4),
+      row("tsc", "src/a.php", 2, 3),
+      row("tsc", "src/b.php", 2, 1),
+    ]);
+    expect(rendered.json.queue_burn_down[0]?.iterations.map((i) => i.error_count)).toEqual([12, 4]);
+    expect(rendered.json.summary.verification.tsc_final_error_count).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C06 / Contract A: tsc run accounting. A not-run tsc is never PASS / 0 errors.
+// ---------------------------------------------------------------------------
+
+describe("renderReport tsc accounting (Contract A)", () => {
+  const tscRow = (
+    iteration: number,
+    error_count: number,
+    tsc?: QueueBurnDownEvent["tsc"],
+  ): QueueBurnDownEvent => ({
+    queue: "tsc",
+    file: null,
+    iteration,
+    error_count,
+    recorded_at: `2026-09-26T10:0${iteration}:00Z`,
+    ...(tsc !== undefined ? { tsc } : {}),
+  });
+  const render = (burnDown: QueueBurnDownEvent[]) =>
+    renderReport({ envelopes: [], verdicts: [], burnDown });
+
+  test("not-run tsc (TS18003, 0 parsed errors) renders NOT RUN with its reason, never PASS", () => {
+    const reason = "tsc exited 2 with no located diagnostics: error TS18003: No inputs were found";
+    const rendered = render([tscRow(1, 0, { state: "not-run", reason, exit_code: 2, unlocated: 1 })]);
+    const v = rendered.json.summary.verification;
+    expect(v.tsc_verified).toBeNull();
+    expect(v.tsc_final_error_count).toBeNull();
+    expect(v.tsc?.state).toBe("not-run");
+    expect(rendered.markdown).toContain(`typecheck (tsc): NOT RUN (${reason})`);
+    expect(rendered.markdown).not.toContain("typecheck (tsc): PASS");
+    expect(rendered.markdown).toContain("| 1 | NOT RUN — tsc exited 2");
+    expect(rendered.json.queue_burn_down[0]?.iterations[0]?.tsc?.state).toBe("not-run");
+  });
+
+  test("timeout and ENOENT reasons pass through verbatim", () => {
+    for (const reason of ["tsc timed out after 180s", "tsc binary not found (ENOENT)"]) {
+      const rendered = render([tscRow(1, 0, { state: "not-run", reason, exit_code: null, unlocated: 0 })]);
+      expect(rendered.markdown).toContain(`typecheck (tsc): NOT RUN (${reason})`);
+    }
+  });
+
+  test("a ran tsc with 0 errors still PASSes; unlocated diagnostics block the PASS", () => {
+    const pass = render([tscRow(1, 0, { state: "ran", reason: null, exit_code: 0, unlocated: 0 })]);
+    expect(pass.json.summary.verification.tsc_verified).toBe(true);
+    expect(pass.markdown).toContain("typecheck (tsc): PASS at final iteration");
+    const dirty = render([tscRow(1, 0, { state: "ran", reason: null, exit_code: 2, unlocated: 2 })]);
+    expect(dirty.json.summary.verification.tsc_verified).toBe(false);
+    expect(dirty.markdown).toContain("(+2 unlocated diagnostic(s))");
+    expect(dirty.markdown).not.toContain("typecheck (tsc): PASS");
+  });
+
+  test("only the FINAL iteration decides the verification; earlier not-run rows stay visible", () => {
+    const rendered = render([
+      tscRow(1, 0, { state: "not-run", reason: "tsc timed out after 180s", exit_code: null, unlocated: 0 }),
+      tscRow(2, 3, { state: "ran", reason: null, exit_code: 2, unlocated: 0 }),
+    ]);
+    expect(rendered.json.summary.verification.tsc_final_error_count).toBe(3);
+    expect(rendered.markdown).toContain("| 1 | NOT RUN — tsc timed out after 180s");
+  });
+
+  test("legacy rows without tsc accounting render exactly as before", () => {
+    const rendered = render([tscRow(1, 0)]);
+    expect(rendered.json.summary.verification.tsc).toBeUndefined();
+    expect(rendered.json.summary.verification.tsc_verified).toBe(true);
+    expect(rendered.markdown).toContain("typecheck (tsc): PASS at final iteration (0 remaining errors)");
+    expect(rendered.markdown).toContain("| 1 | 0 |");
+  });
+});
+
+describe("renderReport cost_estimated (mixed lanes, C40)", () => {
+  const review = (tokens: EnvelopeEvent["tokens"], identity = "src__a.php#1"): EnvelopeEvent => ({
+    stepId: "pp-review-a",
+    role: "review",
+    file: null,
+    round: 1,
+    attempt: 1,
+    started_at: "2026-09-26T10:00:00Z",
+    ended_at: "2026-09-26T10:01:00Z",
+    outcome: "completed",
+    tokens,
+    wall_clock_ms: 1000,
+    identity,
+  });
+  const render = (envelopes: EnvelopeEvent[]) =>
+    renderReport({ envelopes, verdicts: [], burnDown: [] });
+
+  test("1M uncosted tokens next to a $0.01 call is estimated, not an exact-looking $0.0100", () => {
+    const rendered = render([
+      review({ input_tokens: 1_000_000, output_tokens: 0, cost_usd: 0 }),
+      review({ input_tokens: 10, output_tokens: 0, cost_usd: 0.01 }, "src__b.php#1"),
+    ]);
+    expect(rendered.json.cost_total_usd).toBeCloseTo(0.01);
+    expect(rendered.json.cost_estimated).toBe(true);
+    expect(rendered.json.costed_calls).toBe(1);
+    expect(rendered.json.uncosted_calls).toBe(1);
+    expect(rendered.markdown).toContain("- total cost: ~$0.0100");
+    expect(rendered.markdown).toContain("| review | 2 |");
+    expect(rendered.markdown).toMatch(/\| ~\$0\.0100 \|/);
+    expect(rendered.markdown).toContain("1 of 2 model call(s)");
+  });
+
+  test("a bare-number-token call next to a fully costed call marks the total estimated", () => {
+    const rendered = render([review({ input_tokens: 10, output_tokens: 5, cost_usd: 0.02 }), review(500, "src__b.php#1")]);
+    expect(rendered.json.cost_estimated).toBe(true);
+    expect(rendered.json.uncosted_calls).toBe(1);
+  });
+
+  test("every call costed stays exact (no ~)", () => {
+    const rendered = render([
+      review({ input_tokens: 10, output_tokens: 5, cost_usd: 0.02 }),
+      review({ input_tokens: 20, output_tokens: 5, cost_usd: 0.03 }, "src__b.php#1"),
+    ]);
+    expect(rendered.json.cost_estimated).toBe(false);
+    expect(rendered.json.uncosted_calls).toBe(0);
+    expect(rendered.markdown).toContain("- total cost: $0.0500");
+    expect(rendered.markdown).not.toContain("~");
+  });
+
+  test("bare totals only: no USD total at all (n/a), not a fake exact zero", () => {
+    const rendered = render([review(500)]);
+    expect(rendered.json.cost_total_usd).toBeNull();
+    expect(rendered.json.cost_estimated).toBe(false);
+    expect(rendered.markdown).toContain("- total cost: n/a");
+  });
+
+  test("B22: a skipped model-role step with zero tokens (a queue-fix with nothing to fix) is not a call, so the exact cost stays exact", () => {
+    const skippedFix: EnvelopeEvent = {
+      ...review(0, "src__a.php#1"),
+      stepId: "pp-queue-fix",
+      role: "agent",
+      outcome: "skipped",
+    };
+    const rendered = render([review({ input_tokens: 10, output_tokens: 5, cost_usd: 0.5 }), skippedFix]);
+    expect(rendered.json.costed_calls).toBe(1);
+    expect(rendered.json.uncosted_calls).toBe(0);
+    expect(rendered.json.cost_estimated).toBe(false);
+    expect(rendered.json.usage_by_role.map((u) => [u.role, u.calls])).toEqual([["review", 1]]);
+    expect(rendered.markdown).toContain("- total cost: $0.5000");
+    expect(rendered.markdown).not.toContain("1 of 2 model call(s)");
+  });
+
+  test("B22: a skipped step that DID spend tokens still counts (only the no-tokens case is exempt)", () => {
+    const skippedButSpent: EnvelopeEvent = { ...review(500, "src__a.php#1"), outcome: "skipped" };
+    const rendered = render([skippedButSpent]);
+    expect(rendered.json.usage_by_role[0]?.calls).toBe(1);
+    expect(rendered.json.uncosted_calls).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C38: live Jev spend (pp-jev-usage) is reported separately, never folded into
+// the model-calling token/cost totals and never silently dropped.
+// ---------------------------------------------------------------------------
+
+describe("renderReport judgment (Jev) usage", () => {
+  const reviewEnv: EnvelopeEvent = {
+    stepId: "pp-review-a",
+    role: "review",
+    file: null,
+    round: 1,
+    attempt: 1,
+    started_at: "2026-09-26T10:00:00Z",
+    ended_at: "2026-09-26T10:01:00Z",
+    outcome: "completed",
+    tokens: { input_tokens: 100, output_tokens: 20, cost_usd: 0.5 },
+    wall_clock_ms: 1000,
+    identity: "src__a.php#1",
+  };
+  const jevUsage = [
+    { stepId: "pp-verdict-check:src/a.php#1", tokens: 300, atUtc: "2026-09-26T10:02:00Z" },
+    { stepId: "pp-verdict-check:src/b.php#1", tokens: 200, atUtc: "2026-09-26T10:03:00Z" },
+    { stepId: "pp-prioritize:src/a.php#1", tokens: 50, atUtc: "2026-09-26T10:04:00Z" },
+    { stepId: "pp-queue-verify:vitest-triage", tokens: 1000, atUtc: "2026-09-26T10:05:00Z" },
+  ];
+
+  test("Jev tokens are totalled per step in their own line and stay out of the model-role totals", () => {
+    const withJev = renderReport({ envelopes: [reviewEnv], verdicts: [], burnDown: [], jevUsage });
+    const without = renderReport({ envelopes: [reviewEnv], verdicts: [], burnDown: [] });
+    expect(withJev.json.jev_usage).toEqual({
+      calls: 4,
+      total_tokens: 1550,
+      cost_usd: null,
+      by_step: [
+        { step: "pp-prioritize", calls: 1, tokens: 50 },
+        { step: "pp-queue-verify:vitest-triage", calls: 1, tokens: 1000 },
+        { step: "pp-verdict-check", calls: 2, tokens: 500 },
+      ],
+    });
+    // The AC2 provenance rule is untouched: model-role totals and cost are identical.
+    expect(withJev.json.summary.tokens_model_roles).toBe(without.json.summary.tokens_model_roles);
+    expect(withJev.json.cost_total_usd).toBe(without.json.cost_total_usd);
+    expect(withJev.json.provenance_ok).toBe(without.json.provenance_ok);
+    expect(withJev.markdown).toContain("## Judgment (Jev) tokens and cost");
+    expect(withJev.markdown).toContain("- judgment (Jev) tokens: 1550");
+    expect(withJev.markdown).toContain("- total: 1550 tokens over 4 call(s)");
+    expect(withJev.markdown).toContain("| pp-verdict-check | 2 | 500 |");
+    expect(withJev.markdown).toContain("cost: not reported");
+  });
+
+  test("no usage entries reads as none recorded, not as zero tokens", () => {
+    const rendered = renderReport({ envelopes: [reviewEnv], verdicts: [], burnDown: [] });
+    expect(rendered.json.jev_usage).toBeNull();
+    expect(rendered.markdown).toContain("- judgment (Jev) tokens: none recorded");
+    expect(rendered.markdown).toContain("_none recorded (naive judgment path or no live Jev spend)_");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C46: a path containing "__" must not split one file-round into a phantom
+// "unreviewed" one (the sanitized-identity inverse is lossy).
+// ---------------------------------------------------------------------------
+
+describe("renderReport prefers the authoritative verdict file over the lossy identity inverse", () => {
+  const FILE = "src/__tests__/Foo.php";
+  const identity = identityKeyOf(FILE, 1);
+  const reviewEnv = (stepId: string): EnvelopeEvent => ({
+    stepId,
+    role: "review",
+    file: null,
+    round: null,
+    attempt: 1,
+    started_at: "2026-09-26T10:00:00Z",
+    ended_at: "2026-09-26T10:01:00Z",
+    outcome: "completed",
+    tokens: 10,
+    wall_clock_ms: 1000,
+    identity,
+  });
+  const verdict = (reviewer: string): VerdictRecord => ({
+    file: FILE,
+    reviewer,
+    round: 1,
+    diff_id: "d1",
+    findings: [],
+    citation_check: [],
+  });
+
+  test("two reviewers on src/__tests__/Foo.php yield ONE agree-clean file-round, not a phantom unreviewed twin", () => {
+    const rendered = renderReport({
+      envelopes: [reviewEnv("pp-review-a"), reviewEnv("pp-review-b")],
+      verdicts: [verdict("reviewer-A"), verdict("reviewer-B")],
+      burnDown: [],
+    });
+    expect(rendered.json.file_rounds.map((fr) => `${fr.file}#${fr.round}:${fr.agreement.outcome}`)).toEqual([
+      `${FILE}#1:agree-clean`,
+    ]);
+    expect(rendered.json.summary.files).toEqual([FILE]);
+    expect(rendered.json.tokens_by_file_role.map((r) => r.file)).toEqual([FILE]);
+    expect(rendered.markdown).not.toContain("src//tests//Foo.php");
+  });
+
+  test("a tombstone whose file was recovered lossily from its attribute key joins the authoritative file-round", () => {
+    const rendered = renderReport({
+      envelopes: [],
+      verdicts: [verdict("reviewer-A")],
+      tombstones: [
+        // What collectTombstones derives from `pp-verdict/src____tests____Foo.php#1#reviewer-B`.
+        { file: "src//tests//Foo.php", round: 1, reviewer: "reviewer-B", discarded: true, reason: "x", attempt: 2, tokens: null },
+      ],
+      burnDown: [],
+    });
+    expect(rendered.json.file_rounds.length).toBe(1);
+    expect(rendered.json.file_rounds[0]?.file).toBe(FILE);
+    expect(rendered.json.file_rounds[0]?.tombstones.length).toBe(1);
+  });
+
+  test("with no verdict record to consult the lossy inverse is the documented fallback", () => {
+    const rendered = renderReport({ envelopes: [reviewEnv("pp-review-a")], verdicts: [], burnDown: [] });
+    expect(rendered.json.file_rounds.map((fr) => fr.file)).toEqual(["src//tests//Foo.php"]);
+  });
+
+  test("two distinct authoritative files that sanitize identically are left alone (ambiguous)", () => {
+    const a = { ...verdict("reviewer-A"), file: "a__b/c.php" };
+    const b = { ...verdict("reviewer-A"), file: "a/b__c.php" };
+    const rendered = renderReport({ envelopes: [], verdicts: [a, b], burnDown: [] });
+    expect(rendered.json.summary.files).toEqual(["a/b__c.php", "a__b/c.php"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C47: metrics measure what their labels say.
+// ---------------------------------------------------------------------------
+
+describe("renderReport metric labels (C47)", () => {
+  const step = (over: Partial<EnvelopeEvent> & { stepId: string }): EnvelopeEvent => ({
+    role: "agent",
+    file: null,
+    round: null,
+    attempt: 1,
+    started_at: "2026-09-26T10:00:00.000Z",
+    ended_at: "2026-09-26T10:10:00.000Z",
+    outcome: "completed",
+    tokens: 10,
+    wall_clock_ms: 600_000,
+    identity: "src__a.php#1",
+    ...over,
+  });
+  const render = (envelopes: EnvelopeEvent[], verdicts: VerdictRecord[] = []) =>
+    renderReport({ envelopes, verdicts, burnDown: [] });
+
+  test("fixer retries: a lone durable attempt-3 envelope is 2 retries (only the successful attempt persists)", () => {
+    const rendered = render([step({ stepId: "pp-fixer", attempt: 3 })]);
+    expect(rendered.json.fixer_retries).toEqual([{ file: "src/a.php", retries: 2 }]);
+  });
+
+  test("fixer retries are summed per target, not counted per envelope", () => {
+    const rendered = render([
+      step({ stepId: "pp-fixer", attempt: 2, identity: "src__a.php#1" }),
+      step({ stepId: "pp-fixer", attempt: 1, identity: "src__a.php#2" }),
+      step({ stepId: "pp-fixer", attempt: 4, identity: "src__b.php#1" }),
+      // marker (attempt 0) never counts as a retry
+      step({ stepId: "pp-fixer", attempt: 0, outcome: "interrupted", ended_at: null, tokens: null, wall_clock_ms: null, identity: "src__b.php#1" }),
+    ]);
+    expect(rendered.json.fixer_retries).toEqual([
+      { file: "src/a.php", retries: 1 },
+      { file: "src/b.php", retries: 3 },
+    ]);
+  });
+
+  test("two parallel 10-minute steps: step time is the SUM, elapsed wall clock is the overlap-aware span", () => {
+    const rendered = render([
+      step({ stepId: "pp-implement", identity: "src__a.php#1" }),
+      step({ stepId: "pp-implement", identity: "src__b.php#1" }),
+    ]);
+    expect(rendered.json.summary.step_time_ms_total).toBe(1_200_000);
+    expect(rendered.json.summary.wall_clock_span_ms).toBe(600_000);
+    expect(rendered.markdown).toContain("- step time: 1200000 ms");
+    expect(rendered.markdown).toContain("- elapsed wall clock: 600000 ms");
+    expect(rendered.markdown).toContain("| file | role | steps | tokens | step time ms |");
+  });
+
+  test("elapsed wall clock is n/a when no envelope has a parseable end", () => {
+    const rendered = render([step({ stepId: "pp-implement", attempt: 0, outcome: "interrupted", ended_at: null, tokens: null, wall_clock_ms: null })]);
+    expect(rendered.json.summary.wall_clock_span_ms).toBeNull();
+    expect(rendered.markdown).toContain("- elapsed wall clock: n/a");
+  });
+
+  test("the prep spec pseudo-file is not listed under files (but its review work is still reported)", () => {
+    const verdict = (file: string, reviewer: string, round: number): VerdictRecord => ({
+      file,
+      reviewer,
+      round,
+      diff_id: "d",
+      findings: [],
+      citation_check: [],
+    });
+    const rendered = render(
+      [step({ stepId: "pp-implement" })],
+      [
+        verdict("PORTING.spec.md", "reviewer-A", 0),
+        verdict("PORTING.spec.md", "reviewer-B", 0),
+        verdict("src/a.php", "reviewer-A", 1),
+        verdict("src/a.php", "reviewer-B", 1),
+      ],
+    );
+    expect(rendered.json.summary.files).toEqual(["src/a.php"]);
+    expect(rendered.json.file_rounds.map((fr) => fr.file)).toEqual(["PORTING.spec.md", "src/a.php"]);
+    expect(rendered.markdown).toContain("- files: 1 (src/a.php)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C48: an empty evidence stream verifies nothing and must not read as a pass.
+// ---------------------------------------------------------------------------
+
+describe("renderReport empty evidence stream (C48)", () => {
+  test("no envelopes => NO EVIDENCE: provenance_ok false, flagged, never a vacuous OK", () => {
+    const rendered = renderReport({ envelopes: [], verdicts: [], burnDown: [] });
+    expect(rendered.json.no_evidence).toBe(true);
+    expect(rendered.json.provenance_ok).toBe(false);
+    expect(rendered.json.provenance_failures.length).toBe(1);
+    expect(rendered.json.provenance_failures[0]).toContain("NO EVIDENCE");
+    expect(rendered.markdown).toContain("- status: NO EVIDENCE (the envelope stream is empty — nothing was verified)");
+    expect(rendered.markdown).not.toContain("- status: OK");
+  });
+
+  test("still NO EVIDENCE when a history is supplied but no envelope exists", () => {
+    const rendered = renderReport({ envelopes: [], verdicts: [], burnDown: [], history: { events: [] } });
+    expect(rendered.json.provenance_ok).toBe(false);
+    expect(rendered.json.no_evidence).toBe(true);
+  });
+
+  test("a non-empty clean stream is unaffected (recorded run-a stays OK)", () => {
+    const rendered = renderReport({ envelopes: runA.envelopes, verdicts: runA.verdicts, burnDown: runA.burn_down });
+    expect(rendered.json.no_evidence).toBe(false);
+    expect(rendered.json.provenance_ok).toBe(true);
+    expect(rendered.markdown).toContain("- status: OK");
   });
 });

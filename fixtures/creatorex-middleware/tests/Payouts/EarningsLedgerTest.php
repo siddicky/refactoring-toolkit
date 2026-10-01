@@ -25,13 +25,16 @@ final class EarningsLedgerTest extends TestCase
         $this->assertSame(2.36, $ledger->roundForPayout(2.355, EarningsLedger::ROUND_BANKERS));
     }
 
-    public function testBankersNeverTriggersForNegativeAmounts(): void
+    public function testBankersNeverChangesTheResultForNegativeTies(): void
     {
         $ledger = new EarningsLedger();
 
-        // floor() moves away from zero for negatives, so the tie branch is
-        // unreachable there: negative ties fall through to half-up.
+        // floor() moves away from zero for negatives, so the banker's branch
+        // never changes the result there: an odd floor (-2.345) falls through
+        // to round(), and an even floor (-2.355) takes the tie branch but
+        // returns the same half-away-from-zero value.
         $this->assertSame(-2.35, $ledger->roundForPayout(-2.345, EarningsLedger::ROUND_BANKERS));
+        $this->assertSame(-2.36, $ledger->roundForPayout(-2.355, EarningsLedger::ROUND_BANKERS));
     }
 
     public function testBalanceMixesCurrenciesOneToOne(): void

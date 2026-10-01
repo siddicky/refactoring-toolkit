@@ -102,7 +102,12 @@ export type VitestRunState =
       kind: "ran";
       /** Tests that passed (vitest summary "Tests" line). */
       passed: number;
-      /** Tests that failed (= the fix-loop feed's failure universe). */
+      /**
+       * Tests that failed (= the fix-loop feed's failure universe). When the
+       * run exited non-zero with no failing test (unhandled errors, a
+       * threshold) this is the number of such run-level failures instead, and
+       * the feed carries one synthetic record: a ran 0 never hides a red run.
+       */
       failed: number;
       /** Total tests executed (passed + failed + skipped as reported). */
       total: number;
@@ -124,6 +129,12 @@ export interface VitestSummaryCounts {
 export interface VitestSummary {
   testFiles: VitestSummaryCounts | null;
   tests: VitestSummaryCounts;
+  /**
+   * The `Errors  N error(s)` line: unhandled errors vitest caught while every
+   * test passed (a leaked rejection, a throw after the test ended). 0 when the
+   * line is absent. Vitest exits non-zero over them.
+   */
+  unhandledErrors: number;
 }
 
 /**
@@ -132,9 +143,13 @@ export interface VitestSummary {
  *   Test Files  2 failed | 3 passed (5)
  *        Tests  4 failed | 41 passed (45)
  *
- * ANSI is expected pre-stripped (parseVitestOutput normalizes). Returns null
- * when no parseable `Tests` summary exists (runner crash / no run happened) —
- * the caller records that as not-run, never as a zero-failure ran.
+ * ANSI is stripped here (a colored `Tests` line must still anchor). Returns
+ * null when no parseable `Tests` summary exists (runner crash / no run
+ * happened) — the caller records that as not-run, never as a zero-failure ran.
+ *
+ * `output` may be stdout and stderr concatenated: vitest 3.x writes the
+ * summary to stdout and every `FAIL` block plus the `Failed Tests N` banner to
+ * stderr, and only the anchored `Test Files` / `Tests` lines count.
  *
  * cx6c live finding: when EVERY test file fails to COLLECT (e.g. a ported
  * module imports a file the implementer never wrote), vitest prints
@@ -146,19 +161,25 @@ export interface VitestSummary {
 export function parseVitestSummary(output: string): VitestSummary | null {
   let testFiles: VitestSummaryCounts | null = null;
   let tests: VitestSummaryCounts | null = null;
-  for (const line of output.split("\n")) {
-    const files = parseSummaryLine(line, "Test Files");
+  let unhandledErrors = 0;
+  for (const line of output.replace(ANSI_ESCAPE, "").split("\n")) {
+    const files = parseSummaryLine(line, TEST_FILES_LABEL);
     if (files !== null) {
       testFiles = files;
       continue;
     }
-    const t = parseSummaryLine(line, "Tests");
-    if (t !== null) tests = t;
+    const t = parseSummaryLine(line, TESTS_LABEL);
+    if (t !== null) {
+      tests = t;
+      continue;
+    }
+    const errors = ERRORS_LINE.exec(line);
+    if (errors !== null) unhandledErrors = Number(errors[1]);
   }
   if (tests === null) {
     if (testFiles !== null && testFiles.failed > 0) {
       // Collection failure: no test executed, every failing file is a failure.
-      return { testFiles, tests: { passed: 0, failed: testFiles.failed, total: testFiles.total } };
+      return { testFiles, tests: { passed: 0, failed: testFiles.failed, total: testFiles.total }, unhandledErrors };
     }
     return null;
   }
@@ -171,16 +192,27 @@ export function parseVitestSummary(output: string): VitestSummary | null {
     testFiles !== null &&
     (testFiles.failed > 0 || testFiles.total === 0)
   ) {
-    return { testFiles, tests: { passed: 0, failed: testFiles.failed, total: testFiles.total } };
+    return { testFiles, tests: { passed: 0, failed: testFiles.failed, total: testFiles.total }, unhandledErrors };
   }
-  return { testFiles, tests };
+  return { testFiles, tests, unhandledErrors };
 }
 
-/** `Tests  4 failed | 41 passed (45)` → {passed: 41, failed: 4, total: 45}. */
-function parseSummaryLine(line: string, label: string): VitestSummaryCounts | null {
-  const idx = line.indexOf(label);
-  if (idx < 0) return null;
-  const rest = line.slice(idx + label.length);
+const TEST_FILES_LABEL = /^\s*Test Files\s/;
+const TESTS_LABEL = /^\s*Tests\s/;
+const ERRORS_LINE = /^\s*Errors\s+(\d+)\s+errors?\b/;
+
+/**
+ * `Tests  4 failed | 41 passed (45)` → {passed: 41, failed: 4, total: 45}.
+ *
+ * Anchored: the label must be the first token of the line. vitest 3.x also
+ * prints `⎯⎯ Failed Tests 2 ⎯⎯` banners and `FAIL  f > Tests > x` headers; an
+ * indexOf match let those overwrite the real summary once stdout and stderr
+ * are read together (C26).
+ */
+function parseSummaryLine(line: string, label: RegExp): VitestSummaryCounts | null {
+  const anchored = label.exec(line);
+  if (anchored === null) return null;
+  const rest = line.slice(anchored[0].length);
   const failed = /(\d+)\s+failed/.exec(rest);
   const passed = /(\d+)\s+passed/.exec(rest);
   const skipped = /(\d+)\s+skipped/.exec(rest);
@@ -200,16 +232,22 @@ function parseSummaryLine(line: string, label: string): VitestSummaryCounts | nu
 // Parsing
 // ---------------------------------------------------------------------------
 
-const ANSI_ESCAPE = /\x1b\[[0-9;]*m/g;
+// Built from the ESC character (not a regex literal with \x1b) so the control character is explicit.
+const ESC = String.fromCharCode(0x1b);
+const ANSI_ESCAPE = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 
 /**
- * Record starts: vitest's default reporter `FAIL  path > suite > test` lines,
- * plus cross/tick markers that carry a suite separator (guards against the
- * per-file summary bullets like `× applies discount 12ms`, which lack " > "
- * and would duplicate the detailed FAIL block).
+ * Record starts: vitest's default reporter `FAIL  path > suite > test` lines
+ * ONLY. The per-file `× Suite > test 12ms` bullets carry no message or stack
+ * frames, duplicate the FAIL block when both streams are read, and — when the
+ * FAIL blocks were dropped with stderr (C26) — produced frameless records that
+ * could never be attributed to a file. A test that fails always gets a FAIL
+ * block; a collection failure gets `FAIL  file [ file ]`.
  */
-const RECORD_START = /^\s*(?:FAIL\s+\S|[✗×]\s+\S.*\s>\s)/;
+const RECORD_START = /^\s*FAIL\s+\S/;
 const SUMMARY_START = /^\s*(?:Test Files\s|Tests\s|Duration\s|Start at\s)/;
+/** `⎯⎯⎯ Failed Tests 2 ⎯⎯⎯` banners and `⎯⎯⎯[1/3]⎯` footers end a record. */
+const SECTION_RULE = /^\s*⎯{2,}/;
 
 const STACK_FRAME_LINE = /(?:^|\s)(?:❯|at)\s+(.+)$/;
 const FILE_LINE_COL = /([^\s()'"]+):(\d+):(\d+)/g;
@@ -230,8 +268,8 @@ export function parseVitestOutput(output: string): VitestFailureRecord[] {
     }
   };
 
-  for (const line of clean.split("\n")) {
-    if (SUMMARY_START.test(line)) {
+  for (const line of clean.split(/\r?\n/)) {
+    if (SUMMARY_START.test(line) || SECTION_RULE.test(line)) {
       flush();
       continue;
     }
@@ -258,13 +296,17 @@ export function parseVitestOutput(output: string): VitestFailureRecord[] {
   return failures;
 }
 
-/** `FAIL  tests/foo.test.ts > Suite > test name` → {testFile, testName}. */
+/**
+ * `FAIL  tests/foo.test.ts > Suite > test name` → {testFile, testName}.
+ * A collection failure prints `FAIL  tests/foo.test.ts [ tests/foo.test.ts ]`;
+ * the bracketed repeat is not part of the file path.
+ */
 function parseFailHeader(line: string): VitestFailureRecord {
-  const rest = line.trim().replace(/^(?:FAIL|[✗×])\s+/, "");
+  const rest = line.trim().replace(/^FAIL\s+/, "");
   const separatorIndex = rest.indexOf(" > ");
   if (separatorIndex < 0) {
     return {
-      testFile: rest,
+      testFile: rest.replace(/\s+\[\s.*\s\]$/, ""),
       testName: "",
       errorMessage: "",
       frames: [],
@@ -308,6 +350,55 @@ function parseStackFrame(line: string): StackFrame | null {
     file: rawFile,
     line: Number(rawLine),
     column: Number(rawColumn),
+  };
+}
+
+const UNHANDLED_BANNER = /^\s*⎯+\s*Unhandled Errors\s*⎯+\s*$/;
+const UNHANDLED_ERROR_BANNER = /^\s*⎯+\s*Unhandled (?:Rejection|Error)\s*⎯+\s*$/;
+const ORIGIN_LINE = /This error originated in "([^"]+)" test file/;
+/** Evidence kept on a synthetic record (vitest prints a long stack per unhandled error). */
+const RAW_EVIDENCE_CAP = 4_000;
+
+/**
+ * One synthetic failure record for a vitest run that exited non-zero although
+ * no test failed: vitest fails the run over unhandled errors (a leaked
+ * rejection, a throw after the test ended) and over thresholds, and prints no
+ * `FAIL` block for either. Without a record such a run read as a clean pass.
+ *
+ * The record names the exit code and the first unhandled error, carries the
+ * frames of the `Unhandled Errors` section (dependencies filtered out) so the
+ * triage can route it to the ported file it points at, and is attributed to the
+ * test file vitest says the error originated in. A run that printed no
+ * unhandled-error section still yields a record, with no frames.
+ */
+export function unhandledErrorRecord(output: string, exitCode: number, unhandledErrors: number): VitestFailureRecord {
+  const lines = output.replace(ANSI_ESCAPE, "").replace(/file:\/\//g, "").split(/\r?\n/);
+  const start = lines.findIndex((l) => UNHANDLED_BANNER.test(l));
+  const block: string[] = [];
+  if (start >= 0) {
+    for (const line of lines.slice(start + 1)) {
+      if (SUMMARY_START.test(line)) break;
+      block.push(line);
+    }
+  }
+  const frames: StackFrame[] = [];
+  for (const line of block) {
+    const frame = isStackFrameLine(line) ? parseStackFrame(line) : null;
+    if (frame !== null && !frame.file.includes("node_modules/")) frames.push(frame);
+  }
+  const bannerAt = block.findIndex((l) => UNHANDLED_ERROR_BANNER.test(l));
+  const firstError = bannerAt >= 0 ? block.slice(bannerAt + 1).find((l) => l.trim() !== "") : undefined;
+  const origin = ORIGIN_LINE.exec(block.join("\n"))?.[1];
+  const what =
+    unhandledErrors > 0
+      ? `${unhandledErrors} unhandled error(s)${firstError !== undefined ? `, the first: ${firstError.trim()}` : ""}`
+      : "no unhandled error reported (a coverage threshold or another run-level check?)";
+  return {
+    testFile: origin ?? "",
+    testName: "",
+    errorMessage: `vitest exited with code ${exitCode} although no test failed: ${what}`,
+    frames,
+    raw: block.join("\n").trim().slice(0, RAW_EVIDENCE_CAP),
   };
 }
 
@@ -436,14 +527,14 @@ export interface NaiveClassifierOptions extends ClassifierRoots {
   unknown?: FailureClass;
 }
 
-export const DEFAULT_PORTED_ROOTS: readonly string[] = ["src"];
+const DEFAULT_PORTED_ROOTS: readonly string[] = ["src"];
 /**
  * US-010: empty by default (legacy behavior — test dirs belong to the fixture
  * bucket). The flow passes the ported test roots derived from the prep source
  * map so failures limited to a PORTED test file route to that file's fix round.
  */
-export const DEFAULT_PORTED_TEST_ROOTS: readonly string[] = [];
-export const DEFAULT_FIXTURE_ROOTS: readonly string[] = [
+const DEFAULT_PORTED_TEST_ROOTS: readonly string[] = [];
+const DEFAULT_FIXTURE_ROOTS: readonly string[] = [
   "tests",
   "test",
   "__tests__",

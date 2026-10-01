@@ -17,7 +17,7 @@
  *   the mirror of the live factory's durable events, M2 identity keying
  *   `stepId#attempt@file#round` and M4 attempt-0 start markers).
  *
- * The flow step table below mirrors flows/port-project.ts (stepType/stepId/
+ * The flow step table below mirrors the step classes in flows/port/ (stepType/stepId/
  * role triples) — duplicated deliberately so metrics never imports flow code
  * (same pattern as the dashboard's stageLabel/MODEL_ROLES mirrors). If the
  * flow adds or renames a step, update the table: drift is exactly what the
@@ -29,7 +29,7 @@ import {
   fileFromIdentity,
   identityKeyOf,
   isModelCallingRole,
-  type ModelCallingRole,
+  isStartMarker,
 } from "./types.js";
 
 export { fileFromIdentity, identityKeyOf };
@@ -50,6 +50,15 @@ export interface DispatchHistoryEvent {
   eventId?: string;
   eventTime?: string;
   type?: string;
+  /**
+   * NOT a dex wire field: the driver stamps the flow/run an event was fetched
+   * from when it merges several histories into one list (a parent plus every
+   * port.File child, or a continued flow's runs). Dex step execution ids are
+   * per flow and run ("PpImplement-1" in every child) and the events carry no
+   * flow id, so without this tag two children's executions are
+   * indistinguishable and the second one's dispatch entries vanish.
+   */
+  historySource?: string;
   payload?: {
     /** FlowStartedOrContinued and other flow-level events. */
     initialStart?: Record<string, unknown> | null;
@@ -111,28 +120,51 @@ function identityFromEvent(event: DispatchHistoryEvent): string | null {
  * `payload.context.stepType` are not step dispatches (flow-level events) and
  * are skipped. A missing finalAttempt defaults to 1 (dex always reports it
  * per 0(h); the default keeps hand-made fixtures honest).
+ *
+ * One step execution emits SEVERAL history events (started / execute
+ * completed / waitFor ...) carrying the same context, so events are deduped
+ * per (source, stepType, stepExecutionId, finalAttempt): an entry is one
+ * execution ATTEMPT, never one event. The source is the event's
+ * {@link DispatchHistoryEvent.historySource} (flow + run) because execution
+ * ids repeat across flows and runs. Retries stay distinct (different
+ * finalAttempt or execution id). Events without a stepExecutionId cannot be
+ * deduped and each count. When duplicates disagree on identity the one that
+ * carries the file+round input echo wins.
  */
 export function extractDispatchEntries(history: DispatchHistory): DispatchEntry[] {
   const entries: DispatchEntry[] = [];
+  const seen = new Map<string, DispatchEntry>();
   for (const event of history.events) {
     const context = event.payload?.context;
     if (context === undefined || context === null) continue;
     const stepType = context.stepType;
     if (typeof stepType !== "string" || stepType.length === 0) continue;
-    const stepExecutionId = context.stepExecutionId;
+    const stepExecutionId = typeof context.stepExecutionId === "string" ? context.stepExecutionId : "";
     const finalAttempt = context.finalAttempt;
-    entries.push({
-      stepExecutionId: typeof stepExecutionId === "string" ? stepExecutionId : "",
+    const entry: DispatchEntry = {
+      stepExecutionId,
       stepType,
       finalAttempt: typeof finalAttempt === "number" && Number.isInteger(finalAttempt) && finalAttempt >= 1 ? finalAttempt : 1,
       identity: identityFromEvent(event),
-    });
+    };
+    if (stepExecutionId === "") {
+      entries.push(entry);
+      continue;
+    }
+    const key = `${event.historySource ?? ""}\u0000${stepType}\u0000${stepExecutionId}\u0000${entry.finalAttempt}`;
+    const existing = seen.get(key);
+    if (existing === undefined) {
+      seen.set(key, entry);
+      entries.push(entry);
+    } else if (existing.identity === null && entry.identity !== null) {
+      existing.identity = entry.identity;
+    }
   }
   return entries;
 }
 
 // ---------------------------------------------------------------------------
-// Typed step table (mirror of flows/port-project.ts — no flow imports)
+// Typed step table (mirror of the step classes in flows/port/ — no flow imports)
 // ---------------------------------------------------------------------------
 
 /** What kind of envelope a flow step's dispatch MUST anchor to. */
@@ -144,7 +176,7 @@ export interface PortStepSpec {
   role: EnvelopeRole;
   kind: PortStepKind;
   /**
-   * Live shape (worker-1c, first full-run reconciliation): an M4 start
+   * Live shape (seen in the first full-run reconciliation): an M4 start
    * mini-step ALSO writes its own envelope-factory record under stepId
    * `<targetStepId>:start` (role "record", real attempt) — in addition to the
    * attempt-0 marker it stages for the TARGET step. That self-envelope must
@@ -159,7 +191,7 @@ export interface PortStepSpec {
  * the TARGET step (same stepId/role, attempt 0).
  */
 export const PORT_FLOW_STEPS: readonly PortStepSpec[] = [
-  // Phase 3 (prep-analysis) — maintained by worker-1b per the mirror rule.
+  // Prep analysis, kept in step with the flow's steps (see the mirror rule above).
   { stepType: "PpSymbolStart", stepId: "pp-symbol-table", role: "judgment", kind: "marker", selfStepId: "pp-symbol-table:start" },
   { stepType: "PpSymbolTable", stepId: "pp-symbol-table", role: "judgment", kind: "model" },
   { stepType: "PpPrepGenerateStart", stepId: "pp-prep-generate", role: "agent", kind: "marker", selfStepId: "pp-prep-generate:start" },
@@ -191,16 +223,16 @@ export const PORT_FLOW_STEPS: readonly PortStepSpec[] = [
   { stepType: "PpFixer", stepId: "pp-fixer", role: "agent", kind: "model" },
   { stepType: "PpCommit", stepId: "pp-commit", role: "commit", kind: "support" },
   { stepType: "PpIntegrate", stepId: "pp-integrate", role: "integration", kind: "support" },
-  // US-010: integration bootstrap (vitest runner provisioning; flows/
-  // port-project.ts BootstrapStep). Non-model, flow-level ("bootstrap").
+  // US-010: integration bootstrap (vitest runner provisioning; BootstrapStep in
+  // flows/port/project-steps.ts). Non-model, flow-level ("bootstrap").
   { stepType: "PpBootstrap", stepId: "pp-bootstrap", role: "integration", kind: "support" },
   { stepType: "PpRelease", stepId: "pp-release", role: "record", kind: "support" },
-  // Phase 4 (verification queues + fix rounds) — maintained by worker-1b.
+  // Verification queues and fix rounds, kept in step the same way.
   { stepType: "PpQueueVerify", stepId: "pp-queue-verify", role: "queue", kind: "support" },
   { stepType: "PpQueueFixStart", stepId: "pp-queue-fix", role: "agent", kind: "marker", selfStepId: "pp-queue-fix:start" },
   { stepType: "PpQueueFix", stepId: "pp-queue-fix", role: "agent", kind: "model" },
   { stepType: "PpFinal", stepId: "pp-final", role: "record", kind: "support" },
-  // v1.1 parallel dispatch (worker-1c): the parent runs waves of per-file
+  // Parallel dispatch: the parent runs waves of per-file
   // SubFlow children (port.File). The child reuses the SAME step types
   // (PpLease→…→PpCommit→PpChildRelease) inside its OWN flow, so per-flow
   // anchoring works unchanged; only the wave orchestration + child bookkeeping
@@ -230,20 +262,27 @@ export function specsForStepId(stepId: string): PortStepSpec[] {
 }
 
 /** True when the step type is a known dex non-agent kind (case-insensitive). */
-export function isNonAgentDexKind(stepType: string): boolean {
+function isNonAgentDexKind(stepType: string): boolean {
   return NON_AGENT_DEX_KINDS.includes(stepType.toLowerCase());
 }
 
 /**
- * Classify a dispatch entry's step type for the anchor.
- * "flow-step" -> envelope-carrying (needs its envelope/marker);
+ * What a dispatch entry's step type is, for the anchor:
+ * "flow-step" -> envelope-carrying (needs its envelope/marker); carries the spec
+ *                it was found under, so the caller needs no second lookup;
  * "non-agent" -> allowed without an envelope (dex kinds);
  * "unknown"   -> unexplained (anchor failure).
  */
-export function classifyDispatchStepType(stepType: string): "flow-step" | "non-agent" | "unknown" {
-  if (SPEC_BY_STEP_TYPE.has(stepType)) return "flow-step";
-  if (isNonAgentDexKind(stepType)) return "non-agent";
-  return "unknown";
+export type StepTypeClass =
+  | { kind: "flow-step"; spec: PortStepSpec }
+  | { kind: "non-agent" }
+  | { kind: "unknown" };
+
+export function classifyDispatchStepType(stepType: string): StepTypeClass {
+  const spec = SPEC_BY_STEP_TYPE.get(stepType);
+  if (spec !== undefined) return { kind: "flow-step", spec };
+  if (isNonAgentDexKind(stepType)) return { kind: "non-agent" };
+  return { kind: "unknown" };
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +296,18 @@ export interface AnchorOptions {
    * Default true.
    */
   requireStartMarkers?: boolean;
+  /**
+   * Accept the cx-5e accommodation for PRE-identityOf evidence: a flow-keyed
+   * (identity null) completion envelope of a per-file step anchors ANY
+   * identity-bearing dispatch entry of the same type, and accepts an
+   * identity-bearing start marker. Default false: current flows write
+   * identity-keyed envelopes for every per-file step (ChildLease/ChildRelease/
+   * QueueFix included), and the accommodation is lossy — it collapses every
+   * flow-keyed envelope of a type into one group whose MAX attempt is compared
+   * against every entry, which yields false failures and false passes. Turn it
+   * on only to render old cx-5e-style evidence.
+   */
+  legacyFlowKeyedEnvelopes?: boolean;
 }
 
 export interface DispatchAnchorGroup {
@@ -313,6 +364,9 @@ function identityDisplay(identity: string | null): string {
  * 3. unknown step types fail; non-agent dex kinds are allowed envelope-less;
  * 4. model-calling envelopes must have their attempt-0 start marker (when
  *    requireStartMarkers, default on).
+ *
+ * Envelopes and entries are matched by exact identity; the lossy flow-keyed
+ * join for pre-identityOf evidence is opt-in (`legacyFlowKeyedEnvelopes`).
  */
 export function anchorDispatch(
   envelopes: readonly EnvelopeEvent[],
@@ -320,6 +374,7 @@ export function anchorDispatch(
   options: AnchorOptions = {},
 ): DispatchAnchorResult {
   const requireStartMarkers = options.requireStartMarkers ?? true;
+  const legacyFlowKeyed = options.legacyFlowKeyedEnvelopes ?? false;
   const failures: string[] = [];
 
   // ---- classify + group dispatch entries ---------------------------------
@@ -327,20 +382,19 @@ export function anchorDispatch(
   let nonAgentCount = 0;
   let unexplainedCount = 0;
   for (const entry of entries) {
-    const kind = classifyDispatchStepType(entry.stepType);
-    if (kind === "non-agent") {
+    const classified = classifyDispatchStepType(entry.stepType);
+    if (classified.kind === "non-agent") {
       nonAgentCount++;
       continue;
     }
-    if (kind === "unknown") {
+    if (classified.kind === "unknown") {
       unexplainedCount++;
       failures.push(
         `unexplained dispatch entry of type "${entry.stepType}" (not a known port-flow step type and not a non-agent dex kind)`,
       );
       continue;
     }
-    const spec = specForStepType(entry.stepType);
-    if (spec === null) continue; // unreachable by classification
+    const spec = classified.spec;
     const key = groupKey(entry.stepType, entry.identity);
     const group = entryGroups.get(key);
     if (group === undefined) {
@@ -377,7 +431,7 @@ export function anchorDispatch(
       );
       continue;
     }
-    const isMarker = env.attempt === 0;
+    const isMarker = isStartMarker(env);
     // The start mini-step's own envelope (`<target>:start`, role record, real
     // attempt) anchors under its marker spec: the dispatch entry IS the same
     // step execution that staged the attempt-0 marker.
@@ -421,14 +475,15 @@ export function anchorDispatch(
       const markerKey = `${env.stepId}@@${env.identity ?? ""}`;
       if (!markersChecked.has(markerKey)) {
         markersChecked.add(markerKey);
-        // cx-5e: a flow-keyed completion envelope accepts an identity-bearing
-        // marker of the same step (the marker carries the file#round the
-        // envelope lacks).
+        // Legacy (cx-5e, opt-in): a flow-keyed completion envelope accepts an
+        // identity-bearing marker of the same step (the marker carries the
+        // file#round the envelope lacks). Strict: the marker must match the
+        // envelope's own identity exactly.
         const hasMarker = envelopes.some(
           (m) =>
             m.stepId === env.stepId &&
-            m.attempt === 0 &&
-            (env.identity === null ? true : m.identity === env.identity),
+            isStartMarker(m) &&
+            (legacyFlowKeyed && env.identity === null ? true : m.identity === env.identity),
         );
         if (!hasMarker) {
           missingMarkerCount++;
@@ -445,13 +500,13 @@ export function anchorDispatch(
     const exact = entryGroups.get(key);
     const flowLevel =
       envGroup.identity !== null ? entryGroups.get(groupKey(envGroup.spec.stepType, null)) : undefined;
-    // cx-5e accommodation: some per-file steps wrote FLOW-KEYED completion
-    // envelopes (identity null) while their dispatch entries carry file#round
-    // (ChildLease / queue-fix before identityOf was added). A flow-keyed
-    // envelope anchors against ANY dispatch entry of the same type — the
-    // reverse direction below still proves every entry individually.
+    // Legacy cx-5e accommodation (opt-in, see AnchorOptions): some per-file
+    // steps wrote FLOW-KEYED completion envelopes (identity null) while their
+    // dispatch entries carry file#round (ChildLease / queue-fix before
+    // identityOf was added). A flow-keyed envelope then anchors against ANY
+    // dispatch entry of the same type.
     const sameTypeAnyIdentity =
-      envGroup.identity === null && exact === undefined && flowLevel === undefined
+      legacyFlowKeyed && envGroup.identity === null && exact === undefined && flowLevel === undefined
         ? [...entryGroups.values()].find((g) => g.spec.stepType === envGroup.spec.stepType)
         : undefined;
     if (exact === undefined && flowLevel === undefined && sameTypeAnyIdentity === undefined) {
@@ -469,8 +524,8 @@ export function anchorDispatch(
   for (const [key, entryGroup] of entryGroups) {
     const exactEnv = envelopeGroups.get(key);
     let envelopeAttempt = exactEnv?.maxAttempt ?? null;
-    if (envelopeAttempt === null && entryGroup.identity !== null) {
-      // cx-5e accommodation (reverse of the flow-keyed join above): an entry
+    if (legacyFlowKeyed && envelopeAttempt === null && entryGroup.identity !== null) {
+      // Legacy cx-5e accommodation (reverse of the flow-keyed join above): an entry
       // whose completion envelope was written flow-keyed anchors through
       // (a) SUPPORT steps (ChildLease/ChildRelease run once per child flow,
       //     the type-matched flow-keyed envelope proves the execution), or
@@ -562,10 +617,14 @@ export function anchorDispatch(
 // Integration entry (AC2 cross-check)
 // ---------------------------------------------------------------------------
 
-/** Combined AC2 cross-check result: envelope provenance + dispatch anchor. */
+/**
+ * AC2 cross-check result. {@link anchorForRun} fills it from the dispatch
+ * anchor alone; runProvenanceCrossCheck (render.ts) also folds in the
+ * envelope-internal provenance failures (validateProvenance).
+ */
 export interface ProvenanceCrossCheck {
   ok: boolean;
-  /** Envelope-internal provenance failures + dispatch anchoring failures. */
+  /** Dispatch anchoring failures, plus the envelope provenance failures when built by runProvenanceCrossCheck. */
   failures: string[];
   anchor: DispatchAnchorResult;
 }
@@ -580,10 +639,12 @@ export interface ProvenanceCrossCheck {
  *   envelope-event attribute values, src/metrics/types.ts EnvelopeEvent).
  * @param options - `requireStartMarkers` (default true) enforces M4 markers
  *   on model-calling envelopes.
- * @returns combined cross-check: `ok` is true only when the envelope stream
- *   passes provenance validation AND the typed 1:N dispatch mapping holds.
+ * @returns the dispatch-anchor cross-check: `ok` and `failures` cover the
+ *   typed 1:N envelope<->dispatch mapping ONLY. Envelope-internal provenance
+ *   (validateProvenance: missing token usage, time order) is not checked here;
+ *   runProvenanceCrossCheck in render.ts runs both.
  *
- * Example (worker-1b evidence run):
+ * Example:
  * ```ts
  * const history = JSON.parse(await dexHistoryJson); // dexcli -output json
  * const cross = anchorForRun(history, envelopeEventValues);

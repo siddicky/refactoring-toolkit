@@ -4,6 +4,16 @@ Continuation build completed 2026-09-25 by worker-1b (taking over worker-1's par
 landed Phase 0). All Phase 0 exit criteria 0(a)–0(h) were executed against live
 infrastructure. No results are faked; every claim below names the command and evidence.
 
+> **Reading note (2026-09-30).** This file is a historical log, written before the
+> 2026-09-30 audit. Where the code has since changed a statement below, an italic
+> `Superseded 2026-09-30` note follows it and the original wording is left as
+> written. Current behaviour is in `README.md`, `AGENTS.md`,
+> `.agents/skills/porting-toolkit-migration/references/runner.md`, `.env.example`
+> and `fixtures/FIXTURES.md`; where this file disagrees with the code, the code
+> wins. Test files named below (`tests/phase0-seams`, `phase1-isolation`,
+> `phase2-flow`, `verify-fix`, `dashboard-stream`, `reconcile`, `opid-seam`) were
+> moved and renamed; `tests/README.md` describes the current layout.
+
 ## Environment (exact versions)
 
 | Tool | Version | Status |
@@ -76,6 +86,13 @@ SQLite + blob store under `~/.dex/dev/<n>/`). Health: `dexcli health` → `{"con
 | g | intra-step attribute-write durability decision | **DECIDED: mini-step fallback REQUIRED** | Empirical: attempts 2–7 of the killed long-step each staged `envelopeEvents.set(...)` at start; durable history contains ONLY the completing attempt's event (`envelope-event/probe-long-sleep#8`). Staged attribute writes inside an uncompleted step do NOT survive. Therefore session fences / envelope-start writes that must survive use the pre-decided fallback: a preceding durable mini-step (`recordStep`, role `record`) — already implemented and proven live (the fence attribute persisted across the mid-write SIGKILL). |
 | h | dex dispatch-log exposure | **PASS** | `dexcli flow history` (FlowService.GetHistoryEvents) exposes the full durable event stream per flow: `stepType`, `stepExecutionId`, `finalAttempt`, `startedTime`, `duration`, retry failure info, step decisions, AND the envelope attribute upserts. This is exactly the typed 1:N mapping surface Phase 5 needs (every envelope step ID anchors to ≥1 dispatch entry of matching type; retries visible as multiple attempts). |
 
+*Superseded 2026-09-30 (row e): recovery no longer aborts every foreign
+session. `abortSessionsNotTagged` aborts only OpenCode sessions whose title
+starts with `porting-kit:` and whose trailing `#<epoch>` is not the new epoch,
+plus toolkit-titled sessions with no epoch. The evidence session
+`porting-kit:agent-roundtrip` is still aborted that way; a session without the
+`porting-kit:` prefix is never aborted.*
+
 ## Notable pre-release findings (retained as regression knowledge)
 
 1. dex `startFlow` fails `worker_target is required` unless ClientOptions carries `workerTarget`.
@@ -91,6 +108,13 @@ SQLite + blob store under `~/.dex/dev/<n>/`). Health: `dexcli health` → `{"con
 ## Live evidence artifacts
 
 - Kill sidecar (intent-before-SIGKILL ordering, UTC + monotonic): `/tmp/kill-events-phase0.jsonl`
+  *Superseded 2026-09-30 (every kill-sidecar mention in this file): the writer
+  default is now `metrics/kill-events.jsonl` (JSON Lines, relative to the cwd,
+  parent directory created on first write) for both `chaos-kill` and
+  `watch-queue-verify`. Completed rows carry `fired` (`killed_pids.length > 0`),
+  with an explicit `NO-OP:` note when nothing was killed. `flow_run_id` is the
+  real Dex run id (from `dexcli flow summary`), never the flow id. The
+  `/tmp/kill-events-*.jsonl` paths below stay as recorded history.*
 - Round repo with op-ID commits + integration branch: `/tmp/pk-round-repo`
 - dex flow evidence: `dexcli flow history long-kill-test`, `…round-src__a.php-1-1-1790365770974`,
   `…round-src__a.php-2-1-1790365979028`
@@ -141,6 +165,12 @@ Completed 2026-09-25 by worker-1b. Seed: **2 files** per FIXTURES.md guidance �
 - Envelope factory everywhere; retry caps (model steps: maximumAttempts 3);
   round caps durable (pp-config); queue state durable (pp-queue), derived
   each iteration.
+  *Superseded 2026-09-30: model, review and marker steps now retry with
+  `RESTART_WINDOW_RETRY` (`maximumAttempts` 8, flows/port/step-options.ts). The
+  in-step `REVIEW_STEP_MAX_ATTEMPTS = 3` is a separate tombstone bound,
+  independent of the dex retry budget. The accounts of the old budget at the
+  `PpPrepReviewA-3` exhaustion and the cx7 restart window are history and
+  stand.*
 - New envelope roles `verdict-check` / `prioritize` (code-only, non-model);
   `EnvelopeStepClass` alias for cycle-safe step typing.
 
@@ -186,6 +216,12 @@ Completed 2026-09-25 by worker-1b. Seed: **2 files** per FIXTURES.md guidance �
    reviewers default to `OPENCODE_REVIEWER_AGENT` (trials used `plan`, ~45 s
    per turn). Three trial attempts (trial-2/3/4) failed on token provenance
    before these were in place; trial-5 is the clean gate run.
+   *Superseded 2026-09-30: `OPENCODE_PROMPT_WAIT_MS` is read at call time (the
+   default is still 15 minutes). `OPENCODE_PROMPT_CALL_TIMEOUT_MS` (default 20
+   minutes, a hard ceiling on one `session.prompt` call) is used exactly as
+   written, with no scaling; an invalid value (not a whole number, <= 0 or above
+   24 hours) falls back to the default. `OPENCODE_REVIEWER_AGENT` is an optional
+   override, not a default. All of these are listed in `.env.example`.*
 4. **Envelope event keys collide across step EXECUTIONS** (`${stepId}#
    ${context.attempt}` — attempt resets per re-entry, so a re-entered
    dispatch overwrites its earlier event). Harmless for the gate; Phase 5's
@@ -252,6 +288,8 @@ Committed 2026-09-25. Verifier APPROVED the gate; code-reviewer's 1 CRITICAL +
   true body-start line from DIFF_HEADER_LINES
   ("the diff body starts at line 6"), matching resolveEvidence; regression
   test proves an early finding resolves (pre-fix it silently dropped).
+  *Superseded 2026-09-30: hunk body ranges are 1-based, computed by one helper;
+  see "Post-audit contract changes" at the end of this file.*
 - **[F1] step-factory completeness lint** — tree-walk: `getStepType()` /
   `implements Step` allowed ONLY in flows/steps/envelope.ts.
 - **[F2]** `toolOverridesAllOff()` asserted: entire plugin surface disabled.
@@ -342,6 +380,15 @@ client` post-restart.
     prioritize → fixer → keyed commit → integrate → release. Completion
     markers: `committed:src/Money.php#1` (sha `e5d463b`) and
     `committed:src/Pricing/FlatRateDiscount.php#1` (sha `f4debae`).
+    *Superseded 2026-09-30 (verdict-check): it drops `wontfix` findings and
+    findings whose `p_cited` is below the checker's threshold, which is 1 for
+    the naive checker and 0.8 for live Jev (`CITATION_MIN_P_JEV`). A Jev failure
+    fails open to the naive check and is recorded on `pp-kept`, which also
+    persists every gate `p_cited` (`citationGate`, `prioritize`,
+    `dropped[].p_cited`). The judgment registry (`src/judgment-registry.ts`,
+    checked by `tests/judgment-registry.test.ts`) lists `citation-check` behind
+    `src/typesafe/verdict-check.ts`, plus `prioritize`, `symbol-table-selection`
+    (not fail-open), `prep-citation-check` and `vitest-triage`.*
   - Session fences for every agent/reviewer turn (`session-fence/*`, epoch
     1); attempt-0 start markers present (M4).
 - **Jev swap-in**: worker logs for p3+ runs say `Jev: REAL client (billed
@@ -416,6 +463,9 @@ client` post-restart.
   `fixtures/generate-creatorex.ts` + FIXTURES.md section): committed AS
   DELIVERED; determinism re-verified by worker-1c (generator re-run digest
   `b692f358…` == FIXTURES.md recorded digest; tree unchanged).
+  *Superseded 2026-09-30: that digest is out of date. The generators changed
+  afterwards and the current digests are in `fixtures/FIXTURES.md` (checked by
+  `tests/fixtures-generators.test.ts`).*
 
 ## Infra finding (beyond this project): glm-5.3 "default"-variant degenerate turns
 
@@ -460,6 +510,11 @@ re-dispatches; valuable for anyone building on opencode + zai-coding-plan:
 Commit `4973fcc`. dex-native shape, DEFAULT for Phase 6–7 (`demo --dispatch
 parallel`; `sequential` keeps the Phase 2 loop for A/B):
 
+*Superseded 2026-09-30: `--dispatch sequential` now stays sequential through
+release, bootstrap and dispatch. Before the fix `ReleaseStep` dropped
+`dispatchMode`, so the run silently went parallel after the first file. A
+sequential Release also releases the `WorktreePool` lease now.*
+
 - **Parent** (`port.Project`): prep + prep-review loop unchanged →
   `PpWaveDispatch` plans the next ≤2-file wave from the durable queue (fresh
   or fix rounds) → `PpWaveJoin` declares
@@ -495,6 +550,11 @@ parallel`; `sequential` keeps the Phase 2 loop for A/B):
   terminal receipt instead of throwing. `tests/port-parallel.test.ts` covers
   wave planning, anchor registration, and both flow registrations (196 pass,
   tsc clean). NOT YET live-proven — the first parallel run is Phase 6.
+  *Superseded 2026-09-30: `tests/port-parallel.test.ts` now covers anchor
+  registration, both flow registrations, parent and child `FenceStep` and
+  `CommitStep` routing, and `ChildReleaseStep`. `flows/port-parallel.ts` (the
+  wave-planning helpers) was deleted as dead code; wave planning is the
+  `CHILD_SLOT_CAP` slice in `flows/port/project-steps.ts`.*
 
 ## Phase 4 — final status (worker-1c)
 
@@ -642,11 +702,16 @@ anchor registration, both flow registrations), typecheck clean — **NOT
 live-proven** (cx-4 never reached wave dispatch). First live exercise will
 surface dex SubFlow runtime semantics (getFlowId/getConditionResults/reuse
 policy) that types cannot prove. Design + deviations: "v1.1" section above.
+*Superseded 2026-09-30: see the note under "v1.1" for what
+`tests/port-parallel.test.ts` covers today and where wave planning lives.*
 
 ## State hand-off (for the next decision)
 
 - Repo: HEAD with all commits above; 196/196 tests, tsc clean. Untracked
   `.omc/research/*` + `demo/` + `.playwright-mcp/` are not wave-4 artifacts.
+  *Superseded 2026-09-30: `.omc/*` (except `.omc/skills/`) and
+  `.playwright-mcp/` are now untracked and gitignored, and `demo/` was
+  removed. These paths survive only in history: the base commit is `98b2e26`.*
 - Infra at stop: dex (7233 DB) + worker (Sisyphus reviewer env) + opencode +
   dashboard :4646 (STATUS_REPO_ROOT=/tmp/pk-p4) ALL RUNNING; no flows active
   (p4-7..10, cx-1..4 all terminal). Watchers/probe loops stopped.
@@ -678,6 +743,10 @@ every run below parsed first-try on luna — **zero degenerate turns across
   `reviewerModelOverride()` (env `OPENCODE_REVIEWER_MODEL=provider/model`),
   applied ONLY in `runReviewTurn`; implementer/fixer stay on the default glm
   lane (commit `e55b321`).
+  *Superseded 2026-09-30: `reviewerModelOverride()` was deleted. The
+  `OPENCODE_REVIEWER_MODEL` variable (`providerID/modelID`) is now read by
+  `laneRouting("reviewer")` in `src/harness/lanes.ts`, next to the planner and
+  executor lane variables; see `.env.example`.*
 - Binding for all runs: `OPENCODE_REVIEWER_AGENT=plan` +
   `OPENCODE_REVIEWER_MODEL=openai/gpt-6-luna`.
 - Probe validity honored (wave-4 lesson): probes replicate the flow's EXACT
@@ -826,6 +895,12 @@ the parallel topology is now live-proven end-to-end. Awaiting user go/no-go.
   Client whose registry registers EXACTLY the stream-owning flow type (port.Project) in
   its OWN blob-cache dir (`.dex-cache-dashboard`); `STATUS_STREAM_SUBSCRIBE=0` opts out;
   client-open failure degrades to poll-only.
+  *Superseded 2026-09-30: the subscriber no longer ends permanently on a failed
+  read. It retries with bounded exponential backoff from the same resume token,
+  flips back to `stream` on the first good read, and `/api/state` reports each
+  flow's `streamMode`. Its blob cache is `.dex-cache/dashboard` (it was
+  `.dex-cache-dashboard`, which `.gitignore` did not cover). The watcher's is
+  `.dex-cache/watch`; neither reads the worker's `DEX_BLOB_CACHE_DIR`.*
 - Feed merge (src/dashboard/state.ts): `feedFromStreamMessages` + `DashboardInput.streamFeed`
   — stream-delivered events land in the /api/state feed with the SAME dedup key as the
   state fallback (a stream event and its polled twin render once). StreamEventMessage is
@@ -840,6 +915,18 @@ the parallel topology is now live-proven end-to-end. Awaiting user go/no-go.
   review's non-exiting terminal branch is fixed by construction. Exit codes: 0 fired,
   1 terminal, 2 timeout. The /tmp shell watchers (watch-ac1-parallel.sh,
   watch-queuefix-kill.sh) are superseded; kill only — resume stays the operator procedure.
+  *Superseded 2026-09-30 (kill watcher): a terminal flow status (COMPLETED,
+  FAILED, TERMINATED, CANCELED, or a server-side timeout) before the trigger
+  exits cleanly. Exit codes: 0 fired, 1 terminal, 2 bound elapsed, 3 trigger
+  seen but the kill was a no-op (no live target PIDs), 4 kill fired but a target
+  survived SIGKILL, 64 usage error, 70 fatal; chaos-kill uses the same table
+  (0/3/4/64/70). The 60 s dexcli poll fallback runs about once per
+  `--poll-seconds`, and its failures are logged (the first, then every 10th).
+  Reads after the first event of a cycle use their own `--catch-up-seconds`
+  (default 1 s; the SDK takes whole seconds and 0 means the 60 s server default,
+  not "no wait"), so the queue-verify DONE cannot land in the same batch as its
+  START and cancel the kill. Windows shorter than about 1 s stay unkillable
+  through the stream lane.*
 - Projection-only boundary (tests/dashboard-stream.test.ts): flows/, src/git/, src/queues/
   contain NO `readStream|listStreamMessages`; readStream appears only in the projection
   layer (src/dashboard/queries.ts structural, scripts/serve-status.ts, scripts/watch-queue-verify.ts);
@@ -899,7 +986,13 @@ the parallel topology is now live-proven end-to-end. Awaiting user go/no-go.
   as 5 EXACT rows (one per PHPUnit test file -> `test/**/*.test.ts`); `parsePrepSourceMap`
   accepts them, so test files flow through the SAME per-file SubFlow pipeline
   (implement -> reviews -> verdict-check -> commit -> integrate).
+  *Superseded 2026-09-30: `fixtures/generate-creatorex.ts` now emits
+  `prep-stub.md` itself, so regenerating the fixture reproduces it instead of
+  deleting it.*
 - `run-demo.ts demo --files creatorex` expands to the full 10 port units (5 src + 5 tests).
+  *Superseded 2026-09-30: it also implies `fixtures/creatorex-middleware/prep-stub.md`
+  and that directory as the source root unless `--prep` or `--source-root` is
+  given.*
 - Scope awareness: `testPortScopeNote` (src/harness/runtime.ts) fires on PHPUnit test
   paths; implementer AND reviewer turns carry it (PHPUnit->vitest translation, review as
   test code). Source ports carry no note.
@@ -951,6 +1044,11 @@ Prep source map: fixtures/creatorex-middleware/prep-stub.md (5 explicit test row
   retried (46+ attempts, each re-billing the live citation batch). Writes need
   no declaration, which is why cx-5c/5e never surfaced it. Flow terminated;
   fix + regression tests landed.
+  *Superseded 2026-09-30 (a related defect): VerdictCheck and Prioritize no
+  longer throw on a live-Jev outage. They fail open to the naive checker and
+  record it, so a Jev outage can no longer trigger dex retries that re-bill the
+  citation batch. `pp-kept` gained `citationGate`, `prioritize` and
+  `dropped[].p_cited`.*
 - **cx6b** (03:25-04:33, COMPLETED, no kill): two silent failures. (a) vitest
   RAN for real (41/2/43) but the 2 failing tests produced NO fix round —
   selectFixableFiles was fed tsc-only counts (`0b429ad`, errorCountsByOutput).
@@ -1073,6 +1171,10 @@ Prep source map: fixtures/creatorex-middleware/prep-stub.md (5 explicit test row
   kill events carried (resumed: false — honest), verification shows
   tsc 6 / vitest ran 0/5/5; provenance has exactly the one resume
   fingerprint failure above.
+  *Superseded 2026-09-30: `resumed` is now derived per kill from the flow
+  summary plus post-kill envelopes, and `render-metrics` reads the sidecar with
+  the Contract B reader (runs are filtered on `flow_run_id` and `run_id`).
+  The sidecar/`flow_run_id` discussion in these notes predates both.*
 
 ## Token totals (cx7)
 
@@ -1139,6 +1241,11 @@ config-verified but NOT behaviorally exercised; kill+resume+COMPLETED in ONE
 flow remains unwitnessed. Candidate fixes, NOT improvised under the bound:
 drain-to-head stream reads per cycle (loop `readStream` until null), or a
 typed dispatch-history trigger, or a widened verify window.
+*Superseded 2026-09-30: audit C27 fixed the cause. After a START the catch-up
+read used the full poll interval, so the DONE landed in the same batch and the
+stale-start guard cancelled the kill. `--poll-seconds 1` is no longer a
+workaround, and the follow long-poll wakes on publish whatever `--poll-seconds`
+is.*
 
 ## Battery + AC2 (honest)
 
@@ -1271,3 +1378,38 @@ dedup, raised budgets live through the 65-min prep grind).
 - Bounds used: one corrected dispatch + the sanctioned config-miss retry;
   watcher bound extension (no window was missed by it); no cx10.
   343/0 tests, tsc clean at the commit.
+
+---
+
+# Post-audit contract changes (2026-09-30)
+
+Recorded after the 2026-09-30 audit; they supersede the sections above where
+they overlap. Current behaviour of the runner is in the README and the runner
+reference; these are the agent-contract and spot-check changes.
+
+- **Verdict schema** (`harness/agents/verdict-schema.ts`): every finding needs a
+  `description` and a verbatim `snippet`; `disposition` is the closed set
+  `fix | wontfix` (normalized, so "Fix" and "won't fix" are accepted).
+  `citation_check` is advisory: the citation gate recomputes citations, and the
+  mapped record shows the deterministic check, not the reviewer's own.
+- **Hunk body ranges** are 1-based, computed by one helper in
+  `src/harness/runtime.ts`. This supersedes the **[M5]** numbering note.
+- **Reviewer prompt**: it no longer claims PHP source or header conventions
+  that the reviewer never receives. The porting conventions are reproduced in the
+  prompt, and the diff header carries only the diff id, file, round and
+  line-numbering information.
+- **Tool policy block**: it follows the `tools` map actually sent. In bridge
+  mode that is NONE for every agent.
+- **Jev spot check** (`scripts/jev-spot-check.ts`): the gate is a 90% target AND
+  the deterministic first-candidate baseline plus 2 points. The offline
+  first-candidate double scores 37/39 = 94.9% on the shipped fixtures, so a live
+  run has to reach about 96.9% to pass. The symbol cap is `SYMBOL_HARVEST_CAP = 20`
+  (`src/harness/runtime.ts`), with a truncation note.
+- **Offline judgment**: `createJevClient` was removed;
+  `createOfflineJevClient` is the only offline factory. Rows picked by it are
+  tagged `judge=scripted` and shown to the planner as UNVERIFIED.
+- **User contract**: `PrepArtifact.userContract` stores the user's `PORTING.md`
+  by value. Implement, fix and queue-fix turns receive it as the authoritative
+  user contract; per-file port reviewers do not. Only the source-map rows are
+  deterministic; the rest of `PORTING.md` is seed text that the planner lane
+  rewrites into the generated spec.

@@ -11,7 +11,10 @@
  * both are accepted.
  */
 
+import { shortBranchName } from "../git/worktree-list.js";
+import { fileFromIdentity, fileFromSanitizedKey, MODEL_CALLING_ROLES, tokenTotalOf } from "../metrics/types.js";
 import type {
+  BurnDownPointView,
   BurnDownSample,
   BurnDownSeriesView,
   CommitView,
@@ -27,13 +30,17 @@ import type {
   GitCommitRow,
   GitWorktreeRow,
   GridRow,
+  HeadlineState,
   KillTimelineEntryView,
   KillTimelineGroupView,
   NormalizedKillEvent,
   QueueSummaryView,
   SourceStatus,
+  StreamMode,
   AgentUsageView,
+  TscAccountingSample,
   UsageSplitView,
+  VitestAccountingSample,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -41,12 +48,12 @@ import type {
 // ---------------------------------------------------------------------------
 
 /**
- * Local mirror of the flow envelope's model-calling roles
- * (flows/steps/envelope.ts). Duplicated deliberately: importing the flow
- * module would pull the dex SDK and couple the dashboard to concurrently
- * edited flow code. If the envelope contract adds a model role, update here.
+ * The envelope's model-calling roles, from the shared contract
+ * (src/metrics/types.ts). The dashboard never imports the flow module (it would
+ * pull the dex SDK and couple the page to flow code); the flow's own
+ * requiresTokens reads the same list.
  */
-const MODEL_ROLES: ReadonlySet<string> = new Set(["agent", "review", "judgment"]);
+const MODEL_ROLES: ReadonlySet<string> = new Set(MODEL_CALLING_ROLES);
 
 export interface ParsedEnvelope {
   stepId: string;
@@ -61,6 +68,13 @@ export interface ParsedEnvelope {
   usage: UsageSplitView | null;
   wall_clock_ms: number | null;
   tokensRequired: boolean;
+  /**
+   * The file and round recovered from the envelope's `identity` (`<file with
+   * "/" as "__">#<round>`) when it names none itself: the live factory writes
+   * `file: null` and stream rows carry no step context. Lossy for file names
+   * that hold "__", so it is only ever the last fallback.
+   */
+  identityFile: { file: string; round: number } | null;
 }
 
 /** Shape-checks a durable attribute value into a ParsedEnvelope. */
@@ -85,32 +99,24 @@ export function parseEnvelope(value: unknown): ParsedEnvelope | null {
     tokens: normalizeTokens(rec.tokens),
     usage: parseUsageSplit(rec.tokens),
     wall_clock_ms: typeof rec.wall_clock_ms === "number" ? rec.wall_clock_ms : null,
-    tokensRequired: MODEL_ROLES.has(role),
+    // Attempt 0 is the durable start marker (envelopeStartMarker), and an
+    // `interrupted` envelope is a step still running (the start event of a real
+    // attempt, which the stream delivers before the completion replaces it) or
+    // killed: tokens are null by construction. Neither may read as a
+    // provenance failure; validateProvenance (src/metrics/render.ts) exempts
+    // `interrupted` the same way.
+    tokensRequired: MODEL_ROLES.has(role) && attempt > 0 && rec.outcome !== "interrupted",
+    identityFile: typeof rec.identity === "string" ? fileFromIdentity(rec.identity) : null,
   };
 }
 
-/** Token TOTAL; accepts a number or the metrics TokenUsage object. */
+/** Token TOTAL; accepts a number or the metrics TokenUsage object (the one normalizer, tokenTotalOf). */
 export function normalizeTokens(raw: unknown): number | null {
-  if (typeof raw === "number") return raw;
-  if (raw !== null && typeof raw === "object") {
-    const rec = raw as Record<string, unknown>;
-    const input = rec.input_tokens;
-    const output = rec.output_tokens;
-    if (typeof input === "number" && typeof output === "number") {
-      return (
-        input +
-        output +
-        numOr(rec.reasoning_tokens, 0) +
-        numOr(rec.cache_read_tokens, 0) +
-        numOr(rec.cache_write_tokens, 0)
-      );
-    }
-  }
-  return null;
+  return tokenTotalOf(raw);
 }
 
 /** Wave-5 cost honesty: the provider usage split, when the envelope carries it. */
-export function parseUsageSplit(raw: unknown): UsageSplitView | null {
+function parseUsageSplit(raw: unknown): UsageSplitView | null {
   if (raw === null || typeof raw !== "object") return null;
   const rec = raw as Record<string, unknown>;
   const input = rec.input_tokens;
@@ -149,6 +155,25 @@ export function stageLabel(stepIdOrType: string): string {
     "ppprep": "prep",
     "ppfinal": "final",
     "ppcapturediff": "diff-capture",
+    // Verification and parallel-wave steps (a label for every non-marker step of
+    // the flow: tests/state.test.ts walks PORT_FLOW_STEPS).
+    "ppbootstrap": "bootstrap",
+    "ppqueueverify": "queue-verify",
+    "ppqueuefix": "queue-fix",
+    "ppwavedispatch": "wave-dispatch",
+    "ppwavejoin": "wave-join",
+    "ppchildlease": "child-lease",
+    "ppchildrelease": "child-release",
+    // Prep analysis.
+    "ppsymboltable": "symbol-table",
+    "ppprepgenerate": "prep-generate",
+    "ppprepdiffcapture": "prep-diff-capture",
+    "ppprepreviewa": "prep-reviewer-1",
+    "ppprepreviewb": "prep-reviewer-2",
+    "ppprepverdictcheck": "prep-verdict-check",
+    "pppreploopdecision": "prep-loop",
+    "pppreprevise": "prep-revise",
+    "ppprepfinalize": "prep-finalize",
   };
   return map[compact] ?? stepIdOrType;
 }
@@ -211,18 +236,15 @@ export function walkHistory(flowId: string, history: DexHistoryWire): HistoryWal
 
   for (const event of events) {
     const payload = event.payload ?? {};
-    // Any stepInput carrying a file updates the context (LeaseStep onward,
-    // every chained step input is a FileRoundInput).
-    const candidates: Array<Record<string, unknown> | undefined> = [
+    // The step's OWN input (when the wire carries it) is the context in force
+    // while it ran (LeaseStep onward, every chained step input is a
+    // FileRoundInput).
+    for (const own of [
       payload.initialStart?.stepInput,
       payload.input?.stepInput,
       payload.movement?.stepInput,
-    ];
-    for (const next of payload.output?.stepDecision?.nextSteps ?? []) {
-      candidates.push(next.stepInput);
-    }
-    for (const candidate of candidates) {
-      const found = stepInputContext(candidate);
+    ]) {
+      const found = stepInputContext(own);
       if (found !== null) ctx = found;
     }
 
@@ -237,8 +259,17 @@ export function walkHistory(flowId: string, history: DexHistoryWire): HistoryWal
       });
     }
 
+    // Stamp the envelopes with the context the step ran under BEFORE the
+    // decision's nextSteps advance it: a completing step's envelope must not
+    // take the following step's file/round (queue-verify -> queue-fix, or a
+    // release that hands the next file's lease to its successor).
     for (const upsert of payload.output?.upsertAttributes ?? []) {
       collectUpsert(flowId, upsert, ctx, feed, burnDown);
+    }
+
+    for (const next of payload.output?.stepDecision?.nextSteps ?? []) {
+      const found = stepInputContext(next.stepInput);
+      if (found !== null) ctx = found;
     }
   }
   return { feed, dispatch, burnDown };
@@ -275,8 +306,8 @@ function collectUpsert(
       endedAt: parsed.ended_at,
       stepId: parsed.stepId,
       role: parsed.role,
-      file: parsed.file ?? ctx?.file ?? null,
-      round: parsed.round ?? ctx?.round ?? null,
+      file: parsed.file ?? ctx?.file ?? parsed.identityFile?.file ?? null,
+      round: parsed.round ?? ctx?.round ?? parsed.identityFile?.round ?? null,
       attempt: parsed.attempt,
       outcome: parsed.outcome,
       tokens: parsed.tokens,
@@ -292,20 +323,75 @@ function collectUpsert(
   }
 }
 
-/** Shape-checks an attribute value into a burn-down sample. */
+function finiteOrNull(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Vitest ran/not-run accounting (US-010). Absent/null = legacy row. A present
+ * but malformed object is NOT silently read as a clean run: it degrades to
+ * not-run with an explicit reason.
+ */
+function parseVitestAccounting(raw: unknown): VitestAccountingSample | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const rec = typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  if (rec.state !== "ran" && rec.state !== "not-run") {
+    return { state: "not-run", reason: "malformed vitest accounting", passed: null, failed: null, total: null };
+  }
+  return {
+    state: rec.state,
+    reason: typeof rec.reason === "string" ? rec.reason : null,
+    passed: finiteOrNull(rec.passed),
+    failed: finiteOrNull(rec.failed),
+    total: finiteOrNull(rec.total),
+  };
+}
+
+/**
+ * tsc ran/not-run accounting (Contract A). Same honesty rule as vitest: a
+ * present but malformed object degrades to not-run, never to a clean run.
+ */
+function parseTscAccounting(raw: unknown): TscAccountingSample | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const rec = typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  if (rec.state !== "ran" && rec.state !== "not-run") {
+    return { state: "not-run", reason: "malformed tsc accounting", exit_code: null, unlocated: 0 };
+  }
+  return {
+    state: rec.state,
+    reason: typeof rec.reason === "string" ? rec.reason : null,
+    exit_code: finiteOrNull(rec.exit_code),
+    unlocated: finiteOrNull(rec.unlocated) ?? 0,
+  };
+}
+
+/**
+ * Shape-checks an attribute value into a burn-down sample. The single parser
+ * for both the history attributes and the burn-down file sources
+ * (queries.ts normalizeBurnDown delegates here), so accounting fields are
+ * carried in exactly one place.
+ */
 export function burnDownFromUnknown(value: unknown): BurnDownSample | null {
   if (value === null || typeof value !== "object") return null;
   const rec = value as Record<string, unknown>;
   const queue = rec.queue;
   if (typeof queue !== "string" || (queue !== "tsc" && queue !== "vitest")) return null;
   if (typeof rec.iteration !== "number" || typeof rec.error_count !== "number") return null;
-  return {
+  const sample: BurnDownSample = {
     queue,
     file: typeof rec.file === "string" ? rec.file : null,
     iteration: rec.iteration,
     error_count: rec.error_count,
     recorded_at: typeof rec.recorded_at === "string" ? rec.recorded_at : null,
   };
+  if (queue === "vitest") {
+    const vitest = parseVitestAccounting(rec.vitest);
+    if (vitest !== undefined) sample.vitest = vitest;
+  } else {
+    const tsc = parseTscAccounting(rec.tsc);
+    if (tsc !== undefined) sample.tsc = tsc;
+  }
+  return sample;
 }
 
 /**
@@ -329,8 +415,8 @@ export function feedFromStreamMessages(
       endedAt: parsed.ended_at,
       stepId: parsed.stepId,
       role: parsed.role,
-      file: parsed.file,
-      round: parsed.round,
+      file: parsed.file ?? parsed.identityFile?.file ?? null,
+      round: parsed.round ?? parsed.identityFile?.round ?? null,
       attempt: parsed.attempt,
       outcome: parsed.outcome,
       tokens: parsed.tokens,
@@ -411,7 +497,7 @@ export interface ParsedLease {
 }
 
 /** Parses the pp-lease/pool record table ({[file]: LeaseRecord}). */
-export function parseLeases(value: unknown): ParsedLease[] {
+function parseLeases(value: unknown): ParsedLease[] {
   if (value === null || typeof value !== "object") return [];
   const out: ParsedLease[] = [];
   for (const rec of Object.values(value as Record<string, unknown>)) {
@@ -474,7 +560,7 @@ function worktreeName(path: string): string {
  * Path identity across sources: lease records say `/tmp/x` while macOS git
  * reports the resolved `/private/tmp/x`. Compare on the stripped form.
  */
-export function normPath(path: string): string {
+function normPath(path: string): string {
   let p = path.replace(/\/+$/, "");
   if (p.startsWith("/private/")) p = p.slice("/private".length);
   return p;
@@ -499,12 +585,14 @@ export function deriveGridRows(
     const active = activeStepsOf(flow.state);
     const feedForFlow = feedByFlow.get(flow.summary.flowId) ?? [];
 
-    const latestFeedForFile = (file: string): FeedEntry | null => {
+    // `withMarkers: false` skips attempt-0 start markers: they say a step began
+    // but carry no attempt number or outcome worth showing (the row would read
+    // "attempt 0 / interrupted" for a step that is simply running).
+    const latestFeedForFile = (file: string, withMarkers: boolean): FeedEntry | null => {
       let latest: FeedEntry | null = null;
       for (const entry of feedForFlow) {
-        if (entry.file === file && (latest === null || tsMs(entry.ts) > tsMs(latest.ts))) {
-          latest = entry;
-        }
+        if (entry.file !== file || (!withMarkers && entry.attempt === 0)) continue;
+        if (latest === null || tsMs(entry.ts) > tsMs(latest.ts)) latest = entry;
       }
       return latest;
     };
@@ -525,7 +613,8 @@ export function deriveGridRows(
         .reduce((acc, b) => Math.max(acc, b.round), 0);
       const round = isCurrent && current !== null ? current.round : Math.max(doneRound, blockedRound) || null;
 
-      const latest = latestFeedForFile(lease.file);
+      const latest = latestFeedForFile(lease.file, true); // stage: a marker still names the step
+      const latestReal = latestFeedForFile(lease.file, false); // attempt/outcome: real attempts only
       const clean = findWorktree(worktrees, lease.worktreePath)?.clean ?? null;
 
       rows.push({
@@ -546,8 +635,8 @@ export function deriveGridRows(
               ? stageLabel(latest.stepId)
               : null,
         stepExecutionId: activeForFile?.stepExecutionId ?? null,
-        attempt: activeForFile?.lastFailureInfo?.attempt ?? (latest !== null ? latest.attempt : null),
-        lastOutcome: latest?.outcome ?? null,
+        attempt: activeForFile?.lastFailureInfo?.attempt ?? latestReal?.attempt ?? null,
+        lastOutcome: latestReal?.outcome ?? null,
         inFlight: activeForFile !== undefined || isCurrent,
         note: activeForFile !== undefined ? activeError(activeForFile) : null,
         flowId: flow.summary.flowId,
@@ -593,7 +682,7 @@ export function deriveGridRows(
       round: null,
       worktree: wt.path,
       worktreeName: worktreeName(wt.path),
-      branch: wt.branch.replace(/^refs\/heads\//, ""),
+      branch: shortBranchName(wt.branch),
       epoch: null,
       holder: null,
       clean: wt.clean,
@@ -623,26 +712,75 @@ function findWorktree(
 // Burn-down series
 // ---------------------------------------------------------------------------
 
+/**
+ * One chart point. A not-run iteration (US-010 vitest accounting) keeps its
+ * state and reason and carries NO count: the row's error_count is vacuous
+ * (the flow writes 0 alongside the marker) and must never be plotted.
+ */
+function burnDownPoint(s: BurnDownSample): BurnDownPointView {
+  // vitest accounting rides vitest rows, tsc accounting (Contract A) rides the
+  // tsc total row; either state "not-run" voids the count.
+  const accounting = s.vitest ?? s.tsc;
+  const notRun = accounting?.state === "not-run";
+  return {
+    iteration: s.iteration,
+    errorCount: notRun ? null : s.error_count,
+    recordedAt: s.recorded_at,
+    state: notRun ? "not-run" : "ran",
+    reason: notRun ? (accounting.reason ?? "no reason recorded") : null,
+  };
+}
+
+/** The most recently recorded sample (later input wins a timestamp tie). */
+function latestSample(rows: readonly BurnDownSample[]): BurnDownSample {
+  let best = rows[0] as BurnDownSample;
+  for (const row of rows) {
+    if (tsMs(row.recorded_at ?? "") >= tsMs(best.recorded_at ?? "")) best = row;
+  }
+  return best;
+}
+
+/**
+ * The single point for one (queue, iteration). The flow writes a per-
+ * iteration TOTAL row (file: null) plus up to 8 per-file rows; plotting them
+ * all gives several y values per x (a zig-zag) and a "latest N errors" label
+ * that can be one file's count. The total is authoritative (the per-file rows
+ * are a truncated breakdown); only when no total exists are the per-file
+ * rows summed (latest row per file).
+ */
+function iterationPoint(rows: readonly BurnDownSample[]): BurnDownPointView {
+  const totals = rows.filter((r) => r.file === null);
+  if (totals.length > 0) return burnDownPoint(latestSample(totals));
+  const byFile = new Map<string, BurnDownSample[]>();
+  for (const r of rows) {
+    const list = byFile.get(r.file ?? "") ?? [];
+    list.push(r);
+    byFile.set(r.file ?? "", list);
+  }
+  const perFile = [...byFile.values()].map(latestSample);
+  const newest = latestSample(perFile);
+  return {
+    iteration: newest.iteration,
+    errorCount: perFile.reduce((sum, r) => sum + r.error_count, 0),
+    recordedAt: newest.recorded_at,
+    state: "ran",
+    reason: null,
+  };
+}
+
 export function burnDownSeries(samples: readonly BurnDownSample[]): BurnDownSeriesView[] {
-  const byQueue = new Map<string, BurnDownSample[]>();
+  const byQueue = new Map<string, Map<number, BurnDownSample[]>>();
   for (const sample of samples) {
-    const list = byQueue.get(sample.queue) ?? [];
-    list.push(sample);
-    byQueue.set(sample.queue, list);
+    const iterations = byQueue.get(sample.queue) ?? new Map<number, BurnDownSample[]>();
+    const rows = iterations.get(sample.iteration) ?? [];
+    rows.push(sample);
+    iterations.set(sample.iteration, rows);
+    byQueue.set(sample.queue, iterations);
   }
   const series: BurnDownSeriesView[] = [];
-  for (const [queue, list] of byQueue) {
-    list.sort(
-      (a, b) => a.iteration - b.iteration || tsMs(a.recorded_at ?? "") - tsMs(b.recorded_at ?? ""),
-    );
-    series.push({
-      queue,
-      points: list.slice(-50).map((s) => ({
-        iteration: s.iteration,
-        errorCount: s.error_count,
-        recordedAt: s.recorded_at,
-      })),
-    });
+  for (const [queue, iterations] of byQueue) {
+    const points = [...iterations.values()].map(iterationPoint).sort((a, b) => a.iteration - b.iteration);
+    series.push({ queue, points: points.slice(-50) });
   }
   series.sort((a, b) => a.queue.localeCompare(b.queue));
   return series;
@@ -665,6 +803,7 @@ export function killTimeline(events: readonly NormalizedKillEvent[]): KillTimeli
       reason: e.reason,
       note: e.note,
       resumed: e.resumed,
+      fired: e.fired ?? null,
       source: e.source,
     };
     const list = byRun.get(e.runId) ?? [];
@@ -694,7 +833,13 @@ export interface ParsedTombstone {
   reason: string;
 }
 
-/** Parses a verdict attribute key suffix `<sanitized-file>#<round>#<reviewer>`. */
+/**
+ * Parses a verdict attribute key suffix `<sanitized-file>#<round>#<reviewer>`.
+ * The file comes from the ONE inverse of the key sanitizer
+ * (fileFromSanitizedKey, src/metrics/types.ts), which is lossy for a file whose
+ * own name contains "__": a verdict record's `file` is authoritative where one
+ * exists, and this key-derived file is only a label for a tombstone-only round.
+ */
 function parseVerdictKeySuffix(suffix: string): { file: string; round: number; reviewer: string } | null {
   const reviewerSep = suffix.lastIndexOf("#");
   const roundSep = reviewerSep > 0 ? suffix.lastIndexOf("#", reviewerSep - 1) : -1;
@@ -703,7 +848,7 @@ function parseVerdictKeySuffix(suffix: string): { file: string; round: number; r
   const round = Number(roundPart);
   if (!Number.isInteger(round) || roundPart === "") return null;
   return {
-    file: suffix.slice(0, roundSep).replace(/__/g, "/"),
+    file: fileFromSanitizedKey(suffix.slice(0, roundSep)),
     round,
     reviewer: suffix.slice(reviewerSep + 1),
   };
@@ -789,11 +934,16 @@ export interface DashboardInput {
    * Projection-only: this field feeds RENDERING; nothing else consumes it.
    */
   streamFeed?: readonly { flowId: string; event: unknown }[];
+  /**
+   * Per-flow mode of the stream subscriber (stream | poll-fallback), surfaced
+   * as FlowView.streamMode. Absent = subscriber not running.
+   */
+  streamModes?: Readonly<Record<string, StreamMode>>;
   feedLimit: number;
   commitLimit: number;
 }
 
-export function statusOf(available: boolean, error: string | null, detail: string | null): SourceStatus {
+function statusOf(available: boolean, error: string | null, detail: string | null): SourceStatus {
   return { available, error, detail };
 }
 
@@ -801,21 +951,44 @@ export function statusOf(available: boolean, error: string | null, detail: strin
 // Wave-5 cost honesty: per-role agent usage aggregate (takeaways-synthesis #2)
 // ---------------------------------------------------------------------------
 
-/** Aggregates the provider usage split per role over real-attempt feed entries. */
+/**
+ * Aggregates the provider usage split per role over real-attempt feed entries,
+ * counting calls the way the report does (src/metrics/render.ts): a step that
+ * ran no model call (skipped, zero tokens: a queue-fix with nothing to fix) is
+ * not a call, and a call is costed only when the provider reported a cost, so
+ * `estimated` (a lower bound) is true as soon as ANY call carried tokens
+ * without one, bare totals included (B22, B23).
+ */
 export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[] {
   const aggs = new Map<
     string,
-    { role: string; calls: number; splitCalls: number; input: number; cacheRead: number; output: number; reasoning: number; cost: number; costReported: boolean }
+    {
+      role: string;
+      calls: number;
+      splitCalls: number;
+      costedCalls: number;
+      uncostedCalls: number;
+      input: number;
+      cacheRead: number;
+      output: number;
+      reasoning: number;
+      cost: number;
+    }
   >();
   for (const e of feed) {
     if (e.attempt === 0 || !e.tokensRequired) continue;
+    if (e.outcome === "skipped" && (e.tokens === null || e.tokens === 0)) continue;
     let agg = aggs.get(e.role);
     if (!agg) {
-      agg = { role: e.role, calls: 0, splitCalls: 0, input: 0, cacheRead: 0, output: 0, reasoning: 0, cost: 0, costReported: false };
+      agg = { role: e.role, calls: 0, splitCalls: 0, costedCalls: 0, uncostedCalls: 0, input: 0, cacheRead: 0, output: 0, reasoning: 0, cost: 0 };
       aggs.set(e.role, agg);
     }
     agg.calls += 1;
-    if (e.usage === null) continue;
+    if (e.usage === null) {
+      // A bare token total: tokens flowed but no provider cost can be attached.
+      if (e.tokens !== null) agg.uncostedCalls += 1;
+      continue;
+    }
     agg.splitCalls += 1;
     agg.input += e.usage.input;
     agg.cacheRead += e.usage.cacheRead;
@@ -823,7 +996,9 @@ export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[
     agg.reasoning += e.usage.reasoning;
     if (e.usage.costUsd > 0) {
       agg.cost += e.usage.costUsd;
-      agg.costReported = true;
+      agg.costedCalls += 1;
+    } else {
+      agg.uncostedCalls += 1;
     }
   }
   return [...aggs.values()]
@@ -831,11 +1006,15 @@ export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[
       role: agg.role,
       calls: agg.calls,
       input: agg.splitCalls > 0 ? agg.input : null,
+      // Cache tokens are disjoint from `input` (see AgentUsageView.freshInput).
+      freshInput: agg.splitCalls > 0 ? agg.input : null,
       cacheRead: agg.splitCalls > 0 ? agg.cacheRead : null,
       output: agg.splitCalls > 0 ? agg.output : null,
       reasoning: agg.splitCalls > 0 ? agg.reasoning : null,
-      costUsd: agg.costReported ? agg.cost : agg.splitCalls > 0 ? 0 : null,
-      estimated: agg.splitCalls > 0 && !agg.costReported,
+      costUsd: agg.costedCalls > 0 ? agg.cost : agg.splitCalls > 0 ? 0 : null,
+      costedCalls: agg.costedCalls,
+      uncostedCalls: agg.uncostedCalls,
+      estimated: agg.splitCalls > 0 && agg.uncostedCalls > 0,
     }))
     .sort((a, b) => a.role.localeCompare(b.role));
 }
@@ -852,50 +1031,163 @@ export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[
  *   → "resumed" (dex was restarted on the same DB and the flow is alive);
  * - running + a kill after start + NO post-kill activity + dex unreachable
  *   → "killed (dex down)";
- * - completed/failed → terminal wording with the file count.
+ * - any non-running status (completed/failed/terminated/canceled/...) →
+ *   terminal wording with the file count.
  *
  * US-006: `degradedRounds` > 0 appends an explicit `DEGRADED` marker so no
  * surface can read a zero-reviewer round as clean.
  */
-export function lifecycleHeadline(input: {
+export function lifecycleHeadline(input: LifecycleHeadlineInput): string {
+  return lifecycleHeadlineView(input).text;
+}
+
+export interface LifecycleHeadlineInput {
   flow: FlowView | undefined;
   filesDone: number;
   filesTotal: number;
   killEvents: readonly NormalizedKillEvent[];
   dexAvailable: boolean;
   feed: readonly FeedEntry[];
-  /** US-006: count of the headline flow's degraded (all-reviewers-discarded) rounds. */
+  /** US-006: count of the headline run's degraded (all-reviewers-discarded) rounds. */
   degradedRounds?: number;
-}): string {
+}
+
+export interface HeadlineView {
+  text: string;
+  /** Structured lifecycle state: the client styles from this, not from `text`. */
+  state: HeadlineState;
+  /** US-006: the run has degraded rounds (never renders as a clean state). */
+  degraded: boolean;
+}
+
+function terminalHeadlineState(status: string): HeadlineState {
+  switch (status) {
+    case "completed":
+    case "failed":
+    case "terminated":
+    case "canceled":
+      return status;
+    default:
+      return "other-terminal";
+  }
+}
+
+/** Headline text plus the structured state/degraded flag behind it. */
+export function lifecycleHeadlineView(input: LifecycleHeadlineInput): HeadlineView {
   const { flow, filesDone, filesTotal } = input;
-  if (flow === undefined) return "no port flow found";
+  if (flow === undefined) return { text: "no port flow found", state: "none", degraded: false };
   const files = `${filesDone}/${filesTotal} files`;
-  const degraded =
-    input.degradedRounds !== undefined && input.degradedRounds > 0
-      ? ` · DEGRADED (${input.degradedRounds} unreviewed round${input.degradedRounds === 1 ? "" : "s"})`
-      : "";
+  const isDegraded = input.degradedRounds !== undefined && input.degradedRounds > 0;
+  const degraded = isDegraded
+    ? ` · DEGRADED (${input.degradedRounds} unreviewed round${input.degradedRounds === 1 ? "" : "s"})`
+    : "";
+  const view = (text: string, state: HeadlineState): HeadlineView => ({ text, state, degraded: isDegraded });
   const killAfterStart = input.killEvents
     .filter((e) => tsMs(e.utc) > tsMs(flow.startTime))
     .sort((a, b) => tsMs(b.utc) - tsMs(a.utc))[0];
   const status = flow.status;
-  if (status === "completed" || status === "failed") {
-    const killedNote = killAfterStart !== undefined ? " (survived kill)" : "";
-    return `◆ ${flow.flowId}: ${files} · ${status}${killedNote}${degraded}`;
+  // Every non-running status is terminal (completed/failed/terminated/
+  // canceled/continued-as-new/timed-out...): print the status word instead of
+  // letting a stopped flow read as `running`.
+  if (status !== "running") {
+    const killedNote =
+      killAfterStart !== undefined && (status === "completed" || status === "failed") ? " (survived kill)" : "";
+    return view(
+      `◆ ${flow.flowId}: ${files} · ${terminalStatusWord(status)}${killedNote}${degraded}`,
+      terminalHeadlineState(status),
+    );
   }
   if (killAfterStart !== undefined) {
     const killMs = tsMs(killAfterStart.utc);
+    // The per-file work of a parallel run happens in SubFlow children while the
+    // parent waits on the wave join and emits nothing, so activity of the run
+    // is activity of the parent OR of any of its children (B16).
     const activityAfterKill = input.feed.some(
-      (e) => e.flowId === flow.flowId && tsMs(e.startedAt) > killMs,
+      (e) => belongsToRun(e.flowId, flow.flowId) && tsMs(e.startedAt) > killMs,
     );
+    const at = killAfterStart.utc.slice(11, 19);
     if (activityAfterKill) {
-      return `◆ ${flow.flowId}: ${files} · resumed (killed ${killAfterStart.utc.slice(11, 19)}Z)${degraded}`;
+      return view(`◆ ${flow.flowId}: ${files} · resumed (killed ${at}Z)${degraded}`, "resumed");
     }
     if (!input.dexAvailable) {
-      return `◆ ${flow.flowId}: ${files} · killed (dex down since ${killAfterStart.utc.slice(11, 19)}Z)${degraded}`;
+      return view(`◆ ${flow.flowId}: ${files} · killed (dex down since ${at}Z)${degraded}`, "killed");
     }
-    return `◆ ${flow.flowId}: ${files} · running (kill at ${killAfterStart.utc.slice(11, 19)}Z, awaiting resume)${degraded}`;
+    return view(
+      `◆ ${flow.flowId}: ${files} · running (kill at ${at}Z, awaiting resume)${degraded}`,
+      "awaiting-resume",
+    );
   }
-  return `◆ ${flow.flowId}: ${files} · running${degraded}`;
+  return view(`◆ ${flow.flowId}: ${files} · running${degraded}`, "running");
+}
+
+/** Display word for a non-running dex flow status (lower-cased, prefix stripped). */
+function terminalStatusWord(status: string): string {
+  if (status === "continued_as_new") return "continued-as-new";
+  if (status === "server_side_timeout_internal_only") return "timed-out";
+  return status.replace(/_/g, "-");
+}
+
+/**
+ * The kill events that may colour `flow`'s headline (data contract B):
+ * - a completion that recorded `fired: false` killed nothing, so neither it nor
+ *   the intent it closes is a kill (never a killed/resumed overlay). run_id is
+ *   only a label that a watcher or killer may reuse (watch-queue-verify defaults
+ *   it to a constant), so a no-op is judged per completion and paired with ITS
+ *   intent, never by excluding every event that shares the label (B21);
+ * - an event that names a Dex run id (`flow_run_id`) only applies to the flow
+ *   with that run id (legacy sidecars may carry the flow id there instead).
+ */
+export function headlineKillEvents(
+  events: readonly NormalizedKillEvent[],
+  flow: FlowView | undefined,
+): NormalizedKillEvent[] {
+  if (flow === undefined) return [];
+  // Walk the sidecar in time order: a completion closes the latest still-open
+  // intent of its run label; a fired:false completion removes the pair.
+  const noops = new Set<NormalizedKillEvent>();
+  const open = new Map<string, NormalizedKillEvent[]>();
+  const byTime = events
+    .map((event, index) => ({ event, index }))
+    .sort((a, b) => tsMs(a.event.utc) - tsMs(b.event.utc) || a.index - b.index);
+  for (const { event } of byTime) {
+    if (event.kind === "intent") {
+      open.set(event.runId, [...(open.get(event.runId) ?? []), event]);
+    } else if (event.kind === "completed") {
+      const closed = open.get(event.runId)?.pop();
+      if (event.fired === false) {
+        noops.add(event);
+        if (closed !== undefined) noops.add(closed);
+      }
+    }
+  }
+  return events.filter(
+    (e) =>
+      !noops.has(e) &&
+      (e.flowRunId == null || e.flowRunId === flow.runId || e.flowRunId === flow.flowId),
+  );
+}
+
+/** Parallel-wave SubFlow children (port.File) surface as their own flows. */
+export function isSubFlowChild(flowId: string): boolean {
+  return flowId.startsWith("SubFlow:");
+}
+
+/**
+ * True when `flowId` is the run flow itself or one of its SubFlow children
+ * (dex names them `SubFlow:<parentFlowId>-<stepExecutionId>-<index>`).
+ */
+export function belongsToRun(flowId: string, runFlowId: string): boolean {
+  return flowId === runFlowId || flowId.startsWith(`SubFlow:${runFlowId}-`);
+}
+
+/**
+ * The run headline belongs to the newest top-level `port.Project` flow
+ * (SubFlow children and probe.* flows never hijack it); any other top-level
+ * flow is only a fallback when no port.Project exists. `flows` is newest-first.
+ */
+function pickHeadlineFlow(flows: readonly FlowView[]): FlowView | undefined {
+  const topLevel = flows.filter((f) => !isSubFlowChild(f.flowId));
+  return topLevel.find((f) => f.flowType === "port.Project") ?? topLevel[0];
 }
 
 /** Sorts flows newest-first (startTime desc, flowId as tiebreak). */
@@ -917,25 +1209,36 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     startTime: f.startTime ?? "",
     closeTime: f.closeTime ?? null,
     runId: f.runId,
+    ...(input.streamModes?.[f.flowId] !== undefined ? { streamMode: input.streamModes[f.flowId] } : {}),
   }));
+
+  // Wave-5 lifecycle headline: newest TOP-LEVEL port.Project flow (SubFlow
+  // children of the parallel wave join surface as their own flows; the run
+  // headline belongs to the parent) + its queue progress + kill overlay.
+  const headlineFlow = pickHeadlineFlow(flowViews);
 
   // Feed: history walk (with context threading), state fallback per flow.
   const feedByFlow = new Map<string, FeedEntry[]>();
-  const samples: BurnDownSample[] = [...input.burnDownFiles];
+  // Burn-down is ONE run's series (B18): iteration numbers restart with every run,
+  // so samples of an older run (up to 3 port.Project runs are selected) spliced
+  // by iteration into the current run's chart read "latest 0 errors @ iteration
+  // 5" over a run that is at 32. Only the headline run's samples are plotted.
+  const liveSamples: BurnDownSample[] = [];
   const feed: FeedEntry[] = [];
   for (const flow of flowsSorted) {
     const flowId = flow.flowId;
     const history = input.dex.histories[flowId];
     const state = input.dex.states[flowId] ?? null;
+    const inHeadlineRun = headlineFlow === undefined || belongsToRun(flowId, headlineFlow.flowId);
     let flowFeed: FeedEntry[] = [];
     if (history !== undefined && history !== null) {
       const walked = walkHistory(flowId, history);
       flowFeed = walked.feed;
-      samples.push(...walked.burnDown);
+      if (inHeadlineRun) liveSamples.push(...walked.burnDown);
     } else if (state !== null) {
       const fallback = feedFromState(flowId, state);
       flowFeed = fallback.feed;
-      samples.push(...fallback.burnDown);
+      if (inHeadlineRun) liveSamples.push(...fallback.burnDown);
     }
     // State attributes can hold envelope keys the history page has not shown
     // yet (fresh upserts) — merge without duplicating stepId#attempt keys.
@@ -950,19 +1253,44 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     feed.push(...flowFeed);
   }
   // US-007: merge stream-delivered events (subscriber receipt) into the feed.
-  // Same dedup key as the state-fallback merge so an event that BOTH the
-  // stream and a poll delivered appears once; events for flows outside the
-  // selection still render (their flowId rides the entry).
+  // Stream messages are UPSERTS: an envelope's start and completion events
+  // share one key (flowId#stepId#attempt#startedAt), so the merge keeps the
+  // most complete row instead of the first one seen. An event that BOTH
+  // the stream and a poll delivered still appears once; events for flows
+  // outside the selection still render (their flowId rides the entry).
   if (input.streamFeed !== undefined && input.streamFeed.length > 0) {
-    const streamEntries = feedFromStreamMessages(input.streamFeed);
-    const seenStream = new Set(feed.map((e) => `${e.flowId}#${e.stepId}#${e.attempt}#${e.startedAt}`));
-    for (const entry of streamEntries) {
-      const key = `${entry.flowId}#${entry.stepId}#${entry.attempt}#${entry.startedAt}`;
-      if (!seenStream.has(key)) {
+    const keyOf = (e: FeedEntry) => `${e.flowId}#${e.stepId}#${e.attempt}#${e.startedAt}`;
+    const existingByKey = new Map<string, FeedEntry>();
+    for (const e of feed) if (!existingByKey.has(keyOf(e))) existingByKey.set(keyOf(e), e);
+    const streamOwned = new Set<FeedEntry>();
+    for (const entry of feedFromStreamMessages(input.streamFeed)) {
+      const key = keyOf(entry);
+      const existing = existingByKey.get(key);
+      if (existing === undefined) {
         feed.push(entry);
-        seenStream.add(key);
+        existingByKey.set(key, entry);
+        streamOwned.add(entry);
         feedByFlow.get(entry.flowId)?.push(entry);
+        continue;
       }
+      // Completion beats in-flight. Between two stream messages the later one
+      // wins (upsert); a stream message never displaces a durable polled row
+      // of equal completeness (the poll is the source of truth).
+      const nextDone = entry.endedAt !== null;
+      const existingDone = existing.endedAt !== null;
+      const replace = streamOwned.has(existing) ? nextDone || !existingDone : nextDone && !existingDone;
+      if (!replace) continue;
+      const merged: FeedEntry = {
+        ...entry,
+        file: entry.file ?? existing.file,
+        round: entry.round ?? existing.round,
+      };
+      feed[feed.indexOf(existing)] = merged;
+      const flowList = feedByFlow.get(entry.flowId);
+      const at = flowList?.indexOf(existing) ?? -1;
+      if (flowList !== undefined && at >= 0) flowList[at] = merged;
+      existingByKey.set(key, merged);
+      streamOwned.add(merged);
     }
   }
   feed.sort((a, b) => tsMs(b.ts) - tsMs(a.ts));
@@ -997,29 +1325,32 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     contentHash: c.contentHash,
   }));
 
-  // Wave-5 lifecycle headline: newest TOP-LEVEL flow (SubFlow children of the
-  // parallel wave join surface as their own flows; the run headline belongs
-  // to the parent port.Project flow) + its queue progress + kill overlay.
-  const headlineFlow = flowViews.find((f) => !f.flowId.startsWith("SubFlow:"));
   const headlineQueue = headlineQueueFor(headlineFlow, queueSummaries);
-  // US-006 degraded rounds: derived per flow from the verdict attributes;
-  // the headline flow's count drives the headline DEGRADED marker.
+  // US-006 degraded rounds: derived per flow from the verdict attributes. The
+  // verdict attributes live in whichever flow ran the review steps, which in
+  // the default parallel mode is a SubFlow child, so the headline run's count
+  // covers the run flow AND its children.
   const degradedRounds = flowsSorted.flatMap((f) =>
     degradedRoundsOf(f.flowId, input.dex.states[f.flowId] ?? null),
   );
-  const headline = lifecycleHeadline({
+  const headlineView = lifecycleHeadlineView({
     flow: headlineFlow,
     filesDone: headlineQueue.done + headlineQueue.blocked,
     filesTotal: headlineQueue.total,
-    killEvents: input.killEvents.events,
+    killEvents: headlineKillEvents(input.killEvents.events, headlineFlow),
     dexAvailable: input.dex.available,
     feed,
-    degradedRounds: degradedRounds.filter((r) => r.flowId === headlineFlow?.flowId).length,
+    degradedRounds:
+      headlineFlow === undefined
+        ? 0
+        : degradedRounds.filter((r) => belongsToRun(r.flowId, headlineFlow.flowId)).length,
   });
 
   return {
     generatedAt: input.now,
-    headline,
+    headline: headlineView.text,
+    headlineState: headlineView.state,
+    headlineDegraded: headlineView.degraded,
     sources: {
       dex: statusOf(input.dex.available, input.dex.error, input.dex.detail),
       git: { ...statusOf(input.git.available, input.git.error, null), repoRoot: input.git.repoRoot },
@@ -1032,11 +1363,14 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     grid,
     queueSummaries,
     feed: feedCapped,
-    burnDown: burnDownSeries(samples),
+    // BURN_DOWN_FILES are the source when the run publishes no samples of its own
+    // (offline analysis of a recorded run). They are never merged with live ones:
+    // a stale file from an earlier run would be spliced into the live series.
+    burnDown: burnDownSeries(liveSamples.length > 0 ? liveSamples : [...input.burnDownFiles]),
     commits,
     worktrees: input.git.worktrees.map((w) => ({
       path: w.path,
-      branch: w.branch.replace(/^refs\/heads\//, ""),
+      branch: shortBranchName(w.branch),
       head: w.head,
       clean: w.clean,
     })),

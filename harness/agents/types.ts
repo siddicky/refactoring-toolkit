@@ -5,13 +5,13 @@
  * Tool vocabulary is deliberately CATEGORY-level (bash, git, read, ...), not
  * concrete opencode tool names: mapping categories onto the merged opencode
  * tool surface (including `mcp__*` server tools) happens at plugin merge and
- * is owned by worker-1/lead.
+ * belongs to the plugin merge, not to these configs.
  *
  * ISOLATION NOTE (plan §Reviewer isolation enforcement): these ALLOW/DENY
  * configs are declarative intent. EFFECTIVE permissions must be tested after
  * the config + plugin merge — the merged reviewer agent must have zero
  * effective tools, and runtime probes must show denied-tool invocations are
- * refused. Those tests are worker-1/lead's, not this module's.
+ * refused. Those are runtime tests of the merge, not tests of this module.
  */
 
 /** Tool categories referenced by the plan's isolation requirements. */
@@ -49,7 +49,12 @@ export interface AgentDefinition {
   tools: AgentToolConfig;
 }
 
-/** Tools the implementer/fixer may use — scoped to their lease worktree. */
+/**
+ * Declarative tool surface of the implementer/fixer (scoped to their lease
+ * worktree). Config view only: in the v1 bridge every turn is sent with ALL
+ * tools disabled (src/harness/runtime.ts toolOverridesAllOff) and the toolkit
+ * writes the reply's fenced file itself, so a turn never actually gets these.
+ */
 export const AGENT_WRITE_TOOLS: readonly ToolCategory[] = [
   "read",
   "write",

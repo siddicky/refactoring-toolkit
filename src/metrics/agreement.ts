@@ -68,25 +68,10 @@ function maxMatching(a: readonly Finding[], b: readonly Finding[]): number {
 }
 
 /**
- * The core rule for exactly the two verdict records of one file+round.
- * Either record may be null/undefined (= missing) which yields "unreviewed".
- */
-export function classifyAgreement(
-  a: VerdictRecord | null | undefined,
-  b: VerdictRecord | null | undefined,
-): AgreementRecord {
-  const file = a?.file ?? b?.file ?? "<unknown>";
-  const round = a?.round ?? b?.round ?? 0;
-  const records: VerdictRecord[] = [];
-  if (a) records.push(a);
-  if (b) records.push(b);
-  return agreementForGroup(records, file, round);
-}
-
-/**
  * Agreement for one file+round group of completed verdict records.
- * A healthy v1 run has exactly 2 reviewers; any other count (0, 1, 3+) is
- * "unreviewed" with the observed count surfaced in the reason.
+ * A healthy v1 run has exactly 2 DISTINCT reviewers; any other count (0, 1,
+ * 3+) or a duplicated reviewer id is "unreviewed" with the observed shape
+ * surfaced in the reason.
  */
 export function agreementForGroup(
   records: readonly VerdictRecord[],
@@ -109,6 +94,16 @@ export function agreementForGroup(
       round,
       outcome: "unreviewed",
       reason: `expected exactly 2 completed verdict records, found ${records.length}`,
+    };
+  }
+  if (x.reviewer === y.reviewer) {
+    // Two records from ONE reviewer are not a pair: the other reviewer never
+    // reviewed, so neither agreement nor disagreement can be claimed.
+    return {
+      file,
+      round,
+      outcome: "unreviewed",
+      reason: `expected two distinct reviewers, found ${x.reviewer} twice (duplicate reviewer)`,
     };
   }
   if (x.findings.length === 0 && y.findings.length === 0) {
@@ -143,32 +138,4 @@ export function agreementForGroup(
     outcome: "disagree",
     reason: `findings could not be fully paired: ${x.reviewer} has ${x.findings.length}, ${y.reviewer} has ${y.findings.length}, matched ${matched}`,
   };
-}
-
-/**
- * Group completed verdict records by file+round and compute the agreement
- * outcome for each group. Output is sorted by (file, round) for determinism.
- * Groups with any record count other than 2 come out as "unreviewed".
- */
-export function agreementByFileRound(records: readonly VerdictRecord[]): AgreementRecord[] {
-  const groups = new Map<string, VerdictRecord[]>();
-  for (const r of records) {
-    const key = `${r.file}\u0000${r.round}`;
-    const list = groups.get(key);
-    if (list) list.push(r);
-    else groups.set(key, [r]);
-  }
-  const out: AgreementRecord[] = [];
-  for (const [key, list] of groups) {
-    const parts = key.split("\u0000");
-    const file = parts[0] ?? "<unknown>";
-    const round = Number(parts[1] ?? "0");
-    const sorted = [...list].sort((p, q) => (p.reviewer < q.reviewer ? -1 : p.reviewer > q.reviewer ? 1 : 0));
-    out.push(agreementForGroup(sorted, file, round));
-  }
-  out.sort((p, q) => {
-    if (p.file !== q.file) return p.file < q.file ? -1 : 1;
-    return p.round - q.round;
-  });
-  return out;
 }

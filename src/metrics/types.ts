@@ -14,9 +14,11 @@
  *   findings array is a completed clean review, distinct from a missing record.
  * - Severity classes are a single enum (this file is the Phase 1 verdict schema
  *   carrier for the toolkit's own code), shared by prompts and fixtures.
- * - Kill events mirror the chaos sidecar: an intent record (run id, UTC +
- *   monotonic, target PIDs) written BEFORE SIGKILL and a completion record
- *   appended AFTER. Cross-process ordering assertions use UTC only.
+ * - Kill events are the renderer's normalized view of the chaos sidecar
+ *   (`metrics/kill-events.jsonl`, parsed by ./kill-events.ts): an intent record
+ *   (run id, UTC + monotonic, target PIDs) written BEFORE SIGKILL and a
+ *   completion record appended AFTER. Cross-process ordering assertions use
+ *   UTC only.
  */
 
 /** Terminal/interim outcome of one envelope-wrapped step execution. */
@@ -26,8 +28,11 @@ export type EnvelopeOutcome = "skipped" | "redone" | "interrupted" | "completed"
  * Role of the step inside the envelope. Mirror of the LIVE envelope factory
  * (flows/steps/envelope.ts): `agent`, `review`, and `judgment` are
  * model-calling; `verdict-check`/`prioritize` sit at TypeSafe integration
- * points but are code-only (naive) in Phase 2 and move to `judgment` at the
- * Phase 3 Jev swap-in; the rest are non-model.
+ * points and stay NON-model roles with `tokens: null` even when the live Jev
+ * path is wired — their Jev spend (and the vitest-triage spend) is recorded in
+ * the flow's `pp-jev-usage` attribute and reported SEPARATELY by the renderer
+ * ({@link JevUsageEntry}, report `jev_usage`), never folded into the
+ * model-calling role totals; the rest are non-model.
  */
 export type EnvelopeRole =
   | "agent"
@@ -41,6 +46,14 @@ export type EnvelopeRole =
   | "diff-capture"
   | "record";
 
+/**
+ * The prep-analysis spec, treated as a "file" at round 0: prep reviews key
+ * their envelopes and verdicts by it (flows/port/prep-steps.ts). It is real
+ * review work (kept in file_rounds and the token tables) but not a ported
+ * source file, so the renderer excludes it from `summary.files`.
+ */
+export const PREP_SPEC_FILE = "PORTING.spec.md";
+
 /** Roles that call a model and therefore MUST carry non-null `tokens`. */
 export type ModelCallingRole = "agent" | "review" | "judgment";
 
@@ -48,6 +61,19 @@ export const MODEL_CALLING_ROLES: readonly ModelCallingRole[] = ["agent", "revie
 
 export function isModelCallingRole(role: EnvelopeRole): role is ModelCallingRole {
   return (MODEL_CALLING_ROLES as readonly string[]).includes(role);
+}
+
+/**
+ * One live TypeSafe Jev usage entry from the flow's `pp-jev-usage` attribute
+ * (the evidence stream written by recordJevUsage). `stepId` is
+ * `<step>:<file>#<round>` (verdict-check, prioritize) or
+ * `pp-queue-verify:vitest-triage`; `tokens` is input + output. The entry
+ * carries NO cost: Jev spend is reported as tokens only.
+ */
+export interface JevUsageEntry {
+  stepId: string;
+  tokens: number;
+  atUtc: string;
 }
 
 /**
@@ -80,7 +106,7 @@ export interface TokenUsage {
 export type TurnShapeClass =
   /** Usage-present, no text, not aborted — the US-002 Tier-0 signature. */
   | "tier0-degenerate"
-  /** Upstream abort — the recovery path (flows/port-project.ts runAgentTurn). */
+  /** Upstream abort — the recovery path (flows/port/agent-turns.ts runAgentTurn). */
   | "aborted"
   /** Completed reply with no provider usage — provenance class, never zero. */
   | "no-usage"
@@ -88,7 +114,7 @@ export type TurnShapeClass =
   | "parsed"
   /** Parseable-length text that FAILS verdict extraction (885-token case). */
   | "unparseable-text"
-  /** Verdict extracted but discarded (US-006 repair-or-discard lands later). */
+  /** Verdict extracted but discarded (US-006 repair-or-discard). */
   | "discarded-verdict";
 
 /** The observed shape of one turn — data only, no behavior. */
@@ -175,7 +201,7 @@ export interface TurnHealthAssessor {
 }
 
 /** Shape classes the Tier-1 noul battery may fire on (shape-ambiguous). */
-export const AMBIGUOUS_SHAPE_CLASSES: readonly TurnShapeClass[] = [
+const AMBIGUOUS_SHAPE_CLASSES: readonly TurnShapeClass[] = [
   "unparseable-text",
   "discarded-verdict",
 ];
@@ -192,9 +218,8 @@ export function isShapeAmbiguous(shape: TurnShapeClass): boolean {
  * resulting lane. NO Jev call — the battery fires only on shape-ambiguous
  * turns, and a turn whose verdict parsed is shape-trivial.
  *
- * `lane` mirrors the demotion policy f(attempt) (demoteReviewerLane: attempt
- * >= 2 → demoted) — deliberate data-only mirror, same rule as
- * src/metrics/dispatch-anchor.ts's step table.
+ * `lane` is the demotion policy f(attempt), taken from the one threshold
+ * (isDemotedAttempt in src/harness/lanes.ts) rather than a copy of it.
  */
 export function buildRetryContextDiagnosis(input: {
   file: string;
@@ -211,7 +236,7 @@ export function buildRetryContextDiagnosis(input: {
     reviewer: input.reviewer,
     attempt: input.attempt,
     prior_failed_attempts: Math.max(0, input.attempt - 1),
-    lane: (input.attempt ?? 1) >= 2 ? "demoted" : "default",
+    lane: isDemotedAttempt(input.attempt) ? "demoted" : "default",
     trigger: "retry-context",
     shape: input.shape,
     questions: [],
@@ -246,9 +271,14 @@ export function buildRetryContextDiagnosis(input: {
 export interface EnvelopeEvent {
   stepId: string;
   role: EnvelopeRole;
-  /** Lease file key; null for flow-level steps (and in the live factory). */
-  file: string | null;
-  round: number | null;
+  /**
+   * An explicit file/round, read when present. The live factory never writes
+   * them (a per-file step is identified by {@link EnvelopeEvent.identity}, the
+   * sanitized `file#round`), so they exist for hand-built and legacy events,
+   * where they take precedence over the identity.
+   */
+  file?: string | null;
+  round?: number | null;
   /** 0 = M4 start marker; >= 1 = real attempt (dex Context.attempt). */
   attempt: number;
   /** UTC ISO-8601 timestamp. */
@@ -277,49 +307,35 @@ export function isStartMarker(env: EnvelopeEvent): boolean {
 
 /**
  * Normalize the envelope `tokens` field to the token TOTAL: a number passes
- * through; the SDK-shaped object sums; anything else is null. Mirrors the
- * dashboard's normalizeTokens so both surfaces agree on the contract.
+ * through; the SDK-shaped object sums; anything else is null. The ONE
+ * normalizer: the renderer calls it and the dashboard's normalizeTokens
+ * delegates to it, so both surfaces agree on the contract. It reads parsed
+ * JSON, hence `unknown`: an optional split field that is absent or not a
+ * finite number counts as 0 rather than poisoning the total.
  */
-export function tokenTotalOf(tokens: number | TokenUsage | null): number | null {
+export function tokenTotalOf(tokens: unknown): number | null {
   if (typeof tokens === "number") return tokens;
-  if (tokens !== null && typeof tokens === "object") {
-    const input = tokens.input_tokens;
-    const output = tokens.output_tokens;
-    if (typeof input !== "number" || typeof output !== "number") return null;
-    // Wave-5: the usage object may carry the full provider split; the total
-    // matches the opencode seam's tokenTotal (input+output+reasoning+cache).
-    return (
-      input +
-      output +
-      (tokens.reasoning_tokens ?? 0) +
-      (tokens.cache_read_tokens ?? 0) +
-      (tokens.cache_write_tokens ?? 0)
-    );
-  }
-  return null;
+  if (tokens === null || typeof tokens !== "object") return null;
+  const usage = tokens as Record<string, unknown>;
+  const input = usage.input_tokens;
+  const output = usage.output_tokens;
+  if (typeof input !== "number" || typeof output !== "number") return null;
+  const optional = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  // Wave-5: the usage object may carry the full provider split; the total
+  // matches the opencode seam's tokenTotal (input+output+reasoning+cache).
+  return (
+    input +
+    output +
+    optional(usage.reasoning_tokens) +
+    optional(usage.cache_read_tokens) +
+    optional(usage.cache_write_tokens)
+  );
 }
 
-/**
- * Sanitized identity key for a file-round (mirror of the flow's
- * markerKeyOf: AttributeMap keys prohibit `/`, so it is replaced with "__").
- */
-export function identityKeyOf(file: string, round: number): string {
-  return `${file.replace(/\//g, "__")}#${round}`;
-}
-
-/**
- * Best-effort inverse of {@link identityKeyOf}: recover the file path and
- * round from a sanitized identity. "__" -> "/" is lossy if a filename itself
- * contains "__"; acceptable for v1 grouping and documented as such.
- */
-export function fileFromIdentity(identity: string): { file: string; round: number } | null {
-  const hash = identity.lastIndexOf("#");
-  if (hash <= 0) return null;
-  const roundPart = identity.slice(hash + 1);
-  const round = Number(roundPart);
-  if (!Number.isInteger(round) || roundPart === "") return null;
-  return { file: identity.slice(0, hash).replace(/__/g, "/"), round };
-}
+// The file-key helpers (sanitizer, identity key and their inverses) live in
+// src/file-keys.ts, shared with the flows and the harness; re-exported here so
+// the metrics-facing import surface stays one module.
+export { fileFromIdentity, fileFromSanitizedKey, identityKeyOf, sanitizeFileKey } from "../file-keys.js";
 
 /**
  * The single severity enum for the toolkit. CANONICAL DEFINITION: the verdict
@@ -328,11 +344,10 @@ export function fileFromIdentity(identity: string): { file: string; round: numbe
  * fixtures"). This module re-exports it under the metrics-facing name so
  * downstream consumers keep one import surface.
  */
-import { SEVERITIES, type Severity } from "../../harness/agents/verdict-schema.js";
+import type { Severity } from "../../harness/agents/verdict-schema.js";
+import { isDemotedAttempt } from "../harness/lanes.js";
 
 export type SeverityClass = Severity;
-
-export const SEVERITY_CLASSES: readonly SeverityClass[] = SEVERITIES;
 
 /** Lower rank = more severe. Used by the naive severity-class rerank. */
 export const SEVERITY_RANK: Readonly<Record<SeverityClass, number>> = {
@@ -405,6 +420,29 @@ export interface VerdictTombstone {
   tokens: number | TokenUsage | null;
 }
 
+/**
+ * One reviewer's citation-gate result for a file+round, as the flow's gate
+ * persisted it (`pp-kept`: `citationGate` scores + `dropped`). This is the
+ * score the gate APPLIED (live Jev's p_cited when a key is configured), unlike
+ * `VerdictRecord.citation_check`, which is the deterministic check stamped at
+ * review time. The report shows both and says which is which (C14).
+ */
+export interface CitationGateView {
+  file: string;
+  round: number;
+  reviewer: string;
+  /** "naive" | "jev" | "naive-fallback": what produced the scores. */
+  checker: string;
+  /** Why live Jev was abandoned (checker "naive-fallback"); null otherwise. */
+  fallbackReason: string | null;
+  scores: Array<{
+    finding_id: string;
+    p_cited: number;
+    /** What the gate did with the finding. */
+    outcome: "kept" | "dropped-citation" | "dropped-disposition";
+  }>;
+}
+
 /** Narrow an unknown/union verdict-attribute value to a tombstone. */
 export function isVerdictTombstone(value: unknown): value is VerdictTombstone {
   return (
@@ -440,7 +478,7 @@ export type QueueKind = "tsc" | "vitest";
  * US-010 honest vitest accounting carried on vitest burn-down samples. A
  * queue that did not RUN is never presented as a bare error_count 0: the
  * state plus the explicit reason travel with the sample, and renderers show
- * them. tsc rows carry no such field (tsc keeps its own semantics).
+ * them. tsc has its own accounting ({@link TscRunAccounting}) on its TOTAL row.
  */
 export interface VitestRunAccounting {
   state: "ran" | "not-run";
@@ -452,28 +490,58 @@ export interface VitestRunAccounting {
 }
 
 /**
+ * Contract A: honest tsc accounting carried on the tsc TOTAL burn-down row
+ * (file null), mirroring {@link VitestRunAccounting}. `state` is "not-run"
+ * whenever tsc could not produce a trustworthy count: spawn error / ENOENT,
+ * timeout or kill, or a non-zero exit with zero located diagnostics. A not-run
+ * row is never rendered as PASS or as "0 errors".
+ */
+export interface TscRunAccounting {
+  state: "ran" | "not-run";
+  /**
+   * Explicit reason when not-run, e.g. "tsc exited 2 with no located
+   * diagnostics: error TS18003: No inputs were found...", "tsc timed out after
+   * 180s", "tsc binary not found (ENOENT)". null when ran.
+   */
+  reason: string | null;
+  /** Process exit code; null when killed / not spawned. */
+  exit_code: number | null;
+  /** Count of global (file-less) `error TSnnnn:` diagnostics seen. */
+  unlocated: number;
+}
+
+/**
  * One queue burn-down sample (toolkit-owned queue steps against the integrated
  * checkout). `error_count` is the number of type errors (tsc) or failing tests
  * (vitest) at that iteration. Vitest samples carry `vitest` accounting: when
  * state is "not-run" the count is vacuous and consumers must render the state.
+ *
+ * `file: null` is the flow's AGGREGATE row for the iteration: its
+ * `error_count` is the authoritative iteration total. Per-file rows (tsc only,
+ * capped by the flow) are a breakdown and never added to an existing total.
  */
 export interface QueueBurnDownEvent {
   queue: QueueKind;
-  file: string;
+  /** null = aggregate (iteration total) row; a path = per-file breakdown row. */
+  file: string | null;
   iteration: number;
   error_count: number;
   /** UTC ISO-8601 timestamp of the sample. */
   recorded_at: string;
   /** US-010; absent on tsc rows and on legacy vitest rows (pre-US-010 runs). */
   vitest?: VitestRunAccounting;
+  /** Contract A; only on the tsc TOTAL row (file null); absent on legacy rows. */
+  tsc?: TscRunAccounting;
 }
 
 /**
- * Chaos-sidecar event: kill intent written BEFORE SIGKILL (so the evidence
- * chain cannot be orphaned by a killer-side crash) and the completion record
- * appended AFTER. `monotonic_ms` is compared only within a single process.
+ * Normalized kill event as the renderer consumes it (distinct from the raw
+ * sidecar line type in scripts/chaos-kill.ts): kill intent written BEFORE
+ * the signal (so the evidence chain cannot be orphaned by a killer-side
+ * crash) and the completion record appended AFTER. `monotonic_ms` is compared
+ * only within a single process.
  */
-export type KillEvent =
+export type ReportKillEvent =
   | {
       kind: "kill-intent";
       run_id: string;
@@ -488,10 +556,45 @@ export type KillEvent =
       monotonic_ms: number;
       resumed: boolean;
       note: string | null;
+      /** PIDs the sidecar recorded as actually killed; absent on legacy records. */
+      killed_pids?: number[];
+      /**
+       * false = the completion killed nothing (`killed_pids` empty): a NO-OP,
+       * never a successful kill-and-resume. Absent = legacy record; derived
+       * from `killed_pids` when present (see kill-events.ts).
+       */
+      fired?: boolean;
     };
 
-/** Parsed shape of the run's kill-events.json sidecar file. */
+/** Normalized kill events of one run (what `MetricsRenderInput.killEvents` takes). */
 export interface KillEventsFile {
   run_id: string;
-  events: KillEvent[];
+  events: ReportKillEvent[];
+}
+
+/**
+ * Sidecar read diagnostics surfaced in the report: malformed lines are
+ * counted and shown (never silently dropped) and events anchored to another
+ * run are counted as excluded.
+ */
+export interface KillEventDiagnostics {
+  malformed_lines: number;
+  /** First few `line N: reason` strings. */
+  malformed_examples: string[];
+  /** Valid events dropped because they are anchored to a different run. */
+  excluded_events: number;
+}
+
+
+/**
+ * True when a normalized completion actually killed something. An explicit
+ * `fired` wins; otherwise it is derived from `killed_pids`; a legacy record
+ * with neither is treated as fired (nothing says it was a no-op). Intents are
+ * never "fired".
+ */
+export function isFiredKill(event: ReportKillEvent): boolean {
+  if (event.kind !== "kill-completed") return false;
+  if (typeof event.fired === "boolean") return event.fired;
+  if (event.killed_pids !== undefined) return event.killed_pids.length > 0;
+  return true;
 }

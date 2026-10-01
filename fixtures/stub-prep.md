@@ -36,7 +36,7 @@ read-only input; no PHP toolchain runs anywhere in the pipeline.
 | `mixed` | `unknown` | narrow at the boundary |
 | nullable (`null` return, `??`, `isset`) | `T \| null` + explicit guard | |
 | associative array as pseudo-object | named `interface` + parser at construction | each row shape gets its own type |
-| scalar coercion (`(int)`, `(float)`, arithmetic on strings) | explicit `Number()` / `parseInt` helper | document the failure mode: PHP yields 0 + warning on non-numeric; TS yields `NaN` |
+| scalar coercion (`(int)`, `(float)`, arithmetic on strings) | explicit `Number()` / `parseInt` helper | document the failure mode: an explicit `(int)`/`(float)` cast yields 0 on non-numeric input and raises no warning on any version (arithmetic on a non-numeric string warns or throws, by PHP version); TS `Number()` yields `NaN` |
 | loose `==` | decide intended semantics per site; default `===` | flag every replaced site in the per-symbol table |
 | late static binding (`new static`, `static::`) | class-token factory or per-class static factory | see §4 item 4 |
 | magic methods (`__get`, `__isset`, `__toString`) | explicit accessors / `toString()` | no dynamic property surface in the port |
@@ -57,7 +57,7 @@ Flags: `MISLEADING_DOC` `COERCION` `NULLABLE` `ASSOC_ARRAY` `MAGIC` `LSB`
 |---|---|---|---|---|---|
 | `Money::$amount` | prop | src/Money.php | ctor casts to float; class doc claims "always non-negative" but `subtract()` yields negatives (test asserts `-3.00 USD`) | `number` | MISLEADING_DOC, COERCION |
 | `Money::parse` | static | src/Money.php | strips spaces/commas; empty input returns zero | `(raw: string \| number, currency?: string) => Money` | COERCION |
-| `Money::equals` | method | src/Money.php | `$this->amount == $other->amount` — intentional loose compare; currency uses `===` | `(other: unknown) => boolean` | LOOSE_EQ |
+| `Money::equals` | method | src/Money.php | `$this->amount == $other->amount` is spelled as a loose compare, but the ctor casts both amounts to float, so `==` and `===` behave identically here (a `==` site, not an observable trap); currency uses `===` | `(other: unknown) => boolean` | LOOSE_EQ |
 | `Customer::$attributes` | prop | src/Customer.php | `array_merge` over defaults; magic `__get`/`__isset` expose unknown keys | `CustomerProps` interface + `Record<string, unknown>` extras | ASSOC_ARRAY, MAGIC |
 | `Customer::creditLimit` | method | src/Customer.php | stored as `'0.00'` numeric string; null passthrough | `() => Money \| null` | COERCION, NULLABLE |
 | `Product::$priceCents` | prop | src/Product.php | doc says "always integers in cents"; ctor accepts any scalar; rows may hold `"1999"`; `price()` divides by 100 | `number` (cents) | MISLEADING_DOC, COERCION |
@@ -79,8 +79,9 @@ Flags: `MISLEADING_DOC` `COERCION` `NULLABLE` `ASSOC_ARRAY` `MAGIC` `LSB`
 2. **Rounding** — `Money::percentage` uses PHP `round()` (half away from zero);
    a naive TS `toFixed` port behaves differently on ties. Tests pin
    `10.125 → 10.13`.
-3. **Formatted-string money** — `totalByCurrency` float-parses `"19.99 USD"`.
-   PHP reads the leading numeric part (with a warning on 8.x); TS `Number()`
+3. **Formatted-string money** — `totalByCurrency` float-parses `"19.99 USD"`
+   with an explicit `(float)` cast. PHP reads the leading numeric part
+   silently (an explicit cast raises no warning on any version); TS `Number()`
    produces `NaN`. The port must decide and document the gap.
 4. **Dead late static binding** — `PercentageDiscount` is `final` yet `of()`
    advertises subclass resolution via `new static`. The port should not invent

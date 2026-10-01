@@ -15,29 +15,34 @@
  *    path is protected either way.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { DexServiceError, ErrorSubStatus } from "@superdurable/dex";
 import { status } from "@grpc/grpc-js";
 
-import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { configurePortJudgment } from "../flows/runtime-hooks.js";
-import { liveJevClient } from "../flows/port-project.js";
+import { configureWorkerJudgment } from "../scripts/run-demo.js";
+import { stagingContext, stubContext } from "./support/dex-context.js";
+import { clearHarnessEnv } from "./support/env.js";
+import {
+  liveJevClient,
+  markerKeyOf,
+  PortFileFlow,
+  ppDiff,
+  ppJevUsage,
+  ppKept,
+  ppVerdict,
+  type FileRoundInput,
+} from "../flows/port-project.js";
 import {
   configureEnvelopeStreamPublisher,
-  envelopeStep,
+  envelopeStepClass,
   type EnvelopeStreamMessage,
 } from "../flows/steps/envelope.js";
 import {
   createInMemoryJevClient,
   type JudgmentClient,
 } from "../src/typesafe/client.js";
-import type { Context } from "@superdurable/dex";
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // ---------------------------------------------------------------------------
 // 1: wiring — key present -> the REAL client reaches the consumption sites;
@@ -76,27 +81,220 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
     expect(liveJevClient()).toBe(real);
   });
 
-  test("all three consumption sites (verdict-check, prioritize, vitest triage) resolve through liveJevClient()", () => {
-    const src = readFileSync(join(ROOT, "flows", "port-project.ts"), "utf8");
-    const sites = src.split("\n").filter((l) => l.includes("liveJevClient()"));
-    // The verdict-check consumer, the prioritize consumer, and the
-    // classifyVitestRecords consumer — plus the resolver's own definition.
-    const consumerSites = sites.filter(
-      (l) => l.includes("const jevClient = liveJevClient()") || l.includes("classifyVitestRecords("),
-    );
-    expect(consumerSites.length).toBe(3);
-    // The dead second seam is GONE (the drift cannot regrow silently) —
-    // code-shape check: comments may still recount the history.
-    expect(src.match(/let PORT_JEV_LIVE\b/)).toBeNull();
-    expect(src.match(/function configurePortJevLive\b/)).toBeNull();
-    expect(src.match(/function portJevLiveClient\b/)).toBeNull();
+  /** Runs the REAL verdict-check and prioritize steps against `client`; returns the client's call counts. */
+  async function exerciseLaneBSteps(
+    client: JudgmentClient & { calls: number },
+  ): Promise<{ verdictCheckCalls: number; prioritizeCalls: number }> {
+    configurePortJudgment(client);
+    const file = "src/Money.php";
+    const key = markerKeyOf(file, 1);
+    const fri: FileRoundInput = {
+      repoRoot: "/r",
+      worktreeRoot: "/r/.wt",
+      integrationWorktreePath: "/r/.wt/integration",
+      sourceRoot: "/r/src",
+      epoch: 1,
+      file,
+      round: 1,
+      worktreePath: "/r/.wt/money-1",
+      branch: "lease/money/1",
+    };
+    const finding = {
+      finding_id: "A1",
+      severity: "major" as const,
+      summary: "s",
+      evidence: { hunk_id: "h1", start_line: 1, end_line: 1, quote: "export class Money {" },
+    };
+    const doc = {
+      diff_id: "d1",
+      file,
+      base_ref: "HEAD",
+      hunks: [
+        { hunk_id: "h1", header: "@@ -0,0 +1,1 @@", old_start: 0, old_lines: 0, new_start: 1, new_lines: 1, lines: ["+export class Money {"] },
+      ],
+    };
+    const tuple = (reviewer: string, findings: Array<typeof finding>): unknown => ({
+      agent: {
+        file,
+        reviewer,
+        round: 1,
+        diff_id: "d1",
+        findings: findings.map((f) => ({
+          finding_id: f.finding_id,
+          severity: f.severity,
+          description: f.summary,
+          evidence_span: { start_line: 1, end_line: 1, snippet: f.evidence.quote },
+          disposition: "fix",
+        })),
+        citation_check: [],
+      },
+      metrics: { file, reviewer, round: 1, diff_id: "d1", findings, citation_check: [] },
+    });
+    const stores = new Map<unknown, Map<string, unknown>>([
+      [ppDiff, new Map([[key, { diffId: "d1", raw: "", doc, bodyLineOffset: 0 }]])],
+      [ppVerdict, new Map([[`${key}#reviewer-A`, tuple("reviewer-A", [finding])], [`${key}#reviewer-B`, tuple("reviewer-B", [])]])],
+      [ppKept, new Map()],
+      [ppJevUsage, new Map()],
+    ]);
+    const ctx = stubContext(stores, { flowId: "us007-wiring-steps" });
+
+    const flow = new PortFileFlow();
+    const before = client.calls;
+    await flow.verdictCheck.execute(ctx as never, fri);
+    const afterVerdictCheck = client.calls;
+    await flow.prioritize.execute(ctx as never, fri);
+    return { verdictCheckCalls: afterVerdictCheck - before, prioritizeCalls: client.calls - afterVerdictCheck };
+  }
+
+  function countingClient(kind: "real" | "in-memory"): JudgmentClient & { calls: number } {
+    const client = {
+      kind,
+      calls: 0,
+      systemOne: async (request: { questions: Record<string, unknown> }) => {
+        client.calls += 1;
+        const answers: Record<string, { type: "noul"; noul: number }> = {};
+        for (const name of Object.keys(request.questions)) answers[name] = { type: "noul", noul: 0.99 };
+        return { model: "double", answers, usage: { input_tokens: 1, output_tokens: 1 } };
+      },
+    };
+    return client as unknown as JudgmentClient & { calls: number };
+  }
+
+  test("verdict-check and prioritize consume the REAL client resolved through liveJevClient()", async () => {
+    const real = countingClient("real");
+    const calls = await exerciseLaneBSteps(real);
+    expect(calls.verdictCheckCalls).toBeGreaterThan(0);
+    expect(calls.prioritizeCalls).toBeGreaterThan(0);
   });
 
-  test("the worker wires configurePortJudgment from resolveJudgment and announces the lane", () => {
-    const src = readFileSync(join(ROOT, "scripts", "run-demo.ts"), "utf8");
-    expect(src).toContain("const judgment = await resolveJudgment();");
-    expect(src).toContain("configurePortJudgment(judgment);");
-    expect(src).toContain("JUDGMENT LANE:");
+  test("a non-real (in-memory) client is never consulted by verdict-check or prioritize (naive default)", async () => {
+    const offline = countingClient("in-memory");
+    const calls = await exerciseLaneBSteps(offline);
+    expect(calls).toEqual({ verdictCheckCalls: 0, prioritizeCalls: 0 });
+  });
+
+  // The vitest-triage call site (QueueVerifyStep shells out to tsc/vitest, so it
+  // cannot run here) is pinned in tests/architecture-guards.test.ts.
+});
+
+// ---------------------------------------------------------------------------
+// 1b: the worker's wiring, run for real (B30 / C78): which client reaches the
+//     flows' seam for each environment, and the lane line that says so. The
+//     precedence "TYPESAFE_OFFLINE wins over a key" used to be pinned only by
+//     grepping run-demo.ts for variable names.
+// ---------------------------------------------------------------------------
+
+describe("worker judgment wiring (configureWorkerJudgment): the environment decides the lane", () => {
+  let restoreEnv: () => void;
+  let logs: string[] = [];
+  let errors: string[] = [];
+  const original = { log: console.log, error: console.error };
+
+  beforeEach(() => {
+    restoreEnv = clearHarnessEnv();
+    logs = [];
+    errors = [];
+    console.log = (...args: unknown[]) => void logs.push(args.join(" "));
+    console.error = (...args: unknown[]) => void errors.push(args.join(" "));
+  });
+  afterEach(() => {
+    console.log = original.log;
+    console.error = original.error;
+    restoreEnv();
+    configurePortJudgment(createInMemoryJevClient());
+  });
+
+  /** A real-kind client that fails loudly if anything calls it, and counts how it was created. */
+  function fakeReal(): { deps: Parameters<typeof configureWorkerJudgment>[0]; created: Array<{ apiKey: string }>; client: JudgmentClient } {
+    const client: JudgmentClient = {
+      kind: "real",
+      systemOne: (() => {
+        throw new Error("no network in unit tests");
+      }) as JudgmentClient["systemOne"],
+    };
+    const created: Array<{ apiKey: string }> = [];
+    return {
+      client,
+      created,
+      deps: {
+        createReal: async (config) => {
+          created.push(config);
+          return client;
+        },
+      },
+    };
+  }
+  const laneLine = (): string => logs.find((l) => l.startsWith("[worker] JUDGMENT LANE:")) ?? "";
+
+  test("TYPESAFE_OFFLINE wins over a key: the scripted double is configured, the real client is never even created", async () => {
+    process.env.TYPESAFE_OFFLINE = "1";
+    process.env.TYPESAFE_API_KEY = "sk-live";
+    const { deps, created } = fakeReal();
+    const judgment = await configureWorkerJudgment(deps);
+    expect(created).toEqual([]);
+    expect(judgment.kind).toBe("in-memory");
+    expect(liveJevClient()).toBeUndefined(); // verdict-check, prioritize and triage stay naive
+    expect(logs.some((l) => l.includes("Jev: OFFLINE in-memory double"))).toBe(true);
+    expect(laneLine()).toContain("NAIVE");
+    expect(laneLine()).not.toContain("LIVE JEV");
+  });
+
+  test("a key alone: the real client is created with the (trimmed) key and reaches every consumer through the seam", async () => {
+    process.env.TYPESAFE_API_KEY = "  sk-live  ";
+    const { deps, created, client } = fakeReal();
+    const judgment = await configureWorkerJudgment(deps);
+    expect(created).toEqual([{ apiKey: "sk-live" }]);
+    expect(judgment).toBe(client);
+    expect(liveJevClient()).toBe(client);
+    expect(logs.some((l) => l.includes("Jev: REAL client"))).toBe(true);
+    expect(laneLine()).toContain("LIVE JEV");
+  });
+
+  test("no key: the scripted double, no real client, and the log says live Jev is blocked pending a key", async () => {
+    const { deps, created } = fakeReal();
+    const judgment = await configureWorkerJudgment(deps);
+    expect(created).toEqual([]);
+    expect(judgment.kind).toBe("in-memory");
+    expect(liveJevClient()).toBeUndefined();
+    expect(logs.some((l) => l.includes("TYPESAFE_API_KEY absent"))).toBe(true);
+    expect(laneLine()).toContain("NAIVE");
+  });
+
+  test("a blank key (an empty `.env` line) is no key", async () => {
+    for (const blank of ["", "   "]) {
+      process.env.TYPESAFE_API_KEY = blank;
+      const { deps, created } = fakeReal();
+      expect((await configureWorkerJudgment(deps)).kind).toBe("in-memory");
+      expect(created).toEqual([]);
+    }
+  });
+
+  test("TYPESAFE_OFFLINE=0 or false is online: a key then selects the real client", async () => {
+    for (const off of ["0", "false"]) {
+      process.env.TYPESAFE_OFFLINE = off;
+      process.env.TYPESAFE_API_KEY = "sk-live";
+      const { deps, created } = fakeReal();
+      expect((await configureWorkerJudgment(deps)).kind).toBe("real");
+      expect(created).toHaveLength(1);
+    }
+  });
+
+  test("a real client that cannot be created degrades to the double, loudly, and the lane line says NAIVE", async () => {
+    process.env.TYPESAFE_API_KEY = "sk-live";
+    const judgment = await configureWorkerJudgment({
+      createReal: async () => {
+        throw new Error("sdk missing");
+      },
+    });
+    expect(judgment.kind).toBe("in-memory");
+    expect(errors.some((l) => l.includes("Jev real client unavailable (sdk missing)"))).toBe(true);
+    expect(laneLine()).toContain("NAIVE");
+  });
+
+  test("the lane line is derived from the client that was injected: exactly one, whatever the environment", async () => {
+    process.env.TYPESAFE_API_KEY = "sk-live";
+    await configureWorkerJudgment(fakeReal().deps);
+    expect(logs.filter((l) => l.startsWith("[worker] JUDGMENT LANE:"))).toHaveLength(1);
   });
 });
 
@@ -105,24 +303,14 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
 // ---------------------------------------------------------------------------
 
 describe("bounded telemetry swallow (US-007): DexServiceError silent, defects loud, durable path safe", () => {
-  function fakeContext(): { context: Context; staged: Array<{ instance: string }> } {
-    const staged: Array<{ instance: string }> = [];
-    const context = {
-      attempt: 1,
-      flowId: "us007-wiring-flow",
-      setAttribute: (_attr: unknown, _value: unknown, instance: string) => {
-        staged.push({ instance });
-      },
-    } as unknown as Context;
-    return { context, staged };
-  }
+  const fakeContext = () => stagingContext({ flowId: "us007-wiring-flow" });
 
-  const step = envelopeStep<{ n: number }, { n: number }>({
+  const step = new (envelopeStepClass<{ n: number }, { n: number }>({
     stepType: "ProbeWiringSwallow",
     stepId: "pp-wiring-swallow",
     role: "record",
     inner: async (_ctx, input) => ({ output: { n: input.n }, tokens: null }),
-  });
+  }))();
 
   let warns: string[] = [];
   const originalWarn = console.warn;

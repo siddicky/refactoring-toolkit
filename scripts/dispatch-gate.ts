@@ -15,8 +15,24 @@
  * no-protection note so an operator never mistakes silence for safety.
  */
 
+import type { StringOption } from "../src/cli/args.js";
 import type { DexHistoryWire } from "../src/dashboard/types.js";
 import type { QueryResult } from "../src/dashboard/queries.js";
+import { PORT_FLOW_STEPS } from "../src/metrics/dispatch-anchor.js";
+
+/**
+ * The gate's one command-line input, declared here so every caller shares one
+ * definition: `run-demo.ts gate --flow-id <id>` and `run-demo.ts demo
+ * --gate-flow-id <id>` both build their option from it (this module has no
+ * argv of its own; it is imported by the runner). Omitting it is allowed: the
+ * gate then reports "degraded" and dispatch proceeds (fail-open).
+ */
+export const GATE_FLOW_ID_OPTION = {
+  kind: "string",
+  metavar: "id",
+  description:
+    "flow whose dexcli history the dispatch health gate reads (omitted: gate reports degraded, no protection; it never blocks)",
+} as const satisfies StringOption;
 
 /** Per-history-query timeout (spec: 5 s). */
 export const GATE_QUERY_TIMEOUT_MS = 5_000;
@@ -26,15 +42,13 @@ export const GATE_STALE_MS = 10 * 60_000;
 
 /**
  * Review-step types whose failures indicate the degenerate-turn provider
- * signature (mirror of flows/port-project.ts step table — no flow imports;
- * same mirror rule as src/metrics/dispatch-anchor.ts).
+ * signature: the review-role model steps of the dispatch anchor's step table
+ * (src/metrics/dispatch-anchor.ts PORT_FLOW_STEPS, itself checked against the
+ * real flows by tests/mirror-drift.test.ts). Derived, not a second copy.
  */
-export const REVIEW_STEP_TYPES: readonly string[] = [
-  "PpPrepReviewA",
-  "PpPrepReviewB",
-  "PpReviewA",
-  "PpReviewB",
-];
+export const REVIEW_STEP_TYPES: readonly string[] = PORT_FLOW_STEPS.filter(
+  (step) => step.role === "review" && step.kind === "model",
+).map((step) => step.stepType);
 
 export function isReviewStepType(stepType: unknown): stepType is string {
   return typeof stepType === "string" && REVIEW_STEP_TYPES.includes(stepType);

@@ -69,6 +69,43 @@ describe("jevPrioritize (noul rerank behind the same interface)", () => {
     expect(await jevPrioritize(client, [])).toEqual([]);
     expect(client.callCount).toBe(0);
   });
+
+  test("B5: a batch that repeats a finding_id is rejected before any model call (one question per id would half-rank it)", async () => {
+    const client = createInMemoryJevClient(() => {
+      throw new Error("must not be called");
+    });
+    await expect(jevPrioritize(client, [f("F1", "nit"), f("F2", "major"), f("F1", "blocker")])).rejects.toThrow(
+      'duplicate finding_id "F1"',
+    );
+    expect(client.callCount).toBe(0);
+  });
+});
+
+describe("jevPrioritize state (C12)", () => {
+  test("the judge sees the defect description AND the cited evidence, not just id + severity", async () => {
+    const finding: Finding = {
+      finding_id: "F1",
+      severity: "major",
+      summary: "add() drops the currency check",
+      evidence: { hunk_id: "h1", start_line: 9, end_line: 9, quote: "return new Money(this.cents + other.cents);" },
+    };
+    const uncited: Finding = { finding_id: "F2", severity: "nit", summary: "naming", evidence: null };
+    const client = createInMemoryJevClient(() => ({
+      F1: { type: "noul", noul: 0.9 },
+      F2: { type: "noul", noul: 0.1 },
+    }));
+    await jevPrioritize(client, [finding, uncited]);
+    const state = client.requests[0]?.state as { findings: Array<Record<string, unknown>> };
+    expect(state.findings[0]).toEqual({
+      id: "F1",
+      severity: "major",
+      summary: "add() drops the currency check",
+      evidence: "return new Money(this.cents + other.cents);",
+    });
+    expect(state.findings[1]?.evidence).toBeNull();
+    const question = client.requests[0]?.questions.F1 as { instructions?: string };
+    expect(question.instructions).toContain("add() drops the currency check");
+  });
 });
 
 describe("FindingPrioritizer interface parity (naive default, Jev swap-in)", () => {

@@ -17,7 +17,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Context } from "@superdurable/dex";
 
-import { agreementByFileRound, classifyAgreement, agreementForGroup } from "../src/metrics/agreement.js";
+import { agreementForGroup } from "../src/metrics/agreement.js";
 import { renderReport } from "../src/metrics/render.js";
 import { evaluateSuspicion, normalizeVerdictText } from "../src/metrics/suspicion.js";
 import type {
@@ -44,7 +44,6 @@ import {
   ppDiff,
   ppKept,
   ppPrepDiff,
-  ppPrepFindings,
   ppPrepState,
   ppPrepVerdict,
   ppVerdict,
@@ -63,6 +62,7 @@ import {
   lifecycleHeadline,
 } from "../src/dashboard/state.js";
 import type { DexFlowSummaryWire, DexStateWire } from "../src/dashboard/types.js";
+import { stagingContext, stubContext, type AttributeStores } from "./support/dex-context.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -136,10 +136,9 @@ function record(
 
 describe("PRE-CHECK: agreement accepts one- and zero-reviewer rounds", () => {
   test("one-reviewer round -> unreviewed, surfaced with the observed count", () => {
-    const out = agreementByFileRound([record("f.php", "reviewer-A", 1, [])]);
-    expect(out.length).toBe(1);
-    expect(out[0]?.outcome).toBe("unreviewed");
-    expect(out[0]?.reason).toContain("found 1");
+    const out = agreementForGroup([record("f.php", "reviewer-A", 1, [])], "f.php", 1);
+    expect(out.outcome).toBe("unreviewed");
+    expect(out.reason).toContain("found 1");
   });
 
   test("zero-reviewer round -> unreviewed", () => {
@@ -148,8 +147,8 @@ describe("PRE-CHECK: agreement accepts one- and zero-reviewer rounds", () => {
     expect(out.reason).toContain("found 0");
   });
 
-  test("classifyAgreement with a missing side -> unreviewed (tombstoned reviewer = missing record)", () => {
-    expect(classifyAgreement(record("f.php", "reviewer-A", 1, []), null).outcome).toBe("unreviewed");
+  test("a missing side -> unreviewed (tombstoned reviewer = missing record)", () => {
+    expect(agreementForGroup([record("f.php", "reviewer-A", 1, [])], "f.php", 1).outcome).toBe("unreviewed");
   });
 });
 
@@ -225,10 +224,11 @@ describe("suspicion predicate (span-outside-diff)", () => {
   });
 
   test("a span inside the hunk's range is NOT suspect on arm (a)", () => {
-    // raw hunk body occupies raw lines 5..10 (the resolver's coordinates);
-    // block lines 11..15 -> raw 6..10 after subtracting DIFF_HEADER_LINES.
+    // SAMPLE_DIFF: the `@@` header is raw line 6 and the hunk body occupies raw
+    // lines 7..12 (1-based, the resolver's coordinates; a reviewer cites block
+    // lines = raw + DIFF_HEADER_LINES).
     const rec = record("src/Money.php", "reviewer-A", 1, [
-      { finding_id: "F1", severity: "major", summary: "s", evidence: span("h1", 6, 8) },
+      { finding_id: "F1", severity: "major", summary: "s", evidence: span("h1", 7, 9) },
     ]);
     const out = evaluateSuspicion({
       record: rec,
@@ -239,6 +239,22 @@ describe("suspicion predicate (span-outside-diff)", () => {
     expect(out.suspect).toBe(false);
     expect(out.reasons).toEqual([]);
   });
+
+  test("C11 boundaries: the LAST body line (raw 12) is inside; the @@ line (raw 6) is outside", () => {
+    const at = (start: number, end: number) =>
+      evaluateSuspicion({
+        record: record("src/Money.php", "reviewer-A", 1, [
+          { finding_id: "F1", severity: "major", summary: "s", evidence: span("h1", start, end) },
+        ]),
+        parsedDiff: parsed,
+        verdictText: "{}",
+        priorNormalizedText: null,
+      }).reasons;
+    expect(at(12, 12)).toEqual([]);
+    expect(at(7, 12)).toEqual([]);
+    expect(at(6, 6)).toEqual(["span-outside-diff:F1"]);
+    expect(at(12, 13)).toEqual(["span-outside-diff:F1"]);
+  });
 });
 
 describe("suspicion predicate (all-blockers-over-cap)", () => {
@@ -247,7 +263,7 @@ describe("suspicion predicate (all-blockers-over-cap)", () => {
     finding_id: id,
     severity: "blocker",
     summary: id,
-    evidence: span("h1", 6, 7),
+    evidence: span("h1", 7, 8),
   });
 
   test("more than 5 findings, ALL blockers -> suspect", () => {
@@ -324,6 +340,7 @@ const HEALTHY_REPLY = JSON.stringify({
     {
       finding_id: "A1",
       severity: "major",
+      description: "add() does not guard against mixed currencies",
       evidence_span: { start_line: DIFF_HEADER_LINES + 8, end_line: DIFF_HEADER_LINES + 8, snippet: "add(other: Money): Money {" },
       disposition: "fix",
     },
@@ -336,9 +353,11 @@ function wallReply(tag: string): string {
   const findings = [1, 2, 3, 4, 5, 6].map((i) => ({
     finding_id: `${tag}${i}`,
     severity: "blocker",
+    description: `wall-of-blockers finding ${i}`,
     evidence_span: {
-      start_line: DIFF_HEADER_LINES + 6 + (i % 5),
-      end_line: DIFF_HEADER_LINES + 6 + (i % 5),
+      // raw lines 7..11 = the first five body lines (raw 6 is the @@ header)
+      start_line: DIFF_HEADER_LINES + 7 + (i % 5),
+      end_line: DIFF_HEADER_LINES + 7 + (i % 5),
       snippet: ["export class Money {", "constructor(readonly cents: number) {}", "add(other: Money): Money {", "return new Money(this.cents + other.cents);", "}"][i % 5],
     },
     disposition: "fix",
@@ -397,17 +416,8 @@ function scriptedHarness(initialScript: Array<string | Error>): ScriptedHarness 
 }
 
 function fakeCtx() {
-  const staged: Array<{ attr: unknown; instance: string; value: unknown }> = [];
-  return {
-    ctx: {
-      attempt: 1,
-      flowId: "us006-flow",
-      setAttribute: (attr: unknown, value: unknown, instance: string) => {
-        staged.push({ attr, instance, value });
-      },
-    } as unknown as Context,
-    staged,
-  };
+  const { context, staged } = stagingContext({ flowId: "us006-flow" });
+  return { ctx: context, staged };
 }
 
 const DIFF_TURN = {
@@ -492,7 +502,7 @@ describe("repair paths through runReviewTurn", () => {
     expect(tomb?.attempt).toBe(1);
     // tokens = burned tokens of the discarded attempt(s) (original + repair).
     expect(typeof tomb?.tokens).toBe("object");
-    expect((tomb?.tokens as TokenUsage).input_tokens).toBe(200);
+    expect((tomb?.tokens as TokenUsage | undefined)?.input_tokens).toBe(200);
     expect(out.tokens).toBe(tomb?.tokens ?? null);
   });
 
@@ -694,7 +704,7 @@ describe("attempt-exhaustion tombstones (deterministic ctx.attempt >= maxAttempt
     expect(tomb).not.toBeNull();
     expect(tomb?.reason.startsWith("attempt-exhausted")).toBe(true);
     expect(tomb?.attempt).toBe(REVIEW_STEP_MAX_ATTEMPTS);
-    expect((tomb?.tokens as TokenUsage).input_tokens).toBe(100);
+    expect((tomb?.tokens as TokenUsage | undefined)?.input_tokens).toBe(100);
     expect(out.tokens).toBe(tomb?.tokens ?? null);
   });
 
@@ -751,7 +761,7 @@ describe("attempt-exhaustion tombstones (deterministic ctx.attempt >= maxAttempt
     expect(completed?.stepId).toBe("pp-review-a");
     expect(completed?.outcome).toBe("completed");
     expect(completed?.attempt).toBe(REVIEW_STEP_MAX_ATTEMPTS);
-    expect((completed?.tokens as TokenUsage).input_tokens).toBe(100);
+    expect((completed?.tokens as TokenUsage | undefined)?.input_tokens).toBe(100);
   });
 
   test("REGRESSION (fix-wave diagnosis forwarding): a successful attempt-2 review step's completion envelope carries turn_diagnosis (US-003 successor re-record)", async () => {
@@ -796,23 +806,7 @@ import { envelopeEvents } from "../flows/steps/envelope.js";
 // US-006: VerdictCheckStep tolerates tombstones (zero kept findings)
 // ---------------------------------------------------------------------------
 
-/** Context stub that answers getAttribute by AttributeMap identity. */
-function attributeCtx(stores: Map<unknown, Map<string, unknown>>, attempt = 1): Context {
-  return {
-    attempt,
-    flowId: "us006-check",
-    getAttribute: (attr: unknown, instance: string) =>
-      stores.get(attr)?.get(instance),
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      let store = stores.get(attr);
-      if (store === undefined) {
-        store = new Map();
-        stores.set(attr, store);
-      }
-      store.set(instance, value);
-    },
-  } as unknown as Context;
-}
+const attributeCtx = (stores: AttributeStores, attempt = 1) => stubContext(stores, { flowId: "us006-check", attempt });
 
 function healthyTuple(reviewer: string, round: number): ReviewTuple {
   return {
@@ -825,6 +819,7 @@ function healthyTuple(reviewer: string, round: number): ReviewTuple {
         {
           finding_id: `${reviewer === "reviewer-A" ? "A" : "B"}1`,
           severity: "major",
+          description: "add() does not guard against mixed currencies",
           evidence_span: { start_line: 13, end_line: 13, snippet: "add(other: Money): Money {" },
           disposition: "fix",
         },

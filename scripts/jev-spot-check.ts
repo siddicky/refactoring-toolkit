@@ -2,73 +2,83 @@
  * jev-spot-check — plan Phase 3 measurable: per-symbol type selection via
  * LIVE Jev (System One) audited against ground truth derived from the
  * fixture's documented types/behaviors (FIXTURES.md + the misleading-docblock
- * list + the PHP sources themselves). Target: >= 90% over n >= 30 symbols.
+ * list + the PHP sources themselves). Target: >= 90% over n >= 30 symbols AND
+ * a margin over the deterministic first-candidate baseline (the offline
+ * double already scores 92-95%; see src/typesafe/spot-check.ts).
  *
- * Grading rubric (documented per symbol):
- * - accepted lists contain every defensible selection (equivalent spellings
- *   folded, e.g. "Money" for class-typed params);
- * - NONE is CORRECT when the symbol has no type evidence (recall empty —
- *   abstention is the designed behavior) or when its ground truth is a
- *   callable signature (the selector abstains on callables);
- * - NONE is INCORRECT for symbols with clear docblock/annotation evidence.
+ * The ground truth, grading rubric and gate logic live in
+ * src/typesafe/spot-check.ts (unit tested). Symbols are harvested with the
+ * PRODUCTION cap (SYMBOL_HARVEST_CAP), so the graded set is the set the port
+ * flow actually sends to Jev.
  *
  * Usage: bun run scripts/jev-spot-check.ts [--out /tmp/jev-spot-check.json]
  * Requires TYPESAFE_API_KEY (real billed System One calls) — refuses to run
  * offline so the measured path is the live path.
+ *
+ * Argument handling is the shared layer in src/cli/args.ts (option table:
+ * JEV_SPOT_CHECK_CLI, `--help` prints the generated usage). A bad argument is
+ * a usage error (exit 64), distinct from the BLOCKED exit 2.
  */
 
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { envString } from "../src/env.js";
+import {
+  type CliParse,
+  CLI_EXIT,
+  defineCli,
+  exitCodesNote,
+  parseOptions,
+  reportParseFailure,
+} from "../src/cli/args.js";
 import { harvestPhpSymbols } from "../src/harness/runtime.js";
 import { selectSymbolType, type PhpSymbol } from "../src/typesafe/symbol-types.js";
 import { createRealJevClient, isTypesafeOffline } from "../src/typesafe/client.js";
+import {
+  BASELINE_MARGIN,
+  GROUND_TRUTH,
+  SPOT_CHECK_TARGET,
+  firstCandidateBaseline,
+  spotCheckVerdict,
+} from "../src/typesafe/spot-check.js";
 
 const SRC_ROOT = join(import.meta.dir, "..", "fixtures", "php-sample", "src");
 
-/** Ground truth: accepted selections per file+symbol (hand-derived).
- *
- * v2 rubric (revised after the first live run — both scores reported in
- * BUILD_NOTES): (a) accessor METHODS share the property's ground truth but
- * also accept NONE (a getter's "type" is its property's type; abstention on
- * an accessor is defensible); (b) literal equivalents for compound types are
- * included ("array<int, string>" — recall's @return parser truncates at the
- * comma, so the candidate label itself is truncated; worker-3 follow-up).
- */
-const GROUND_TRUTH: Record<string, string[]> = {
-  "Money.php#amount": ["number", "NONE"],
-  "Money.php#currency": ["string", "NONE"],
-  "Money.php#parse": ["Money", "NONE"], // callable; abstain is correct
-  "Money.php#add": ["Money"], // Money $other — evidenced; NONE is a miss
-  "Money.php#subtract": ["Money"],
-  "Money.php#multiply": ["Money", "NONE"], // $factor untyped
-  "Money.php#percentage": ["Money", "NONE"],
-  "Money.php#equals": ["boolean", "NONE"],
-  "Money.php#isNegative": ["boolean", "NONE"],
-  "Money.php#__toString": ["string", "NONE"],
-  "Customer.php#creditLimit": ["string", "Money", "NONE"],
-  "Customer.php#hasCreditFor": ["boolean", "NONE"],
-  "Customer.php#toArray": ["unknown[]", "NONE"],
-  "Customer.php#id": ["string", "NONE"],
-  "Customer.php#name": ["string", "NONE"],
-  "Invoice.php#number": ["string", "NONE"],
-  "Invoice.php#customer": ["Customer", "NONE"],
-  "Invoice.php#currency": ["string", "NONE"],
-  "Invoice.php#taxRate": ["number"], // @var float
-  "Invoice.php#addLine": ["NONE"],
-  "Invoice.php#addLines": ["NONE"],
-  "Support/Taggable.php#tags": ["array<int,", "string[]", "unknown[]", "NONE"],
-  "Support/Taggable.php#addTag": ["NONE"],
-  "Support/Taggable.php#addTags": ["NONE", "string[]"],
-  "Support/Taggable.php#hasTag": ["boolean", "NONE"],
-  "Support/Taggable.php#mergeTagsFrom": ["NONE", "string[]"],
-  "Support/Arrayable.php#toArray": ["array<string,", "unknown[]", "NONE"],
-  "Pricing/DiscountPolicy.php#apply": ["Money"], // @param/@return Money
-  "Pricing/FlatRateDiscount.php#amountPerUnit": ["Money", "NONE"], // @var Money
-  "Pricing/FlatRateDiscount.php#apply": ["Money"],
-  "Pricing/PercentageDiscount.php#percent": ["number", "NONE"], // @var float
-  "Pricing/PercentageDiscount.php#of": ["NONE"], // dead LSB; abstain correct
-  "Pricing/PercentageDiscount.php#apply": ["Money"],
-};
+const DEFAULT_OUT_PATH = "/tmp/jev-spot-check.json";
+
+/** Exit codes of jev-spot-check. */
+export const JEV_SPOT_CHECK_EXIT = {
+  pass: 0,
+  /** The measured accuracy missed the gate, or a fatal error. */
+  fail: 1,
+  /** Offline, no API key, or fewer than 30 graded symbols: nothing was measured. */
+  blocked: 2,
+  usage: CLI_EXIT.usage,
+} as const;
+
+/** The CLI's option table: parsing, validation and the usage text all come from it. */
+export const JEV_SPOT_CHECK_CLI = defineCli({
+  name: "jev-spot-check.ts",
+  summary:
+    "Grades live Jev type selection against the fixture's ground truth (needs TYPESAFE_API_KEY; real billed calls).",
+  options: {
+    out: { kind: "string", metavar: "path", default: DEFAULT_OUT_PATH, description: "where to write the JSON rows" },
+  },
+  notes: [
+    exitCodesNote(JEV_SPOT_CHECK_EXIT, {
+      pass: "spot-check passed",
+      fail: "spot-check failed, or fatal error",
+      blocked: "BLOCKED: offline, no API key, or < 30 graded symbols",
+      usage: "usage error",
+    }),
+  ],
+});
+
+/** Strict parse of jev-spot-check's argv (without the `bun run script` prefix). */
+export function parseJevSpotCheckArgs(argv: readonly string[]): CliParse<{ outPath: string }> {
+  const parsed = parseOptions(JEV_SPOT_CHECK_CLI, argv);
+  return parsed.ok ? { ok: true, options: { outPath: parsed.options.out } } : parsed;
+}
 
 function listPhpFiles(dir: string): string[] {
   const out: string[] = [];
@@ -84,28 +94,38 @@ function listPhpFiles(dir: string): string[] {
 }
 
 async function main(): Promise<number> {
+  const parsed = parseJevSpotCheckArgs(process.argv.slice(2));
+  if (!parsed.ok) return reportParseFailure("jev-spot-check", parsed);
+  const { outPath } = parsed.options;
   if (isTypesafeOffline()) {
     console.error("TYPESAFE_OFFLINE is set — refusing: the spot-check measures the LIVE path.");
-    return 2;
+    return JEV_SPOT_CHECK_EXIT.blocked;
   }
-  const key = process.env.TYPESAFE_API_KEY?.trim();
-  if (key === undefined || key === "") {
+  const key = envString("TYPESAFE_API_KEY");
+  if (key === undefined) {
     console.error("TYPESAFE_API_KEY absent — live Jev spot-check BLOCKED-pending-key.");
-    return 2;
+    return JEV_SPOT_CHECK_EXIT.blocked;
   }
   const client = await createRealJevClient({ apiKey: key });
 
   const symbols: PhpSymbol[] = [];
   for (const file of listPhpFiles(SRC_ROOT)) {
     const rel = file.slice(SRC_ROOT.length + 1);
-    symbols.push(...harvestPhpSymbols(rel, readFileSync(file, "utf8"), 10));
+    symbols.push(...harvestPhpSymbols(rel, readFileSync(file, "utf8")));
   }
   const graded = symbols.filter((s) => GROUND_TRUTH[`${s.file}#${s.name}`] !== undefined);
   console.log(`harvested ${symbols.length} symbols; ${graded.length} graded (ground truth available)`);
   if (graded.length < 30) {
     console.error(`BLOCKED: only ${graded.length} graded symbols (need >= 30)`);
-    return 2;
+    return JEV_SPOT_CHECK_EXIT.blocked;
   }
+
+  // Deterministic first-candidate baseline over the SAME graded set (no model,
+  // no key): the live score only counts if it clears this by a margin.
+  const baseline = firstCandidateBaseline(graded);
+  console.log(
+    `first-candidate baseline: ${baseline.correct}/${baseline.graded} = ${(baseline.accuracy * 100).toFixed(1)}% (live must exceed it by ${(BASELINE_MARGIN * 100).toFixed(0)} points)`,
+  );
 
   let correct = 0;
   const rows: Array<Record<string, unknown>> = [];
@@ -117,7 +137,7 @@ async function main(): Promise<number> {
   const STRONG_FAIL_BELOW = 0.8;
   for (const symbol of graded) {
     const decision = await selectSymbolType(client, symbol);
-    const accepted = GROUND_TRUTH[`${symbol.file}#${symbol.name}`] ?? [];
+    const accepted = [...(GROUND_TRUTH[`${symbol.file}#${symbol.name}`] ?? [])];
     const hit = accepted.includes(decision.selected);
     if (hit) correct += 1;
     // The cascade noul probabilities are PRESERVED per row (check/p/flagged)
@@ -142,6 +162,7 @@ async function main(): Promise<number> {
     );
   }
   const score = correct / rows.length;
+  const verdict = spotCheckVerdict({ accuracy: score, baseline: baseline.accuracy });
   // US-005 (AC-S): uncertain-band and strong-fail rates, reported separately.
   // A band hit = any cascade noul p in [0.30, 0.70]; strong-fail = p < 0.8.
   const bandRate = rows.filter((r) => r.band_hit).length / rows.length;
@@ -152,8 +173,12 @@ async function main(): Promise<number> {
     graded: rows.length,
     correct,
     accuracy: Number(score.toFixed(4)),
-    target: 0.9,
-    pass: score >= 0.9,
+    target: SPOT_CHECK_TARGET,
+    baseline_first_candidate: Number(baseline.accuracy.toFixed(4)),
+    baseline_margin: BASELINE_MARGIN,
+    required_accuracy: Number(verdict.required.toFixed(4)),
+    pass: verdict.pass,
+    fail_reasons: verdict.reasons,
     escalation_rate: rows.filter((r) => r.flagged).length / rows.length,
     band_rate: bandRate,
     strong_fail_rate: strongFailRate,
@@ -165,19 +190,20 @@ async function main(): Promise<number> {
       return acc;
     }, {}),
   };
-  const outPath = process.argv.includes("--out")
-    ? process.argv[process.argv.indexOf("--out") + 1] ?? "/tmp/jev-spot-check.json"
-    : "/tmp/jev-spot-check.json";
   writeFileSync(outPath, JSON.stringify({ summary, rows }, null, 2));
   console.log(
-    `SPOT-CHECK: ${correct}/${rows.length} = ${(score * 100).toFixed(1)}% (target 90%) → ${summary.pass ? "PASS" : "FAIL"}; rows → ${outPath}`,
+    `SPOT-CHECK: ${correct}/${rows.length} = ${(score * 100).toFixed(1)}% (required ${(verdict.required * 100).toFixed(1)}%: >= ${(SPOT_CHECK_TARGET * 100).toFixed(0)}% and baseline + ${(BASELINE_MARGIN * 100).toFixed(0)} pts) → ${summary.pass ? "PASS" : "FAIL"}; rows → ${outPath}`,
   );
-  return summary.pass ? 0 : 1;
+  for (const reason of verdict.reasons) console.log(`  FAIL: ${reason}`);
+  return summary.pass ? JEV_SPOT_CHECK_EXIT.pass : JEV_SPOT_CHECK_EXIT.fail;
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
-    console.error("[jev-spot-check] fatal:", err);
-    process.exit(1);
-  });
+// Only run when executed directly: importing this module (tests) must not start a live, billed run.
+if (import.meta.main) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      console.error("[jev-spot-check] fatal:", err);
+      process.exit(JEV_SPOT_CHECK_EXIT.fail);
+    });
+}

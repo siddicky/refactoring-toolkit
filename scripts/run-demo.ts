@@ -1,45 +1,61 @@
 /**
- * run-demo — Phase 0 exit-criteria driver (side-effect-real, retained).
+ * run-demo — Phase 0 exit-criteria driver and port-flow runner (side-effect-real, retained).
  *
- * Subcommands:
- *   worker [--harness stub|opencode] [--fault <spec>]   long-running dex worker
- *   hello                                               0(a)/0(b): start+wait hello flow
- *   long-step --ms 90000 [--flow-id long-1]             0(c): start a multi-minute step (kill target)
- *   wait-flow --id <flowId>                             wait for a flow (resume observation)
- *   round --dir <repoDir> --file src/a.php --round 1 --epoch 1
- *                                                       0(d)/0(e): fixture repo + PortRound flow
- *   recover --dir <repoDir> --epoch 2                   ordered recovery: abort/confirm sessions
- *                                                       (enumeration fallback) → lease reclaim →
- *                                                       reconcile → re-dispatch
- *   agent-roundtrip                                     0(e): REAL opencode session + prompt + tokens
- *   git-selftest                                        no dex needed: op-ID crash window (0d),
- *                                                       stale-writer (0d2), differing-content
- *                                                       replay across quarantine (0d3)
- *   gate --flow-id <id>                                 US-002 lead-layer dispatch health gate:
- *                                                       review-step failure facts from dexcli flow
- *                                                       history; fail-open (degraded => no protection)
- *   demo [--gate-flow-id <id>] [--dispatch parallel]    port flow dispatch (gate optional pre-dispatch), integration
+ *   run-demo.ts <command> [options]
+ *
+ * Commands: worker, hello, long-step, wait-flow, round, recover, recover-port,
+ * agent-roundtrip, git-selftest, gate, demo. `run-demo.ts --help` lists them and
+ * `run-demo.ts <command> --help` lists a command's options, defaults and
+ * constraints. Both are GENERATED from the option tables in RUN_DEMO_CLI below
+ * (src/cli/args.ts), so they cannot drift from what is parsed.
+ *
+ * Argument handling (audit C69) is strict: an unknown flag, a flag with no
+ * value, a flag where a value belongs (`--epoch --max-rounds 2`), a repeated
+ * flag, a value for a switch, an unknown command, and a number that is not a
+ * whole number in range (NaN, negative, 1e3) are usage errors, as is an enum
+ * flag (`--harness`, `--flows`, `--dispatch`) outside its choices. A
+ * space-separated value may not start with `-`; write `--flag=-value`.
+ *
+ * Exit codes ({@link RUN_DEMO_EXIT}; demo / wait-flow / hello / long-step / round):
+ * 0 ok, 1 failed/cancelled/terminated or fatal error, 3 completed with blocked
+ * files or tsc/vitest failures, 4 wait elapsed while the flow is still running
+ * (use wait-flow --id), 64 usage error (sysexits EX_USAGE, the number
+ * chaos-kill and watch-queue-verify use).
  *
  * Requires a running dex server: `dexcli dev -open=false` (see BUILD_NOTES.md).
  */
 
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileP = promisify(execFile);
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
+import { connect } from "node:net";
+import { tmpdir } from "node:os";
+import { sanitizeFileKey } from "../src/file-keys.js";
 import {
   dexConfigFromEnv,
   openDexClient,
   startDexWorker,
+  type AnyFlow,
 } from "../src/dex/client.js";
+import { dexcliFromEnv } from "../src/dex/defaults.js";
 import { waitForFlowTerminal } from "../src/dex/wait-for-terminal.js";
-import { DexServiceError } from "@superdurable/dex";
+import {
+  CLI_EXIT,
+  defineProgram,
+  exitCodesNote,
+  parseCommand,
+  reportParseFailure,
+  type ParsedOptions,
+} from "../src/cli/args.js";
+import { EnvError, envInt, envString } from "../src/env.js";
+import { DexServiceError, LongPollTimeoutError } from "@superdurable/dex";
+import type { FlowResult, StepCompletion } from "@superdurable/dex";
 import {
   OpencodeHarness,
   type AgentSessionClient,
 } from "../src/harness/opencode.js";
+import { describeHarness, selectHarness, type HarnessChoice } from "../src/harness/select.js";
 import {
   InMemoryLeaseStore,
   WorktreePool,
@@ -51,17 +67,30 @@ import {
   mergeLeaseIntoIntegration,
   operationId,
   reconcile,
+  sanitizePathSegment,
   type CompletionMarker,
   type LeaseRecord,
 } from "../src/git/worktree.js";
 import { git } from "../src/git/exec.js";
+import { makeFixtureRepo } from "../src/git/fixture.js";
+import { parseWorktreeRecords, shortBranchName } from "../src/git/worktree-list.js";
 import {
-  PortRoundFlow,
   configureProbe,
+  PROBE_LONG_STEP_OPTIONS,
+  PROBE_ROUND_OPTIONS,
   probeFlows,
   type RoundInput,
 } from "./probe-flow.js";
-import { PortProjectFlow, PortFileFlowInstance, configurePortHarness } from "../flows/port-project.js";
+import {
+  PortProjectFlow,
+  PortFileFlowInstance,
+  configurePortHarness,
+  parsePrepSourceMap,
+  parsePrepSourceMapRows,
+  sourceMapProblems,
+  type PortRunInput,
+  type PortRunResult,
+} from "../flows/port-project.js";
 import {
   configureEnvelopeStreamPublisher,
   envelopeStream,
@@ -70,18 +99,20 @@ import {
   configurePortFault,
   configurePortJudgment,
   configureTurnHealthAssessor,
+  faultKindsUsage,
+  faultSpecProblem,
 } from "../flows/runtime-hooks.js";
-import { createOfflineJevClient } from "../src/harness/runtime.js";
+import { createOfflineJevClient, judgmentLaneSummary } from "../src/harness/runtime.js";
 import { createRealJevClient, isTypesafeOffline } from "../src/typesafe/client.js";
 import type { JudgmentClient } from "../src/typesafe/client.js";
 import { createTurnHealthAssessor } from "../src/typesafe/turn-health.js";
 import { dexCliQueries, describeError } from "../src/dashboard/queries.js";
 import {
   evaluateDispatchGate,
+  GATE_FLOW_ID_OPTION,
   gateLine,
   GATE_QUERY_TIMEOUT_MS,
 } from "./dispatch-gate.js";
-import type { Flow } from "@superdurable/dex";
 
 // ---------------------------------------------------------------------------
 // Harness selection — the stub double is explicit and labeled, never silent.
@@ -107,45 +138,56 @@ class StubHarness implements AgentSessionClient {
   }
 }
 
-async function pickHarness(name: string | undefined): Promise<AgentSessionClient> {
-  if (name === "stub") return new StubHarness();
-  const baseUrl = process.env.OPENCODE_BASE_URL?.trim() || undefined;
-  try {
-    return await OpencodeHarness.connect(
-      baseUrl,
-      process.env.OPENCODE_MODEL_PROVIDER && process.env.OPENCODE_MODEL_ID
-        ? {
-            providerID: process.env.OPENCODE_MODEL_PROVIDER,
-            modelID: process.env.OPENCODE_MODEL_ID,
-          }
-        : undefined,
-    );
-  } catch (err) {
-    console.error(`[run-demo] opencode harness unavailable (${(err as Error).message}); falling back to StubHarness (labeled test double)`);
-    return new StubHarness();
-  }
+/**
+ * `--harness stub|opencode|auto` (absent = auto; anything else is rejected):
+ * stub = the labelled test double; opencode = the real harness, FAILS when
+ * the server does not answer; auto = the real harness when the server answers,
+ * otherwise a loud warning and the stub. Reachability is probed
+ * (src/harness/select.ts) because connect() performs no I/O. Recovery passes
+ * `requireReal`: it must enumerate and abort the real server's sessions, so
+ * there `auto` fails like `opencode` instead of skipping the fence on a stub.
+ */
+async function pickHarness(
+  name: string | undefined,
+  opts: { requireReal?: boolean } = {},
+): Promise<AgentSessionClient> {
+  const { baseUrl, model } = opencodeEnv();
+  return selectHarness({
+    choice: name,
+    requireReal: opts.requireReal,
+    baseUrl,
+    model,
+    makeStub: () => new StubHarness(),
+  });
+}
+
+/** OPENCODE_BASE_URL and the OPENCODE_MODEL_PROVIDER/ID pair, read with the shared rule (blank is unset). */
+export function opencodeEnv(env: NodeJS.ProcessEnv = process.env): {
+  baseUrl: string | undefined;
+  model: { providerID: string; modelID: string } | undefined;
+} {
+  const providerID = envString("OPENCODE_MODEL_PROVIDER", env);
+  const modelID = envString("OPENCODE_MODEL_ID", env);
+  return {
+    baseUrl: envString("OPENCODE_BASE_URL", env),
+    model: providerID !== undefined && modelID !== undefined ? { providerID, modelID } : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Fixture repo helper (used by `round` and `git-selftest`)
 // ---------------------------------------------------------------------------
 
-export async function makeFixtureRepo(dir: string): Promise<void> {
-  await rm(dir, { recursive: true, force: true });
-  await mkdir(dir, { recursive: true });
-  const runner = git(dir);
-  await runner.run(["init", "-b", "main"]);
-  await writeFile(join(dir, "README.md"), "fixture repo\n");
-  await runner.run(["add", "-A"]);
-  await runner.run(["commit", "-m", "fixture init"]);
-}
+// The helper lives in src/git/fixture.ts so tests share one copy; re-exported
+// here for callers that import it from the script.
+export { makeFixtureRepo };
 
 // ---------------------------------------------------------------------------
 // git-selftest — exits 0(d)/0(d2)/0(d3) at the git-seam level (no dex server)
 // ---------------------------------------------------------------------------
 
 async function gitSelftest(): Promise<number> {
-  const root = join(process.env.TMPDIR ?? "/tmp", `porting-kit-selftest-${Date.now()}`);
+  const root = join(tmpdir(), `porting-kit-selftest-${Date.now()}`);
   await makeFixtureRepo(root);
   const wtRoot = join(root, ".worktrees");
   const pool = new WorktreePool(root, wtRoot, new InMemoryLeaseStore(), 2);
@@ -178,7 +220,7 @@ async function gitSelftest(): Promise<number> {
   );
 
   // Crash-window replay: a redo produces the SAME dedup decision.
-  await writeFile(join(lease.worktreePath, "src", "a.php"), contentV1 + "// redo\n");
+  await writeFile(join(lease.worktreePath, "src", "a.php"), `${contentV1}// redo\n`);
   const keyedAgain = await findCommitByOpId(root, opId);
   check(
     "0d: crash-window replay finds the same keyed commit (no duplicate)",
@@ -188,16 +230,18 @@ async function gitSelftest(): Promise<number> {
 
   // 0(d2): stale writer dirties the worktree AFTER the keyed commit.
   await writeFile(join(lease.worktreePath, "src", "a.php"), "STALE WRITER JUNK\n");
-  const dirty = await isWorktreeClean(lease.worktreePath);
+  const clean = await isWorktreeClean(lease.worktreePath);
   const marker: CompletionMarker = {
     round: 1,
     disposition: `committed:${opId}`,
     content_hash: first.contentHash,
   };
+  // The marker is passed so this check exercises the marker-present reconcile
+  // branch (committed round + dirty worktree => restore from the keyed commit).
   const r1 = reconcile({
-    marker: undefined,
+    marker,
     keyed: keyedAgain,
-    worktree: { clean: dirty, commitObjectReadable: await commitObjectReadable(root, first.sha ?? "") },
+    worktree: { clean, commitObjectReadable: await commitObjectReadable(root, first.sha ?? "") },
   });
   await applyReconcile(lease, r1, keyedAgain);
   const cleanAfter = await isWorktreeClean(lease.worktreePath);
@@ -254,12 +298,8 @@ async function gitSelftest(): Promise<number> {
  * branches); 0 when the file has no committed round yet.
  */
 async function latestRoundFor(repoDir: string, file: string): Promise<number> {
-  const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const { stdout } = await execFileP(
-    "git",
-    ["log", "--all", "--grep", `Operation-ID: ${escaped}#`, "--format=%B"],
-    { cwd: repoDir, maxBuffer: 16 * 1024 * 1024 },
-  );
+  const escaped = escapeRegExp(file);
+  const stdout = await git(repoDir).run(["log", "--all", "--grep", `Operation-ID: ${escaped}#`, "--format=%B"]);
   let max = 0;
   for (const m of stdout.matchAll(new RegExp(`Operation-ID: ${escaped}#(\\d+)`, "g"))) {
     const n = Number.parseInt(m[1] ?? "0", 10);
@@ -283,15 +323,21 @@ async function countOpIdCommits(repoRoot: string, opId: string): Promise<number>
 // Ordered recovery (plan §Session fencing) — used by `recover`
 // ---------------------------------------------------------------------------
 
-async function orderedRecover(repoDir: string, epoch: number): Promise<number> {
-  const file = process.env.RECOVER_FILE ?? "src/a.php";
-  const round = Number.parseInt(process.env.RECOVER_ROUND ?? "1", 10);
+async function orderedRecover(options: CommandOptions<"recover">): Promise<number> {
+  // The pool builds worktree paths from this, and git runs with those paths as
+  // arguments from other directories: it must be absolute (B11).
+  const repoDir = resolve(options.dir);
+  const { epoch } = options;
+  // Flag, else environment, else default. A malformed RECOVER_ROUND is a usage
+  // error (it used to become NaN, and the op-ID "<file>#NaN").
+  const file = options.file ?? envString("RECOVER_FILE") ?? "src/a.php";
+  const round = options.round ?? envInt("RECOVER_ROUND", { min: 1 }) ?? 1;
   console.log(`[recover] epoch bump → ${epoch}; target ${file} round ${round}`);
 
   // 1-2. Abort + confirm persisted sessions; enumeration fallback when the
   // persisted fence is unavailable (attribute reads need a live flow context,
   // so Phase 0 uses the enumeration path against the surviving server).
-  const harness = await pickHarness(process.env.HARNESS);
+  const harness = await pickHarness(options.harness ?? envString("HARNESS"), { requireReal: true });
   const aborted = await harness.abortSessionsNotTagged(epoch);
   console.log(`[recover] aborted ${aborted.length} foreign session(s): ${aborted.join(",") || "none"}`);
 
@@ -333,7 +379,7 @@ async function startRound(
   round: number,
   epoch: number,
 ): Promise<number> {
-  const config = dexConfigFromEnv();
+  const config = dexConfigFromEnv(process.env, "client");
   const pool = new WorktreePool(repoDir, join(repoDir, ".worktrees"), new InMemoryLeaseStore(), 2);
   const acquired = await pool.acquire(file, epoch, `run-demo-${epoch}`);
   if (!acquired.acquired) {
@@ -351,17 +397,15 @@ async function startRound(
     promptText: `Port ${file} round ${round} (probe).`,
     writtenContent: `<?php\n// ported content for ${file} round ${round} epoch ${epoch}\n`,
   };
-  const flows: Flow<any>[] = probeFlows();
+  const flows: AnyFlow[] = probeFlows();
   const runtime = await openDexClient(flows, config);
   try {
     const flow = flows.find((f) => f.getFlowType() === "probe.PortRound");
     if (flow === undefined) throw new Error("probe.PortRound not registered");
-    const flowId = `round-${file.replace(/\//g, "__")}-${round}-${epoch}-${Date.now()}`;
+    const flowId = `round-${sanitizeFileKey(file)}-${round}-${epoch}-${Date.now()}`;
     const runId = await runtime.client.startFlow(flow, flowId, input);
     console.log(`[round] flowId=${flowId} runId=${runId} worktree=${lease.worktreePath}`);
-    const result = await runtime.client.waitForFlow(flowId);
-    console.log(`[round] completed: ${JSON.stringify(result)}`);
-    return 0;
+    return await waitAndReport(runtime, flowId, 30, "round");
   } finally {
     await runtime.close();
   }
@@ -374,12 +418,7 @@ async function startRound(
 // ---------------------------------------------------------------------------
 
 function dispatchGateQueries() {
-  const config = dexConfigFromEnv();
-  return dexCliQueries({
-    bin: process.env.DEXCLI_BIN?.trim() || "dexcli",
-    server: config.serverAddress,
-    timeoutMs: GATE_QUERY_TIMEOUT_MS,
-  });
+  return dexCliQueries({ ...dexcliFromEnv(), timeoutMs: GATE_QUERY_TIMEOUT_MS });
 }
 
 async function runDispatchGate(gateFlowId: string | undefined): Promise<number> {
@@ -398,7 +437,7 @@ async function runDispatchGate(gateFlowId: string | undefined): Promise<number> 
 // Port-project (Phase 2 trial gate)
 // ---------------------------------------------------------------------------
 
-function portFlows(harness: AgentSessionClient): Flow<any>[] {
+function portFlows(harness: AgentSessionClient): AnyFlow[] {
   configurePortHarness(harness);
   // v1.1: the per-file child flow MUST be registered on every worker that
   // serves port.Project — the parallel wave join starts port.File SubFlows.
@@ -416,27 +455,55 @@ function portFlows(harness: AgentSessionClient): Flow<any>[] {
  * - TYPESAFE_OFFLINE=1 → deterministic in-memory double (scripted fixtures,
  *   never reported as live usage);
  * - TYPESAFE_API_KEY set → REAL billed Jev client;
- * - no key → in-memory double for the symbol table (BLOCKED-pending-key for
- *   Jev-live + the n≥30 spot-check); verdict-check/prioritize stay NAIVE.
+ * - no key (unset or blank) → in-memory double for the symbol table
+ *   (BLOCKED-pending-key for Jev-live + the n≥30 spot-check); verdict-check/
+ *   prioritize stay NAIVE.
+ * Offline wins over a key: an operator with TYPESAFE_OFFLINE=1 and a key in
+ * .env is never billed. The factories are injectable so the precedence is tested
+ * without a network (tests/jev-wiring.test.ts).
  */
-async function resolveJudgment(): Promise<JudgmentClient> {
+export async function resolveJudgment(
+  deps: {
+    createReal?: (config: { apiKey: string }) => Promise<JudgmentClient>;
+    createOffline?: () => JudgmentClient;
+  } = {},
+): Promise<JudgmentClient> {
+  const createReal = deps.createReal ?? createRealJevClient;
+  const createOffline = deps.createOffline ?? createOfflineJevClient;
   if (isTypesafeOffline()) {
     console.log("[worker] Jev: OFFLINE in-memory double (scripted fixtures)");
-    return createOfflineJevClient();
+    return createOffline();
   }
-  const key = process.env.TYPESAFE_API_KEY?.trim();
-  if (key === undefined || key === "") {
+  const key = envString("TYPESAFE_API_KEY");
+  if (key === undefined) {
     console.log("[worker] Jev: TYPESAFE_API_KEY absent — in-memory double; live Jev + n>=30 spot-check BLOCKED-pending-key");
-    return createOfflineJevClient();
+    return createOffline();
   }
   try {
-    const client = await createRealJevClient({ apiKey: key });
+    const client = await createReal({ apiKey: key });
     console.log("[worker] Jev: REAL client (billed System One calls)");
     return client;
   } catch (err) {
     console.error(`[worker] Jev real client unavailable (${(err as Error).message}) — in-memory double`);
-    return createOfflineJevClient();
+    return createOffline();
   }
+}
+
+/**
+ * The worker's judgment wiring, in one place so it can be tested: resolve the
+ * client, inject it into the flows' ONE judgment seam (flows/runtime-hooks.ts,
+ * which liveJevClient() reads for verdict-check, prioritize and vitest triage),
+ * and say which lane is active in ONE loud startup line. The lane line is
+ * derived from the client that was injected, so it cannot claim REAL while the
+ * steps run naive.
+ */
+export async function configureWorkerJudgment(
+  deps: Parameters<typeof resolveJudgment>[0] = {},
+): Promise<JudgmentClient> {
+  const judgment = await resolveJudgment(deps);
+  configurePortJudgment(judgment);
+  console.log(`[worker] JUDGMENT LANE: ${judgmentLaneSummary(judgment.kind)}`);
+  return judgment;
 }
 
 /**
@@ -446,35 +513,656 @@ async function resolveJudgment(): Promise<JudgmentClient> {
  * matching flagged by the dex-sdk review, area 1.6).
  */
 
-async function startDemo(): Promise<number> {
-  const config = dexConfigFromEnv();
-  const dir = argValue("--dir");
-  if (dir === undefined) throw new Error("demo requires --dir <projectRepoDir>");
-  if (!(await exists(dir))) await makeFixtureRepo(dir);
+/**
+ * Exit codes for the commands that wait on a flow. The wait returning means
+ * the flow is CLOSED, not that it succeeded, so the outcome is mapped
+ * explicitly (an orchestrating agent keys off these):
+ *   0 completed, nothing left unresolved
+ *   1 failed / cancelled / terminated (also any fatal CLI error)
+ *   64 usage error (sysexits EX_USAGE; see RUN_DEMO_EXIT)
+ *   3 completed, but files are blocked or tsc / vitest report failures
+ *   4 the wait elapsed while the flow is STILL RUNNING (healthy; keep waiting
+ *     with `wait-flow --id <flowId>`, do NOT re-dispatch)
+ */
+export const EXIT_FLOW_FAILED = 1;
+export const EXIT_UNRESOLVED = 3;
+export const EXIT_STILL_RUNNING = 4;
+
+/** Every exit code run-demo returns (the table the usage text lists). */
+export const RUN_DEMO_EXIT = {
+  ok: 0,
+  failed: EXIT_FLOW_FAILED,
+  unresolved: EXIT_UNRESOLVED,
+  stillRunning: EXIT_STILL_RUNNING,
+  usage: CLI_EXIT.usage,
+} as const;
+
+/** The PpFinal completion's payload (the port flow's gracefulComplete output), when present. */
+export function decodePortRunResult(result: FlowResult): PortRunResult | undefined {
+  const final = result.completions.find((c: StepCompletion) => c.stepType === "PpFinal");
+  if (final === undefined) return undefined;
+  try {
+    return final.decode<PortRunResult>();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Maps a FlowResult to an exit code and the lines to print (pure; see the exit-code table above). */
+export function flowOutcome(
+  label: string,
+  flowId: string,
+  result: FlowResult,
+): { code: number; lines: string[] } {
+  const head = `[${label}] flowId=${flowId} status=${result.status}`;
+  if (!result.isTerminal) {
+    return {
+      code: EXIT_STILL_RUNNING,
+      lines: [`${head} — flow still running: use \`run-demo.ts wait-flow --id ${flowId}\``],
+    };
+  }
+  if (result.status !== "completed") {
+    return {
+      code: EXIT_FLOW_FAILED,
+      lines: [
+        `${head} errorType=${result.errorType ?? "n/a"} message=${JSON.stringify(result.errorMessage ?? "")}`,
+      ],
+    };
+  }
+  const port = decodePortRunResult(result);
+  if (port === undefined) return { code: 0, lines: [`${head} result=${JSON.stringify(result)}`] };
+  const blocked = port.blocked.length;
+  const tsc = port.verification?.tscTotal ?? 0;
+  const vitest = port.verification?.vitestTotal ?? 0;
+  const unresolved = blocked > 0 || tsc > 0 || vitest > 0;
+  // A vitest pass that never executed is not "0 failures", and neither is a
+  // typecheck that never ran: say so in the line (the exit code only reflects
+  // counted failures and blocked files). tscTotal counts LOCATED diagnostics
+  // only; the accounting (Contract A) says whether that count can be trusted.
+  const run = port.verification?.vitestRun;
+  const vitestState = run == null ? "" : run.kind === "ran" ? ` (ran ${run.passed}/${run.total})` : ` (NOT RUN: ${run.reason})`;
+  const tscRun = port.verification?.tscRun;
+  const tscState =
+    tscRun == null
+      ? ""
+      : tscRun.state === "not-run"
+        ? ` (NOT RUN: ${tscRun.reason ?? "reason unrecorded"})`
+        : tscRun.unlocated > 0
+          ? ` (+${tscRun.unlocated} unlocated diagnostic(s))`
+          : "";
+  return {
+    code: unresolved ? EXIT_UNRESOLVED : 0,
+    lines: [
+      `${head} completed=${port.completed.length} blocked=${blocked} tsc=${tsc}${tscState} vitest=${vitest}${vitestState}${unresolved ? " (unresolved work remains)" : ""}`,
+      `[${label}] result: ${JSON.stringify(port)}`,
+    ],
+  };
+}
+
+/** Waits for a flow through the typed helper, prints the outcome, and returns its exit code. */
+export async function waitAndReport(
+  runtime: { client: { waitForFlow(flowId: string): Promise<FlowResult> } },
+  flowId: string,
+  waitMinutes: number,
+  label: string,
+  retryDelayMs?: number,
+): Promise<number> {
+  try {
+    const result = await waitForFlowTerminal(runtime, flowId, waitMinutes * 60_000, retryDelayMs);
+    const outcome = flowOutcome(label, flowId, result);
+    for (const line of outcome.lines) (outcome.code === 0 ? console.log : console.error)(line);
+    return outcome.code;
+  } catch (err) {
+    // The deadline elapsed on a healthy long poll: the durable flow is still
+    // running. Say so and use a distinct code instead of calling it fatal.
+    if (err instanceof LongPollTimeoutError) {
+      console.error(
+        `[${label}] flowId=${flowId} — wait of ${waitMinutes} min elapsed, flow still running: use \`run-demo.ts wait-flow --id ${flowId}\` (do not re-dispatch)`,
+      );
+      return EXIT_STILL_RUNNING;
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Demo input resolution + preflight (C70): everything that can be wrong with a
+// `demo` invocation is checked BEFORE a repo is created, dex is contacted or a
+// flow is started, and reported in one message.
+// ---------------------------------------------------------------------------
+
+/** Fixture inputs ship next to this script, whatever the caller's cwd is. */
+const FIXTURES_DIR = join(import.meta.dir, "..", "fixtures");
+const DEMO_DEFAULT_FILES = "src/Money.php,src/Pricing/FlatRateDiscount.php";
+
+// ---------------------------------------------------------------------------
+// Command line (audit C69): one option table per command, on the shared layer
+// in src/cli/args.ts. Parsing, validation, typing and the usage text all come
+// from these tables.
+// ---------------------------------------------------------------------------
+
+/** The values select.ts accepts for `--harness`; `satisfies` keeps this list a subset of its HarnessChoice. */
+const HARNESS_CHOICES = ["stub", "opencode", "auto"] as const satisfies readonly HarnessChoice[];
+
+const START_ONLY_OPTION = {
+  kind: "flag",
+  description: "start the flow and return without waiting for it",
+} as const;
+
+const INIT_FIXTURE_OPTION = {
+  kind: "flag",
+  description: "create a throwaway fixture repository when --dir does not exist (an existing directory is never touched)",
+} as const;
+
+const WAIT_MINUTES_OPTION = {
+  kind: "int",
+  min: 1,
+  default: 30,
+  metavar: "n",
+  description: "how long to wait for the flow; a flow still running then exits 4 (resume with wait-flow --id)",
+} as const;
+
+export const RUN_DEMO_CLI = defineProgram({
+  name: "run-demo.ts",
+  summary:
+    "Phase 0 exit-criteria driver and port-flow runner. Needs a running dex server (`dexcli dev -open=false`) except for git-selftest and gate.",
+  commands: {
+    worker: {
+      summary: "long-running dex worker (kill target); runs until killed",
+      options: {
+        harness: {
+          kind: "enum",
+          choices: HARNESS_CHOICES,
+          default: "auto",
+          description:
+            "stub = labelled test double; opencode = real harness, fails if the server does not answer; auto = real when reachable, else a loud warning and the stub",
+        },
+        flows: {
+          kind: "enum",
+          choices: ["probe", "port"],
+          default: "probe",
+          description: "flows to register: the phase-0 probe flows, or the port flows (port.Project + port.File)",
+        },
+        fault: {
+          kind: "string",
+          metavar: "spec",
+          description: `deterministic fault injection, validated against the flows chosen by --flows (default: $PORTING_KIT_FAULT). One of: ${faultKindsUsage()}`,
+        },
+      },
+    },
+    hello: {
+      summary: "0(a)/0(b): start the hello flow and wait for it",
+      options: {
+        flowId: { kind: "string", metavar: "id", description: "flow id (default: hello-<epoch ms>)" },
+      },
+    },
+    "long-step": {
+      summary: "0(c): start a multi-minute step (the kill target)",
+      options: {
+        ...PROBE_LONG_STEP_OPTIONS,
+        flowId: { kind: "string", metavar: "id", default: "long-1", description: "flow id" },
+        startOnly: START_ONLY_OPTION,
+      },
+    },
+    "wait-flow": {
+      summary: "wait for a flow (resume observation)",
+      options: {
+        id: { kind: "string", metavar: "flowId", required: true, description: "flow to wait for" },
+        waitMinutes: WAIT_MINUTES_OPTION,
+      },
+    },
+    round: {
+      summary: "0(d)/0(e): one fixture-repo round through the probe PortRound flow",
+      options: {
+        dir: {
+          kind: "string",
+          metavar: "repoDir",
+          required: true,
+          description: "git repository root; must already exist unless --init-fixture creates a throwaway one",
+        },
+        initFixture: INIT_FIXTURE_OPTION,
+        ...PROBE_ROUND_OPTIONS,
+      },
+    },
+    recover: {
+      summary:
+        "ordered recovery: abort/confirm sessions (enumeration fallback), lease reclaim, reconcile, re-dispatch (env defaults: HARNESS, RECOVER_FILE, RECOVER_ROUND)",
+      options: {
+        dir: { kind: "string", metavar: "repoDir", required: true, description: "git repository of the interrupted round (relative paths are resolved against the current directory)" },
+        epoch: { kind: "int", min: 1, default: 2, description: "the bumped epoch to recover to" },
+        file: { kind: "string", metavar: "path", description: "the interrupted file to re-dispatch (default: $RECOVER_FILE, else src/a.php)" },
+        round: { kind: "int", min: 1, metavar: "n", description: "the interrupted round (default: $RECOVER_ROUND, else 1)" },
+        harness: {
+          kind: "enum",
+          choices: HARNESS_CHOICES,
+          description: "recovery must reach the real server, so auto fails like opencode when it is unreachable (default: $HARNESS, else auto)",
+        },
+      },
+    },
+    "recover-port": {
+      summary:
+        "recovery for the port flow: abort stale sessions, reconcile each file's own lease worktree; prints the next demo command (does not run it)",
+      options: {
+        dir: { kind: "string", metavar: "projectRepoDir", required: true, description: "project git repository root" },
+        epoch: { kind: "int", min: 1, default: 2, description: "the bumped epoch; must be higher than the interrupted run's" },
+        files: {
+          kind: "string",
+          metavar: "files",
+          required: true,
+          description:
+            "the run's files (comma-separated, or `creatorex`); same expansion as demo. Required: each one's lease worktree is what gets reconciled, so no files would mean nothing inspected",
+        },
+        sourceRoot: { kind: "string", metavar: "dir", description: "echoed into the printed demo command" },
+        prep: { kind: "string", metavar: "path", description: "echoed into the printed demo command" },
+        flowId: { kind: "string", metavar: "id", description: "echoed into the printed demo command (it must be NEW)" },
+        maxRounds: { kind: "int", min: 1, description: "echoed into the printed demo command" },
+        harness: {
+          kind: "enum",
+          choices: HARNESS_CHOICES,
+          default: "auto",
+          description: "recovery must reach the real server, so auto fails like opencode when it is unreachable",
+        },
+      },
+    },
+    "agent-roundtrip": {
+      summary: "0(e): a REAL opencode session, prompt and token usage (env: OPENCODE_BASE_URL, OPENCODE_MODEL_PROVIDER/ID)",
+      options: {},
+    },
+    "git-selftest": {
+      summary:
+        "no dex needed: op-ID crash window (0d), stale-writer (0d2), differing-content replay across quarantine (0d3)",
+      options: {},
+    },
+    gate: {
+      summary: "US-002 lead-layer dispatch health gate: review-step failure facts from dexcli flow history; fail-open",
+      options: { flowId: GATE_FLOW_ID_OPTION },
+    },
+    demo: {
+      summary: "port-flow dispatch into an existing git repository; inputs are preflighted before dex is contacted",
+      options: {
+        dir: {
+          kind: "string",
+          metavar: "repoDir",
+          required: true,
+          description: "project git repository root (the port target); must exist unless --init-fixture",
+        },
+        files: {
+          kind: "string",
+          metavar: "a.php,b.php|creatorex",
+          default: DEMO_DEFAULT_FILES,
+          description: "PHP files relative to --source-root; `creatorex` is the 10-file set and implies its --prep and --source-root",
+        },
+        prep: {
+          kind: "string",
+          metavar: "path",
+          description: "prep artifact with the source-map rows (default: the php-sample stub; the creatorex stub for --files creatorex)",
+        },
+        sourceRoot: {
+          kind: "string",
+          metavar: "dir",
+          description: "directory holding the source files (default: fixtures/php-sample; creatorex-middleware for --files creatorex)",
+        },
+        epoch: { kind: "int", min: 1, default: 1, description: "session-fence epoch" },
+        maxRounds: { kind: "int", min: 1, default: 1, description: "port/fix rounds per file" },
+        waitMinutes: WAIT_MINUTES_OPTION,
+        flowId: { kind: "string", metavar: "id", description: "flow id (default: demo-<epoch ms>)" },
+        gateFlowId: GATE_FLOW_ID_OPTION,
+        dispatch: {
+          kind: "enum",
+          choices: ["parallel", "sequential"],
+          default: "parallel",
+          description: "per-file waves as SubFlows over the 2 slots (parallel), or one file at a time",
+        },
+        startOnly: START_ONLY_OPTION,
+        initFixture: INIT_FIXTURE_OPTION,
+        dashboard: {
+          kind: "flag",
+          description:
+            "also start the read-only status server (scripts/serve-status.ts) on STATUS_PORT (default 4646) unless that port is taken; log in $TMPDIR; stop it with the printed `kill <pid>`",
+        },
+      },
+    },
+  },
+  notes: [
+    exitCodesNote(RUN_DEMO_EXIT, {
+      ok: "ok",
+      failed: "flow failed/cancelled/terminated, or fatal error",
+      unresolved: "completed with blocked files or tsc/vitest failures",
+      stillRunning: "wait elapsed, flow still running",
+      usage: "usage error",
+    }),
+    "Environment: DEX_SERVER_ADDRESS, OPENCODE_BASE_URL, OPENCODE_MODEL_PROVIDER/OPENCODE_MODEL_ID, TYPESAFE_API_KEY/TYPESAFE_OFFLINE, PORTING_KIT_FAULT (worker; --fault overrides it).",
+  ],
+});
+
+type CommandName = keyof (typeof RUN_DEMO_CLI)["commands"];
+/** The typed options of one run-demo command. */
+export type CommandOptions<K extends CommandName> = ParsedOptions<(typeof RUN_DEMO_CLI)["commands"][K]["options"]>;
+export type DemoOptions = CommandOptions<"demo">;
+
+/** Strict parse of run-demo's argv (`<command> [options]`, without the `bun run script` prefix). */
+export function parseRunDemoArgs(argv: readonly string[]) {
+  return parseCommand(RUN_DEMO_CLI, argv);
+}
+
+export interface DemoInputs {
+  /** Absolute project repository root (the target of the port). */
+  dir: string;
+  /** Create a throwaway fixture repo when `dir` does not exist (opt-in). */
+  initFixture: boolean;
+  /** The raw --files value (kept so a printed command can echo `creatorex`). */
+  filesArg: string;
+  files: string[];
+  /** Absolute path of the prep artifact. */
+  prepPath: string;
+  /** Absolute dir holding the source files named by `files`. */
+  sourceRoot: string;
+  epoch: number;
+  maxRounds: number;
+  waitMinutes: number;
+  dispatchMode: "sequential" | "parallel";
+}
+
+/**
+ * Resolves the parsed `demo` options. Defaults are the php-sample fixtures
+ * located from THIS script (never the cwd); `--files creatorex` implies the
+ * creatorex prep artifact and source root (explicit --prep / --source-root
+ * still win), which is the pair its 10 files need. All paths come back
+ * absolute because the flow runs in the worker process, whose cwd may differ.
+ * Validation (required --dir, whole-number and enum flags) already happened in
+ * the parse; see {@link parseRunDemoArgs}.
+ */
+export function resolveDemoInputs(options: DemoOptions, fixturesDir: string = FIXTURES_DIR): DemoInputs {
+  const filesArg = options.files.trim();
+  const creatorex = filesArg === "creatorex";
+  const creatorexDir = join(fixturesDir, "creatorex-middleware");
+  return {
+    dir: resolve(options.dir),
+    initFixture: options.initFixture,
+    filesArg,
+    files: expandFilesArg(filesArg),
+    prepPath: resolve(
+      options.prep ?? (creatorex ? join(creatorexDir, "prep-stub.md") : join(fixturesDir, "stub-prep.md")),
+    ),
+    sourceRoot: resolve(options.sourceRoot ?? (creatorex ? creatorexDir : join(fixturesDir, "php-sample"))),
+    epoch: options.epoch,
+    maxRounds: options.maxRounds,
+    waitMinutes: options.waitMinutes,
+    dispatchMode: options.dispatch,
+  };
+}
+
+/**
+ * Fails fast with ONE message listing every problem, instead of the flow
+ * failing after dispatch (`prep source map lacks rows for: ...`): the prep
+ * artifact is readable, every file has an exact row in its source map, the
+ * source root is a directory, and every file exists under it.
+ */
+export async function preflightDemoInputs(
+  inputs: Pick<DemoInputs, "files" | "prepPath" | "sourceRoot">,
+  options: { dashboard?: boolean; env?: NodeJS.ProcessEnv } = {},
+): Promise<void> {
+  const problems: string[] = [];
+  if (inputs.files.length === 0) problems.push("--files names no files");
+  // B10: `--dashboard` reads STATUS_PORT only after the flow has started, where a
+  // bad value could no longer fail the command cleanly. Say so now instead.
+  if (options.dashboard === true) {
+    try {
+      dashboardPort(options.env ?? process.env);
+    } catch (err) {
+      problems.push(`--dashboard: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  let prep: string | undefined;
+  try {
+    prep = await readFile(inputs.prepPath, "utf8");
+  } catch (err) {
+    problems.push(`prep artifact ${inputs.prepPath} is not readable (${(err as NodeJS.ErrnoException).code ?? String(err)})`);
+  }
+  if (prep !== undefined) {
+    const sourceMap = parsePrepSourceMap(prep);
+    const missing = inputs.files.filter((f) => sourceMap[f] === undefined);
+    if (missing.length > 0) {
+      problems.push(`prep artifact ${inputs.prepPath} has no source-map row for: ${missing.join(", ")}`);
+    }
+    for (const problem of sourceMapProblems(parsePrepSourceMapRows(prep), inputs.files)) {
+      problems.push(`prep artifact ${inputs.prepPath}: ${problem}`);
+    }
+  }
+
+  const rootIsDir = await stat(inputs.sourceRoot).then((s) => s.isDirectory(), () => false);
+  if (!rootIsDir) {
+    problems.push(`source root ${inputs.sourceRoot} is not a directory`);
+  } else {
+    const absent: string[] = [];
+    for (const f of inputs.files) {
+      if (!(await exists(join(inputs.sourceRoot, f)))) absent.push(f);
+    }
+    if (absent.length > 0) problems.push(`not found under source root ${inputs.sourceRoot}: ${absent.join(", ")}`);
+  }
+
+  if (problems.length > 0) {
+    throw new Error(`demo preflight failed:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
+  }
+}
+
+/**
+ * The project repository must already exist (a git repository root with at
+ * least one commit). A typo in --dir used to silently become a fresh README-only
+ * repo; creating one is now opt-in via --init-fixture and only ever happens for
+ * a path that does not exist (an existing directory is never removed).
+ */
+export async function ensureProjectRepo(
+  dir: string,
+  opts: { initFixture: boolean },
+): Promise<"existing" | "created"> {
+  if (!(await exists(dir))) {
+    if (!opts.initFixture) {
+      throw new Error(
+        `--dir ${dir} does not exist. Pass the path of an existing git repository, or --init-fixture to create a throwaway fixture repository there.`,
+      );
+    }
+    await makeFixtureRepo(dir);
+    return "created";
+  }
+  const head = await git(dir).tryRun(["rev-parse", "--verify", "HEAD"]);
+  if (!head.ok) {
+    throw new Error(
+      `--dir ${dir} exists but is not a git repository with at least one commit (git rev-parse --verify HEAD: ${head.stderr.trim()})`,
+    );
+  }
+  const top = (await git(dir).run(["rev-parse", "--show-toplevel"])).trim();
+  if ((await realpath(top)) !== (await realpath(dir))) {
+    throw new Error(`--dir ${dir} is inside the git repository at ${top}; pass the repository root`);
+  }
+  return "existing";
+}
+
+// ---------------------------------------------------------------------------
+// Optional status dashboard (`demo --dashboard`, C72). serve-status.ts is a
+// read-only monitor; it is never started implicitly, it reports whether it
+// really came up, and its output goes to a log file instead of /dev/null.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_STATUS_PORT = 4646;
+
+/** Dashboard port: STATUS_PORT (a dedicated name: PORT is generic and Bun auto-loads it from .env), default 4646. */
+export function dashboardPort(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = envString("STATUS_PORT", env);
+  if (raw === undefined) return DEFAULT_STATUS_PORT;
+  // Whole digits only (src/env.ts): Number() also accepted "0x1F6E" and "5e3".
+  const n = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new EnvError(`STATUS_PORT must be a port number 1-65535 (got ${JSON.stringify(raw)})`);
+  }
+  return n;
+}
+
+/** True when something already accepts connections on host:port. */
+export function probePortInUse(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
+  return new Promise((done) => {
+    const socket = connect({ port, host });
+    const finish = (inUse: boolean) => {
+      socket.destroy();
+      done(inUse);
+    };
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+/**
+ * Environment handed to the serve-status child. The port travels as
+ * STATUS_PORT, the variable serve-status reads FIRST (src/dashboard/config.ts);
+ * the generic PORT is only its deprecated fallback, so it is never what we pass
+ * (an ambient PORT is ignored whenever STATUS_PORT is set). The port serve-status
+ * resolves from this env is therefore always the one launchDashboard probes and logs.
+ */
+export function dashboardChildEnv(env: NodeJS.ProcessEnv, dir: string, port: number): NodeJS.ProcessEnv {
+  return { ...env, STATUS_REPO_ROOT: dir, STATUS_PORT: String(port) };
+}
+
+export type DashboardLaunch =
+  | { status: "started"; pid: number; port: number; logPath: string; message: string }
+  | { status: "in-use"; port: number; message: string }
+  | { status: "failed"; port: number; logPath: string; message: string }
+  | { status: "missing"; message: string }
+  /** Something other than the dashboard went wrong (bad STATUS_PORT, an unwritable log, a spawn failure). */
+  | { status: "error"; message: string };
+
+/**
+ * Starts serve-status.ts for `dir` on STATUS_PORT and confirms it is really
+ * listening. If the port is already taken it does NOT start a second copy (whatever
+ * listens there keeps serving ITS OWN STATUS_REPO_ROOT, not `dir`) and says so.
+ * The child is detached (it outlives the demo); its stdout/stderr go to a log file.
+ *
+ * The dashboard is a convenience next to a durable flow: this never throws. A
+ * bad STATUS_PORT, an unwritable log or a spawn failure is the `error` result
+ * (B10), because by the time it runs the flow is already started and a thrown
+ * error would exit 1 ("flow failed") over a flow that is still running.
+ */
+export async function launchDashboard(
+  dir: string,
+  opts: { serveStatusPath?: string; env?: NodeJS.ProcessEnv; readyTimeoutMs?: number } = {},
+): Promise<DashboardLaunch> {
+  try {
+    return await startDashboardChild(dir, opts);
+  } catch (err) {
+    return { status: "error", message: `dashboard not started: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+async function startDashboardChild(
+  dir: string,
+  opts: { serveStatusPath?: string; env?: NodeJS.ProcessEnv; readyTimeoutMs?: number },
+): Promise<DashboardLaunch> {
+  const env = opts.env ?? process.env;
+  const serveStatus = opts.serveStatusPath ?? join(import.meta.dir, "serve-status.ts");
+  if (!(await exists(serveStatus))) {
+    return { status: "missing", message: `${serveStatus} not found; not started` };
+  }
+  const port = dashboardPort(env);
+  const host = env.STATUS_HOST?.trim() || "127.0.0.1";
+  if (await probePortInUse(port, host)) {
+    return {
+      status: "in-use",
+      port,
+      message: `${host}:${port} is already in use; NOT starting another. Whatever listens there keeps serving its own STATUS_REPO_ROOT, not ${dir}. Set STATUS_PORT to use a free port.`,
+    };
+  }
+  const logPath = join(tmpdir(), `run-demo-dashboard-${port}.log`);
+  const logFd = openSync(logPath, "a");
+  const child = spawn(process.execPath, [serveStatus], {
+    env: dashboardChildEnv(env, dir, port),
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+  });
+  closeSync(logFd);
+  let exitCode: number | null | undefined;
+  let spawnError: Error | undefined;
+  child.once("exit", (code) => {
+    exitCode = code;
+  });
+  // An 'error' event with no listener is thrown as an uncaught exception.
+  child.once("error", (err) => {
+    spawnError = err;
+  });
+  child.unref();
+  // Wait for the bind: a child that dies (EADDRINUSE race, bad config) must not be
+  // reported as a live dashboard.
+  const deadline = Date.now() + (opts.readyTimeoutMs ?? 8_000);
+  while (Date.now() < deadline) {
+    if (exitCode !== undefined || spawnError !== undefined) break;
+    if (await probePortInUse(port, host)) {
+      return {
+        status: "started",
+        pid: child.pid ?? -1,
+        port,
+        logPath,
+        message: `http://${host}:${port} (pid ${child.pid}, log ${logPath}; stop it with: kill ${child.pid})`,
+      };
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return {
+    status: "failed",
+    port,
+    logPath,
+    message:
+      spawnError !== undefined
+        ? `serve-status could not be started (${spawnError.message}); see ${logPath}`
+        : exitCode !== undefined
+          ? `serve-status exited (code ${exitCode}) before listening on ${host}:${port}; see ${logPath}`
+          : `serve-status is not listening on ${host}:${port} yet (pid ${child.pid}); see ${logPath}`,
+  };
+}
+
+/**
+ * `demo --dashboard`: start the status server next to the run and say where it
+ * is. Without the flag nothing is started, and it never throws (the flow is
+ * already running when this is called). `launch` is injectable for tests.
+ */
+export async function maybeLaunchDashboard(
+  enabled: boolean,
+  dir: string,
+  launch: (dir: string) => Promise<DashboardLaunch> = launchDashboard,
+): Promise<void> {
+  if (!enabled) return;
+  let message: string;
+  try {
+    message = (await launch(dir)).message;
+  } catch (err) {
+    message = `dashboard not started: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  console.log(`[demo] dashboard: ${message}`);
+}
+
+async function startDemo(options: DemoOptions): Promise<number> {
+  const config = dexConfigFromEnv(process.env, "client");
+  const inputs = resolveDemoInputs(options);
+  const { dir, files, prepPath, sourceRoot, epoch, maxRounds, waitMinutes } = inputs;
+  // Validate before anything is created or contacted.
+  await preflightDemoInputs(inputs, { dashboard: options.dashboard });
+  if ((await ensureProjectRepo(dir, { initFixture: inputs.initFixture })) === "created") {
+    console.log(`[demo] --init-fixture: created throwaway fixture repository at ${dir}`);
+  }
   // US-002: optional pre-dispatch health gate (lead-layer, fail-open). When
   // --gate-flow-id names a previous/current flow, its review-step facts are
   // consulted and surfaced BEFORE startFlow; a degraded gate prints the
   // explicit no-protection note and STILL dispatches.
-  const gateFlowId = argValue("--gate-flow-id");
-  if (gateFlowId !== undefined) {
-    await runDispatchGate(gateFlowId);
+  if (options.gateFlowId !== undefined) {
+    await runDispatchGate(options.gateFlowId);
   }
-  const files = expandFilesArg(
-    argValue("--files") ?? "src/Money.php,src/Pricing/FlatRateDiscount.php",
-  );
-  const prepPath = argValue("--prep") ?? join(process.cwd(), "fixtures/stub-prep.md");
-  const sourceRoot = argValue("--source-root") ?? join(process.cwd(), "fixtures/php-sample");
-  const epoch = Number.parseInt(argValue("--epoch", "1") as string, 10);
-  const maxRounds = Number.parseInt(argValue("--max-rounds", "1") as string, 10);
-  const waitMinutes = Number.parseInt(argValue("--wait-minutes", "30") as string, 10);
 
-  const flows: Flow<any>[] = [new PortProjectFlow()];
+  const flows: AnyFlow[] = [new PortProjectFlow()];
   const runtime = await openDexClient(flows, config);
   try {
     const flow = flows[0];
     if (flow === undefined) throw new Error("PortProjectFlow not registered");
-    const flowId = argValue("--flow-id", `demo-${Date.now()}`) as string;
-    const input = {
+    const flowId = options.flowId ?? `demo-${Date.now()}`;
+    const input: PortRunInput = {
       repoRoot: dir,
       worktreeRoot: join(dir, ".worktrees"),
       integrationWorktreePath: join(dir, ".worktrees", "integration"),
@@ -484,26 +1172,15 @@ async function startDemo(): Promise<number> {
       files,
       maxRounds,
       // v1.1 default: parallel per-file waves (SubFlows over the 2 slots).
-      dispatchMode: (argValue("--dispatch", "parallel") as string) === "sequential" ? "sequential" : "parallel",
+      dispatchMode: inputs.dispatchMode,
     };
     const runId = await runtime.client.startFlow(flow, flowId, input);
     console.log(`[demo] started flowId=${flowId} runId=${runId} files=${files.join(",")} epoch=${epoch}`);
-    // Optional live-dashboard hook (worker-5, plan v6.1): launch the read-only
-    // status server next to the run when present; never fatal if absent.
-    const serveStatus = join(import.meta.dir, "serve-status.ts");
-    if (await exists(serveStatus)) {
-      const child = spawn(process.execPath, [serveStatus], {
-        env: { ...process.env, STATUS_REPO_ROOT: dir },
-        detached: true,
-        stdio: "ignore",
-      });
-      child.unref();
-      console.log(`[demo] dashboard: http://127.0.0.1:${process.env.PORT ?? "4646"} (pid ${child.pid})`);
-    }
-    if (process.argv.includes("--start-only")) return 0;
-    const result = await waitForFlowTerminal(runtime, flowId, waitMinutes * 60_000);
-    console.log(`[demo] completed: ${JSON.stringify(result)}`);
-    return 0;
+    // Optional live-dashboard hook, OPT-IN via --dashboard: the read-only status
+    // server next to the run; never fatal.
+    await maybeLaunchDashboard(options.dashboard, dir);
+    if (options.startOnly) return 0;
+    return await waitAndReport(runtime, flowId, waitMinutes, "demo");
   } finally {
     await runtime.close();
   }
@@ -514,47 +1191,87 @@ async function startDemo(): Promise<number> {
 // durable-lease reclaim + reconcile at git level → re-dispatch at new epoch)
 // ---------------------------------------------------------------------------
 
-/** Lease worktrees reachable from durable git state (`git worktree list`). */
-async function listLeaseWorktrees(repoDir: string): Promise<string[]> {
-  const { stdout } = await execFileP("git", ["worktree", "list", "--porcelain"], { cwd: repoDir });
-  return stdout
-    .split("\n")
-    .filter((l) => l.startsWith("worktree "))
-    .map((l) => l.slice("worktree ".length).trim())
-    .filter((p) => p.includes(".worktrees") && !p.endsWith("integration"));
+/** A worktree as reported by `git worktree list --porcelain`. */
+export interface WorktreeRef {
+  path: string;
+  /** Short branch name (`refs/heads/` stripped); null for a detached HEAD. */
+  branch: string | null;
 }
 
-async function recoverPort(): Promise<number> {
-  const dir = argValue("--dir");
-  if (dir === undefined) throw new Error("recover-port requires --dir <projectRepoDir>");
-  const epoch = Number.parseInt(argValue("--epoch", "2") as string, 10);
-  const files = (argValue("--files") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+/** `git worktree list --porcelain` as recovery's refs, over the shared parser (src/git/worktree-list.ts). */
+export function parseWorktreeList(porcelain: string): WorktreeRef[] {
+  return parseWorktreeRecords(porcelain).map((w) => ({
+    path: w.path,
+    branch: w.ref === null ? null : shortBranchName(w.ref),
+  }));
+}
 
-  console.log(`[recover-port] epoch bump → ${epoch}; repo=${dir}`);
+/** Worktrees registered with the repository: durable git state, never an in-memory store. */
+async function listWorktrees(repoDir: string): Promise<WorktreeRef[]> {
+  return parseWorktreeList(await git(repoDir).run(["worktree", "list", "--porcelain"]));
+}
 
-  // 1-2. Ordered abort: persisted fences carry epoch-tagged labels; when the
-  // fence attribute is not reachable outside a flow context, use the plan's
-  // ENUMERATION FALLBACK against the surviving opencode server.
-  const harness = await pickHarness(argValue("--harness"));
-  const aborted = await harness.abortSessionsNotTagged(epoch);
-  console.log(`[recover-port] aborted ${aborted.length} foreign session(s): ${aborted.join(",") || "none"}`);
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
-  // 3. Durable lease reclaim + reconcile at git level: lease worktrees come
-  // from `git worktree list` (durable state), never an in-memory store. The
-  // flow's own pp-lease store reclaims stale-epoch records on next claim.
-  const leaseWorktrees = await listLeaseWorktrees(dir);
+/**
+ * Picks THIS file's lease worktree: the highest lease epoch strictly below
+ * `beforeEpoch` (recovery bumps the epoch, it does not have to be +1). The match
+ * is exact and derived from the same sanitizePathSegment the pool uses - the
+ * lease branch `lease/<safe>/<n>` (or, for a detached worktree, the directory
+ * `<safe>-<n>`) - so another file's worktree, or a `-1` inside a hash or a parent
+ * directory, can never be selected (the old substring predicate never used the
+ * file at all).
+ */
+export function selectLeaseWorktree(
+  worktrees: readonly WorktreeRef[],
+  file: string,
+  beforeEpoch: number,
+): { worktree: WorktreeRef; epoch: number } | undefined {
+  const safe = escapeRegExp(sanitizePathSegment(file));
+  const branchRe = new RegExp(`^lease/${safe}/(\\d+)$`);
+  const dirRe = new RegExp(`^${safe}-(\\d+)$`);
+  let best: { worktree: WorktreeRef; epoch: number } | undefined;
+  for (const worktree of worktrees) {
+    const m = (worktree.branch !== null ? branchRe.exec(worktree.branch) : null) ?? dirRe.exec(basename(worktree.path));
+    if (m === null) continue;
+    const epoch = Number.parseInt(m[1] ?? "", 10);
+    if (!Number.isInteger(epoch) || epoch >= beforeEpoch) continue;
+    if (best === undefined || epoch > best.epoch) best = { worktree, epoch };
+  }
+  return best;
+}
+
+export interface RecoverLog {
+  log(message: string): void;
+  error(message: string): void;
+}
+
+/**
+ * Git-level half of `recover-port`: for each file, finds ITS OWN lease worktree
+ * (selectLeaseWorktree), reconciles it against the file's latest keyed commit,
+ * and applies the decision. Returns the number of poisoned files.
+ */
+export async function reconcileLeaseWorktrees(
+  opts: { dir: string; epoch: number; files: readonly string[] },
+  out: RecoverLog = console,
+): Promise<{ failures: number }> {
+  const { dir, epoch } = opts;
+  const worktrees = await listWorktrees(dir);
   let failures = 0;
-  for (const file of files) {
+  for (const file of opts.files) {
     // Phase 4: recover the LATEST round per file (round increments wired) —
     // the old round-1 pin lost fix rounds beyond the first.
     const round = await latestRoundFor(dir, file);
     const opId = operationId(file, round);
-    const wt = leaseWorktrees.find((p) => p.includes(`-${epoch - 1}`));
+    const selected = selectLeaseWorktree(worktrees, file, epoch);
     const keyed = await findCommitByOpId(dir, opId);
-    if (wt === undefined) {
-      console.log(`[recover-port] ${file}: no live lease worktree (keyed=${keyed?.sha ?? "none"}) — re-dispatch claims fresh`);
+    if (selected === undefined) {
+      out.log(`[recover-port] ${file}: no live lease worktree below epoch ${epoch} (keyed=${keyed?.sha ?? "none"}) — re-dispatch claims fresh`);
       continue;
     }
+    const wt = selected.worktree.path;
     const clean = await isWorktreeClean(wt);
     const action = reconcile({
       marker: undefined,
@@ -566,39 +1283,105 @@ async function recoverPort(): Promise<number> {
     });
     if (action.kind === "poisoned") {
       failures += 1;
-      console.error(`[recover-port] ${file}: POISONED — ${action.reason}`);
+      out.error(`[recover-port] ${file}: POISONED — ${action.reason}`);
       continue;
     }
-    const { stdout: branchName } = await execFileP("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: wt });
-    const { stdout: baseSha } = await execFileP("git", ["rev-parse", "HEAD"], { cwd: wt });
+    const branch =
+      selected.worktree.branch ?? (await git(wt).run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
+    const baseSha = (await git(wt).run(["rev-parse", "HEAD"])).trim();
     const lease: LeaseRecord = {
       file,
       worktreePath: wt,
-      branch: branchName.trim(),
-      epoch: epoch - 1,
-      baseSha: baseSha.trim(),
+      branch,
+      epoch: selected.epoch,
+      baseSha,
       holderExecutionId: "recover-port",
       acquiredAtUtc: new Date().toISOString(),
     };
     await applyReconcile(lease, action, keyed);
-    console.log(`[recover-port] ${file}: reconcile=${action.kind} (${action.reason}) keyed=${keyed?.sha ?? "none"}`);
+    out.log(`[recover-port] ${file}: reconcile=${action.kind} (${action.reason}) keyed=${keyed?.sha ?? "none"} worktree=${wt}`);
   }
+  return { failures };
+}
+
+function shellWord(value: string): string {
+  return /^[\w./@:=+,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The `demo` command an operator re-dispatches after recovery. It carries the
+ * flags a literal copy needs: without --source-root/--prep the defaults are the
+ * php-sample fixtures, and --flow-id must be NEW (the recovered flow id exists).
+ * `--files creatorex` already implies the creatorex prep/source root.
+ */
+export function redispatchCommand(o: {
+  dir: string;
+  epoch: number;
+  filesArg: string | undefined;
+  sourceRoot?: string | undefined;
+  prepPath?: string | undefined;
+  flowId?: string | undefined;
+  maxRounds?: string | undefined;
+}): string {
+  const impliedFixtures = o.filesArg?.trim() === "creatorex";
+  const parts = [
+    "run-demo.ts demo",
+    `--dir ${shellWord(o.dir)}`,
+    `--epoch ${o.epoch}`,
+    `--files ${o.filesArg !== undefined && o.filesArg !== "" ? shellWord(o.filesArg) : "<files>"}`,
+  ];
+  if (o.sourceRoot !== undefined) parts.push(`--source-root ${shellWord(o.sourceRoot)}`);
+  else if (!impliedFixtures) parts.push("--source-root <sourceRoot>");
+  if (o.prepPath !== undefined) parts.push(`--prep ${shellWord(o.prepPath)}`);
+  else if (!impliedFixtures) parts.push("--prep <prepPath>");
+  parts.push(`--flow-id ${o.flowId !== undefined ? shellWord(o.flowId) : "<new-flow-id>"}`);
+  // The demo default is 1 round: a run that used more must say so again, or the
+  // re-dispatch silently schedules no fix rounds.
+  parts.push(`--max-rounds ${o.maxRounds !== undefined ? shellWord(o.maxRounds) : "<maxRounds>"}`);
+  return parts.join(" ");
+}
+
+async function recoverPort(options: CommandOptions<"recover-port">): Promise<number> {
+  const { epoch, files: filesArg } = options;
+  const dir = resolve(options.dir);
+  // Same expansion as `demo` (`--files creatorex` is the 10-file fixture set).
+  const files = expandFilesArg(filesArg);
+  // `--files ,` passes the parse but names nothing: reconciling zero files and
+  // reporting success would read as "every lease worktree was checked" (B14).
+  if (files.length === 0) {
+    console.error("[recover-port] --files names no files; nothing would be reconciled");
+    return CLI_EXIT.usage;
+  }
+
+  console.log(`[recover-port] epoch bump → ${epoch}; repo=${dir}`);
+
+  // 1-2. Ordered abort: persisted fences carry epoch-tagged labels; when the
+  // fence attribute is not reachable outside a flow context, use the plan's
+  // ENUMERATION FALLBACK against the surviving opencode server.
+  const harness = await pickHarness(options.harness, { requireReal: true });
+  const aborted = await harness.abortSessionsNotTagged(epoch);
+  console.log(`[recover-port] aborted ${aborted.length} foreign session(s): ${aborted.join(",") || "none"}`);
+
+  // 3. Durable lease reclaim + reconcile at git level: lease worktrees come
+  // from `git worktree list` (durable state), never an in-memory store, and each
+  // file is matched to its OWN lease worktree. The flow's own pp-lease store
+  // reclaims stale-epoch records on next claim.
+  const { failures } = await reconcileLeaseWorktrees({ dir, epoch, files });
 
   // 4. Re-dispatch: the operator relaunches at the bumped epoch; the flow's
   // LeaseStep reclaims stale-epoch entries in the DURABLE pp-lease store.
   console.log(
-    `[recover-port] done (failures=${failures}). Re-dispatch: run-demo.ts demo --dir ${dir} --epoch ${epoch} --files ${files.join(",") || "<files>"}`,
+    `[recover-port] done (failures=${failures}). Re-dispatch: ${redispatchCommand({
+      dir,
+      epoch,
+      filesArg,
+      sourceRoot: options.sourceRoot,
+      prepPath: options.prep,
+      flowId: options.flowId,
+      maxRounds: options.maxRounds?.toString(),
+    })}`,
   );
   return failures === 0 ? 0 : 1;
-}
-
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
-
-function argValue(flag: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(flag);
-  return i >= 0 ? process.argv[i + 1] : fallback;
 }
 
 /**
@@ -607,7 +1390,7 @@ function argValue(flag: string, fallback?: string): string | undefined {
  * prep stub) — so the port loop ports the tests too and vitest verifies real
  * content. Any other value keeps the comma-split list behavior.
  */
-function expandFilesArg(value: string): string[] {
+export function expandFilesArg(value: string): string[] {
   const trimmed = value.trim();
   if (trimmed !== "creatorex") {
     return trimmed.split(",").map((s) => s.trim()).filter(Boolean);
@@ -635,19 +1418,28 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-async function main(): Promise<number> {
-  const cmd = process.argv[2] ?? "";
-  const config = dexConfigFromEnv();
-  const fault = process.env.PORTING_KIT_FAULT;
+async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
+  const parsed = parseRunDemoArgs(argv);
+  if (!parsed.ok) return reportParseFailure("run-demo", parsed);
+  // The worker and every client command run at the same time: each has its own blob cache.
+  const config = dexConfigFromEnv(process.env, parsed.command === "worker" ? "worker" : "client");
 
-  switch (cmd) {
+  switch (parsed.command) {
     case "worker": {
-      const harness = await pickHarness(argValue("--harness"));
-      const flows = argValue("--flows") === "port" ? portFlows(harness) : probeFlows();
-      configureProbe(harness, fault);
-      const judgment = await resolveJudgment();
-      configurePortJudgment(judgment);
-      configurePortFault(process.env.PORTING_KIT_FAULT);
+      const { options } = parsed;
+      // A fault spec nothing matches arms nothing and a kill rehearsal passes
+      // vacuously: refuse one that can never fire for these flows, up front (B13).
+      const fault = options.fault ?? envString("PORTING_KIT_FAULT");
+      const faultProblem = fault === undefined ? null : faultSpecProblem(fault, options.flows);
+      if (faultProblem !== null) {
+        console.error(`[run-demo] ${options.fault !== undefined ? "--fault" : "PORTING_KIT_FAULT"}: ${faultProblem}`);
+        return CLI_EXIT.usage;
+      }
+      const harness = await pickHarness(options.harness);
+      const flows = options.flows === "port" ? portFlows(harness) : probeFlows();
+      configureProbe(harness);
+      await configureWorkerJudgment();
+      configurePortFault(fault);
       // US-003 Tier-1 turn-health (evidence-only, fail-open): a real client
       // when TYPESAFE_API_KEY is present, the scripted in-memory double under
       // TYPESAFE_OFFLINE=1, and NO assessor (no-diagnosis degradation) when
@@ -658,16 +1450,6 @@ async function main(): Promise<number> {
         turnHealth === null
           ? "[worker] turn-health: Tier-1 unavailable — ambiguous turns run with no diagnosis (fail-open)"
           : "[worker] turn-health: Tier-1 assessor configured (evidence-only; control flow never reads it)",
-      );
-      // US-007 (dex-sdk review, vertical-slice wiring fix): ONE loud startup
-      // line stating which judgment lane is active. The lane rides the client
-      // resolveJudgment configured above; flows/port-project.ts liveJevClient()
-      // resolves every consumer (verdict-check, prioritize, vitest triage)
-      // from that SAME seam — the old never-called configurePortJevLive
-      // second seam is gone, so the log can no longer claim REAL while the
-      // steps silently run naive.
-      console.log(
-        `[worker] JUDGMENT LANE: ${judgment.kind === "real" ? "LIVE JEV" : "NAIVE"} — verdict-check/prioritize/vitest-triage consume ${judgment.kind === "real" ? "the real billed client" : "deterministic naive defaults (no Jev calls)"}`,
       );
       const handle = await startDexWorker(flows, config);
       // US-002 stream publish (runner-side deviation, see envelope.ts): the
@@ -687,7 +1469,7 @@ async function main(): Promise<number> {
             );
           });
       });
-      console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${argValue("--harness") ?? "auto"} flows=${argValue("--flows") ?? "probe"}`);
+      console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${describeHarness(harness)} (requested=${options.harness}) flows=${options.flows}`);
       await new Promise(() => {}); // run until killed
       return 0;
     }
@@ -697,73 +1479,50 @@ async function main(): Promise<number> {
       try {
         const flow = flows.find((f) => f.getFlowType() === "probe.Hello");
         if (flow === undefined) throw new Error("probe.Hello not registered");
-        const flowId = argValue("--flow-id", `hello-${Date.now()}`) as string;
+        const flowId = parsed.options.flowId ?? `hello-${Date.now()}`;
         await runtime.client.startFlow(flow, flowId, undefined);
-        const result = await runtime.client.waitForFlow(flowId);
-        console.log(`[hello] flowId=${flowId} result=${JSON.stringify(result)}`);
-        return 0;
+        return await waitAndReport(runtime, flowId, 30, "hello");
       } finally {
         await runtime.close();
       }
     }
     case "long-step": {
-      const ms = Number.parseInt(argValue("--ms", "90000") as string, 10);
+      const { ms, flowId, startOnly } = parsed.options;
       const flows = probeFlows();
       const runtime = await openDexClient(flows, config);
       try {
         const flow = flows.find((f) => f.getFlowType() === "probe.LongStep");
         if (flow === undefined) throw new Error("probe.LongStep not registered");
-        const flowId = argValue("--flow-id", "long-1") as string;
-        const startOnly = process.argv.includes("--start-only");
         await runtime.client.startFlow(flow, flowId, { ms });
         console.log(`[long-step] started flowId=${flowId} ms=${ms}`);
         if (startOnly) return 0;
-        const result = await runtime.client.waitForFlow(flowId);
-        console.log(`[long-step] result=${JSON.stringify(result)}`);
-        return 0;
+        // The step itself runs `ms`; allow the same again plus slack to finish.
+        return await waitAndReport(runtime, flowId, Math.ceil((ms * 2) / 60_000) + 5, "long-step");
       } finally {
         await runtime.close();
       }
     }
     case "wait-flow": {
-      const flowId = argValue("--id");
-      if (flowId === undefined) throw new Error("wait-flow requires --id");
-      const waitMinutes = Number.parseInt(argValue("--wait-minutes", "30") as string, 10);
+      const { id: flowId, waitMinutes } = parsed.options;
       const runtime = await openDexClient(probeFlows(), config);
       try {
-        const result = await waitForFlowTerminal(runtime, flowId, waitMinutes * 60_000);
-        console.log(`[wait-flow] flowId=${flowId} result=${JSON.stringify(result)}`);
-        return 0;
+        return await waitAndReport(runtime, flowId, waitMinutes, "wait-flow");
       } finally {
         await runtime.close();
       }
     }
     case "round": {
-      const dir = argValue("--dir");
-      if (dir === undefined) throw new Error("round requires --dir <fixtureRepoDir>");
-      if (!(await exists(dir))) await makeFixtureRepo(dir);
-      const file = argValue("--file", "src/a.php") as string;
-      const round = Number.parseInt(argValue("--round", "1") as string, 10);
-      const epoch = Number.parseInt(argValue("--epoch", "1") as string, 10);
-      return await startRound(dir, file, round, epoch);
+      const { options } = parsed;
+      const dir = resolve(options.dir);
+      // A nonexistent --dir is an error unless --init-fixture asks for a fixture.
+      await ensureProjectRepo(dir, { initFixture: options.initFixture });
+      return await startRound(dir, options.file, options.round, options.epoch);
     }
-    case "recover": {
-      const dir = argValue("--dir");
-      if (dir === undefined) throw new Error("recover requires --dir <fixtureRepoDir>");
-      const epoch = Number.parseInt(argValue("--epoch", "2") as string, 10);
-      return await orderedRecover(dir, epoch);
-    }
+    case "recover":
+      return await orderedRecover(parsed.options);
     case "agent-roundtrip": {
-      const baseUrl = process.env.OPENCODE_BASE_URL?.trim() || undefined;
-      const harness = await OpencodeHarness.connect(
-        baseUrl,
-        process.env.OPENCODE_MODEL_PROVIDER && process.env.OPENCODE_MODEL_ID
-          ? {
-              providerID: process.env.OPENCODE_MODEL_PROVIDER,
-              modelID: process.env.OPENCODE_MODEL_ID,
-            }
-          : undefined,
-      );
+      const { baseUrl, model } = opencodeEnv();
+      const harness = await OpencodeHarness.connect(baseUrl, model);
       const session = await harness.createSession("porting-kit:agent-roundtrip");
       console.log(`[agent-roundtrip] session=${session.id}`);
       const reply = await harness.prompt(session.id, "Reply with exactly: OK");
@@ -775,20 +1534,26 @@ async function main(): Promise<number> {
     case "git-selftest":
       return await gitSelftest();
     case "recover-port":
-      return await recoverPort();
+      return await recoverPort(parsed.options);
     case "gate":
-      return await runDispatchGate(argValue("--flow-id"));
+      return await runDispatchGate(parsed.options.flowId);
     case "demo":
-      return await startDemo();
-    default:
-      console.error("usage: run-demo.ts <worker|hello|long-step|wait-flow|round|recover|recover-port|agent-roundtrip|git-selftest|gate|demo> [flags]");
-      return 2;
+      return await startDemo(parsed.options);
   }
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
-    console.error("[run-demo] fatal:", err);
-    process.exit(1);
-  });
+// Only run the CLI when executed directly; importing this module (tests, other
+// scripts) must neither run a subcommand nor exit the process.
+if (import.meta.main) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      // An environment value the toolkit cannot use is a usage error, like a bad flag.
+      if (err instanceof EnvError) {
+        console.error(`[run-demo] ${err.message}`);
+        process.exit(CLI_EXIT.usage);
+      }
+      console.error("[run-demo] fatal:", err);
+      process.exit(1);
+    });
+}

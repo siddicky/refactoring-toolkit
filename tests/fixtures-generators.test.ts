@@ -1,0 +1,386 @@
+/**
+ * Audit C65 (and the fixture-hygiene clusters that ride on it): the two
+ * deterministic PHP fixture generators must reproduce the committed
+ * fixtures/** trees exactly. Both generators are run into a temp dir with
+ * `--out`, so the committed trees are never touched.
+ *
+ * Why it matters: the generators wipe their output directory before writing,
+ * so any hand-added file in a generated tree (creatorex-middleware/prep-stub.md
+ * was one) silently disappears on the documented regenerate command. File-set
+ * equality plus byte equality catches both that and any generator/output drift.
+ */
+
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { parsePrepSourceMap, parsePrepSourceMapRows } from "../flows/port-project.js";
+
+import { REPO_ROOT } from "./support/paths.js";
+
+interface FixtureSpec {
+  readonly name: string;
+  readonly script: string;
+  readonly committed: string;
+}
+
+const PHP_SAMPLE: FixtureSpec = {
+  name: "php-sample",
+  script: join(REPO_ROOT, "fixtures/generate.ts"),
+  committed: join(REPO_ROOT, "fixtures/php-sample"),
+};
+const CREATOREX: FixtureSpec = {
+  name: "creatorex-middleware",
+  script: join(REPO_ROOT, "fixtures/generate-creatorex.ts"),
+  committed: join(REPO_ROOT, "fixtures/creatorex-middleware"),
+};
+const SPECS: readonly FixtureSpec[] = [PHP_SAMPLE, CREATOREX];
+
+function listFiles(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir)) {
+      const abs = join(dir, entry);
+      if (statSync(abs).isDirectory()) walk(abs);
+      else out.push(abs.slice(root.length + 1).split("\\").join("/"));
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
+function runGenerator(spec: FixtureSpec, args: readonly string[]): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync(process.execPath, [spec.script, ...args], { encoding: "utf8" });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+function printedDigest(stdout: string): string {
+  const match = /^DIGEST sha256: ([0-9a-f]{64})$/m.exec(stdout);
+  if (match?.[1] === undefined) throw new Error(`generator printed no DIGEST line:\n${stdout}`);
+  return match[1];
+}
+
+function documentedDigest(label: string): string {
+  const doc = readFileSync(join(REPO_ROOT, "fixtures/FIXTURES.md"), "utf8");
+  const match = new RegExp(`^${label}:\\s+([0-9a-f]{64})$`, "m").exec(doc);
+  if (match?.[1] === undefined) throw new Error(`fixtures/FIXTURES.md has no digest line for ${label}`);
+  return match[1];
+}
+
+let scratch = "";
+const regenerated = new Map<string, { dir: string; digest: string }>();
+
+beforeAll(() => {
+  scratch = mkdtempSync(join(tmpdir(), "fixtures-gen-"));
+  for (const spec of SPECS) {
+    const dir = join(scratch, spec.name);
+    const run = runGenerator(spec, ["--out", dir]);
+    if (run.status !== 0) throw new Error(`${spec.name} generator failed: ${run.stderr}`);
+    regenerated.set(spec.name, { dir, digest: printedDigest(run.stdout) });
+  }
+});
+
+afterAll(() => {
+  if (scratch !== "") rmSync(scratch, { recursive: true, force: true });
+});
+
+describe("fixture generators reproduce the committed fixtures (audit C65)", () => {
+  for (const spec of SPECS) {
+    test(`${spec.name}: regeneration yields the same file set and identical bytes`, () => {
+      const fresh = regenerated.get(spec.name);
+      if (fresh === undefined) throw new Error("not regenerated");
+      const committedFiles = listFiles(spec.committed);
+      expect(listFiles(fresh.dir)).toEqual(committedFiles);
+      for (const rel of committedFiles) {
+        const a = readFileSync(join(fresh.dir, rel));
+        const b = readFileSync(join(spec.committed, rel));
+        expect(a.equals(b), `${spec.name}/${rel} differs from generator output`).toBe(true);
+      }
+    });
+
+    test(`${spec.name}: printed DIGEST matches fixtures/FIXTURES.md`, () => {
+      const fresh = regenerated.get(spec.name);
+      expect(fresh?.digest).toBe(documentedDigest(spec.name));
+    });
+  }
+
+  test("creatorex-middleware: regeneration emits prep-stub.md (used by tests and `demo --files creatorex`)", () => {
+    const fresh = regenerated.get(CREATOREX.name);
+    if (fresh === undefined) throw new Error("not regenerated");
+    const emitted = readFileSync(join(fresh.dir, "prep-stub.md"), "utf8");
+    expect(emitted).toContain("## 1. Source map");
+    expect(emitted).toContain("`tests/Access/EntitlementCheckerTest.php`");
+  });
+});
+
+describe("generator --out handling", () => {
+  for (const spec of SPECS) {
+    test(`${spec.name}: refuses to wipe a non-empty directory that lacks GENERATED.txt`, () => {
+      const dir = mkdtempSync(join(scratch, "unowned-"));
+      writeFileSync(join(dir, "keep.txt"), "precious\n");
+      const run = runGenerator(spec, ["--out", dir]);
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("refusing to wipe");
+      expect(readFileSync(join(dir, "keep.txt"), "utf8")).toBe("precious\n");
+    });
+
+    test(`${spec.name}: replaces a stale generated tree (marker present)`, () => {
+      const dir = mkdtempSync(join(scratch, "stale-"));
+      writeFileSync(join(dir, "GENERATED.txt"), "old\n");
+      mkdirSync(join(dir, "src"));
+      writeFileSync(join(dir, "src", "Stale.php"), "<?php\n");
+      const run = runGenerator(spec, ["--out", dir]);
+      expect(run.status).toBe(0);
+      expect(existsSync(join(dir, "src", "Stale.php"))).toBe(false);
+      expect(listFiles(dir)).toEqual(listFiles(spec.committed));
+    });
+
+    test(`${spec.name}: --out without a value fails instead of falling back to the committed tree`, () => {
+      const run = runGenerator(spec, ["--out"]);
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("--out requires a directory argument");
+    });
+
+    // B28: `--out=<dir>` (the form every other CLI of the repository takes) was
+    // ignored, and the generator wiped and rewrote the committed tree instead.
+    /** mtime (ms) of every committed file: a rewrite changes them. */
+    const committedStamp = (): string =>
+      listFiles(spec.committed)
+        .map((rel) => `${rel}:${statSync(join(spec.committed, rel)).mtimeMs}`)
+        .join("\n");
+
+    test(`${spec.name}: --out=<dir> writes THERE and leaves the committed tree untouched`, () => {
+      const dir = join(mkdtempSync(join(scratch, "eq-")), "out");
+      const before = committedStamp();
+      const run = runGenerator(spec, [`--out=${dir}`]);
+      expect(run.status).toBe(0);
+      expect(listFiles(dir)).toEqual(listFiles(spec.committed));
+      expect(committedStamp()).toBe(before);
+    });
+
+    test(`${spec.name}: an unrecognised argument is a usage error and never touches the committed tree`, () => {
+      const before = committedStamp();
+      for (const args of [["--outdir", "/tmp/x"], ["--out="], ["stray"], ["--out", "/tmp/a", "--out=/tmp/b"], ["--out", "/tmp/a", "--verbose"]]) {
+        const run = runGenerator(spec, args);
+        expect([args, run.status === 0]).toEqual([args, false]);
+        expect(run.stderr).toMatch(/--out|unknown argument/);
+      }
+      expect(committedStamp()).toBe(before);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Fixture test hygiene. No PHP runtime runs in this pipeline, so these are
+// structural checks on the committed PHP tests: each pins an assertion that
+// was hand-traced against its source and found to contradict it.
+// ---------------------------------------------------------------------------
+
+function readFixture(spec: FixtureSpec, rel: string): string {
+  return readFileSync(join(spec.committed, rel), "utf8");
+}
+
+/** Source of one PHP test method: from its signature to the next public method. */
+function phpMethod(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`PHP method ${name} not found`);
+  const next = source.indexOf("    public function ", start + 1);
+  return source.slice(start, next < 0 ? undefined : next);
+}
+
+describe("fixture documentation claims about PHP behaviour (audit C74)", () => {
+  const stubPrep = readFileSync(join(REPO_ROOT, "fixtures/stub-prep.md"), "utf8");
+  const fixturesDoc = readFileSync(join(REPO_ROOT, "fixtures/FIXTURES.md"), "utf8");
+
+  test("stub-prep trap 3 does not claim an explicit (float) cast warns", () => {
+    // `(float) $row['total']` is an explicit cast; PHP never warns for those.
+    expect(stubPrep).not.toMatch(/with a warning on 8\.x/);
+    expect(stubPrep).toContain("explicit `(float)` cast");
+  });
+
+  test("Money::equals is documented as a loose-compare site that is not an observable trap", () => {
+    const row = stubPrep.split("\n").find((line) => line.includes("`Money::equals`"));
+    expect(row).toBeDefined();
+    expect(row).not.toContain("intentional loose compare");
+    expect(row).toContain("behave identically");
+    const idiom = fixturesDoc.split("\n").find((line) => line.startsWith("| Loose comparison"));
+    expect(idiom).toContain("behaves exactly like `===`");
+    const moneyTest = readFixture(PHP_SAMPLE, "tests/MoneyTest.php");
+    expect(moneyTest).not.toContain("testEqualsUsesLooseAmountComparison");
+    expect(moneyTest).toContain("testEqualsComparesAmountsAfterFloatCoercion");
+  });
+
+  test("banker's branch is documented as never changing the result for negatives, not as unreachable", () => {
+    expect(fixturesDoc).not.toMatch(/banker's branch is unreachable/);
+    expect(fixturesDoc).toContain("never changes the result for negatives");
+    const ledger = readFixture(CREATOREX, "tests/Payouts/EarningsLedgerTest.php");
+    expect(ledger).not.toMatch(/unreachable/);
+    expect(ledger).not.toContain("testBankersNeverTriggersForNegativeAmounts");
+    // An even-floor negative tie DOES enter the branch and lands on the half-away value.
+    expect(phpMethod(ledger, "testBankersNeverChangesTheResultForNegativeTies")).toContain(
+      "assertSame(-2.36, $ledger->roundForPayout(-2.355, EarningsLedger::ROUND_BANKERS))",
+    );
+  });
+
+  test("model of roundForPayout: a taken banker's branch on a negative tie equals half-away-from-zero", () => {
+    // Mirrors EarningsLedger::roundForPayout's ROUND_BANKERS path on IEEE doubles.
+    const branch = (value: number): number | null => {
+      const scaled = value * 100;
+      const lower = Math.floor(scaled);
+      const isTie = Math.abs(scaled - lower - 0.5) < 0.000001;
+      return isTie && lower % 2 === 0 ? lower / 100 : null; // null: falls through to round()
+    };
+    let taken = 0;
+    let fellThrough = 0;
+    for (let cents = 0; cents < 2000; cents += 1) {
+      const value = -(cents + 0.5) / 100; // a negative half-cent tie
+      const halfAway = -Math.round(cents + 0.5) / 100; // round half away from zero
+      const banker = branch(value);
+      if (banker === null) {
+        fellThrough += 1;
+      } else {
+        taken += 1;
+        expect(banker, `value ${value}`).toBe(halfAway);
+      }
+    }
+    // Both paths occur (so "unreachable" was wrong), and neither changes the result.
+    expect(taken).toBeGreaterThan(0);
+    expect(fellThrough).toBeGreaterThan(0);
+  });
+
+  test("php-sample tests are documented as not port units, and the stub source map agrees", () => {
+    expect(fixturesDoc).toMatch(/not port\s+units here/);
+    expect(fixturesDoc).not.toContain("ports the entire");
+    const map = parsePrepSourceMap(stubPrep);
+    expect(Object.keys(map).filter((php) => php.startsWith("tests/"))).toEqual([]);
+    expect(Object.keys(map).filter((php) => php.startsWith("src/")).length).toBe(10);
+  });
+});
+
+describe("B26: the stub preps' source-map Notes make no claim their PHP source contradicts", () => {
+  // The creatorex Notes are delivered to implementers and fixers as the AUTHORITATIVE user contract.
+  // They once described feature flags, plan tiers and strike counters that no source file contains.
+  const TS_SIDE_WORDS = new Set(["number", "string", "boolean", "unknown", "null", "expect"]);
+  const stubs: ReadonlyArray<{ label: string; prep: string; spec: FixtureSpec }> = [
+    { label: "fixtures/stub-prep.md", prep: join(REPO_ROOT, "fixtures/stub-prep.md"), spec: PHP_SAMPLE },
+    { label: "fixtures/creatorex-middleware/prep-stub.md", prep: join(CREATOREX.committed, "prep-stub.md"), spec: CREATOREX },
+  ];
+
+  for (const { label, prep, spec } of stubs) {
+    test(`${label}: every code token a Notes cell names appears in that row's PHP file`, () => {
+      const unmatched: string[] = [];
+      for (const row of parsePrepSourceMapRows(readFileSync(prep, "utf8"))) {
+        if (!row.source.startsWith("src/")) continue;
+        const php = readFixture(spec, row.source);
+        for (const m of row.notes.matchAll(/`([^`]+)`/g)) {
+          const token = (m[1] ?? "").replace(/\*$/, ""); // `preg_*`, `require*`: a prefix
+          if (TS_SIDE_WORDS.has(token)) continue; // a suggested TypeScript spelling, not a claim about the PHP
+          if (token !== "" && !php.includes(token)) unmatched.push(`${row.source}: \`${m[1]}\``);
+        }
+      }
+      expect(unmatched).toEqual([]);
+    });
+  }
+
+  test("the creatorex Notes name none of the features that were never in the source", () => {
+    const notes = parsePrepSourceMapRows(readFileSync(join(CREATOREX.committed, "prep-stub.md"), "utf8"))
+      .filter((row) => row.source.startsWith("src/"))
+      .map((row) => row.notes)
+      .join("\n");
+    expect(notes).not.toMatch(/feature-flag|plan-tier|\btiers?\b|strike/i);
+    const php = ["src/Access/EntitlementChecker.php", "src/Moderation/ChatSentinel.php"].map((f) => readFixture(CREATOREX, f)).join("\n");
+    for (const absent of ["tier", "strike", "feature_flag", "featureFlag"]) expect(php.toLowerCase()).not.toContain(absent);
+  });
+
+  test("the scalar-coercion rule does not contradict the trap list: an explicit cast raises no warning", () => {
+    const stub = readFileSync(join(REPO_ROOT, "fixtures/stub-prep.md"), "utf8");
+    expect(stub).not.toContain("yields 0 + warning");
+    expect(stub.match(/raises no warning/g)?.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("php-sample PHP tests agree with their sources (audit C67)", () => {
+  /** Class names a PHP test instantiates or calls statically without importing them (its own class excepted). */
+  function unimportedClassReferences(source: string): string[] {
+    const imported = new Set([...source.matchAll(/^use ([\w\\]+);$/gm)].map((m) => m[1]?.split("\\").pop() ?? ""));
+    const own = /^final class (\w+)/m.exec(source)?.[1];
+    if (own !== undefined) imported.add(own);
+    // `new Foo(` and `Foo::`; a leading backslash (\Foo) is a global class and needs no import.
+    const refs = [...source.matchAll(/(?<![\\\w$])(?:new )?([A-Z]\w*)(?:\(|::)/g)]
+      .map((m) => m[1] ?? "")
+      .filter((name) => !["self", "static", "parent"].includes(name.toLowerCase()));
+    return [...new Set(refs)].filter((name) => !imported.has(name)).sort();
+  }
+
+  for (const spec of SPECS) {
+    const testFiles = listFiles(join(spec.committed, "tests"));
+    for (const rel of testFiles) {
+      test(`${spec.name}/tests/${rel}: every class it instantiates or calls statically is imported`, () => {
+        const source = readFixture(spec, `tests/${rel}`);
+        expect(unimportedClassReferences(source)).toEqual([]);
+      });
+    }
+  }
+
+  test("PricingTest imports Money (three tests construct it)", () => {
+    const source = readFixture(PHP_SAMPLE, "tests/PricingTest.php");
+    expect(source).toContain("use Acme\\Billing\\Money;");
+    expect(source).toContain("new Money(");
+  });
+
+  test("InvoiceTest pins the invoice's own tags, not the product's", () => {
+    const body = phpMethod(readFixture(PHP_SAMPLE, "tests/InvoiceTest.php"), "testToArrayCarriesFormattedTotals");
+    expect(body).toContain("assertSame([], $row['tags'])");
+    expect(body).not.toContain("['hardware', 'sale']");
+  });
+
+  test("InvoiceTest has no PHP-version-dependent trailing-whitespace SKU assertion", () => {
+    const source = readFixture(PHP_SAMPLE, "tests/InvoiceTest.php");
+    // '9001' == '9001 ' is false on PHP 7 and true on PHP >= 8.0.
+    expect(source).not.toMatch(/quantityForSku\('[^']*\s'\)/);
+    expect(source).toContain("quantityForSku('9001.0')");
+  });
+});
+
+describe("creatorex PHP tests agree with their sources (audit C66)", () => {
+  const entitlement = readFixture(CREATOREX, "tests/Access/EntitlementCheckerTest.php");
+
+  test("entitlement tests run against a session that satisfies the age and geo gates", () => {
+    // checker() registers age+geo+entitlement gates; a bare ['user_id', 'entitled'] session
+    // also fails age and geo, so the asserted reasons / allowed flag cannot hold.
+    for (const name of ["testStringZeroEntitlementDeniesDespiteLookup", "testNullEntitlementFallsThroughToLookup"]) {
+      const body = phpMethod(entitlement, name);
+      expect(body, name).not.toMatch(/decide\(\['user_id' => 42, 'entitled' => /);
+      expect(body, name).toContain("$this->session()");
+    }
+  });
+
+  test("the exception test calls a method EntitlementChecker::__call really rejects", () => {
+    // __call only throws for names that do not start with "require".
+    const body = phpMethod(entitlement, "testUnknownGateMethodThrows");
+    expect(body).toContain("expectException(\\BadMethodCallException::class)");
+    const call = /->(\w+)\(\);/.exec(body);
+    expect(call?.[1]).toBeDefined();
+    expect(call?.[1]?.startsWith("require")).toBe(false);
+  });
+
+  test("an unknown require* gate is pinned as accepted-but-unevaluated, not as a throw", () => {
+    const body = phpMethod(entitlement, "testUnknownRequireGateIsRegisteredButNeverEvaluated");
+    expect(body).toContain("requireFriendInvite()");
+    expect(body).not.toContain("expectException");
+    expect(body).toContain("assertTrue($checker->decide([])['allowed'])");
+  });
+
+  test("money_string assertions equal a round-to-nearest of the input, not a truncation", () => {
+    const helpers = readFixture(CREATOREX, "tests/Support/LegacyHelpersTest.php");
+    const body = phpMethod(helpers, "testMoneyStringRoundsViaSprintf");
+    const assertions = [...body.matchAll(/assertSame\('(\d+\.\d\d)', creatorex_money_string\('?(\d+(?:\.\d+)?)'?\)\)/g)];
+    expect(assertions.length).toBeGreaterThanOrEqual(2);
+    for (const m of assertions) {
+      // None of the inputs is a binary tie, so JS toFixed agrees with PHP sprintf('%.2f').
+      expect(m[1], `creatorex_money_string(${m[2]})`).toBe(Number(m[2]).toFixed(2));
+    }
+  });
+});

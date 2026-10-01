@@ -1,0 +1,64 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": ["**", "!**/node_modules", "!**/fixtures/php-sample", "!**/fixtures/creatorex-middleware"]
+  },
+  "formatter": {
+    "includes": ["**", "!**/presentation"],
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 110
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
+  // Every rule turned "off" below carries a one-line justification comment right above it
+  // (tests/repo-hygiene.test.ts enforces this). Do not disable a rule repo-wide; scope it.
+  "overrides": [
+    {
+      "includes": ["presentation/index.html"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            // Keyboard-focusable scroll regions with labels and handlers; HTML buttons would change the SVG diagram (presentation/DESIGN.md).
+            "useSemanticElements": "off",
+            // Interactive SVG groups carry role, label and key handlers (presentation/DESIGN.md).
+            "noNoninteractiveTabindex": "off"
+          },
+          "correctness": {
+            // The deck's functions are called from inline onclick="..." attributes, which Biome does not see.
+            "noUnusedVariables": "off"
+          },
+          "style": {
+            // Flagged pairs set different properties on the same elements; reordering the hand-tuned deck stylesheet risks visual regressions.
+            "noDescendingSpecificity": "off"
+          },
+          "complexity": {
+            // !important is deliberate: the prefers-reduced-motion reset and the SVG hover stroke must beat inline and presentation-attribute styles.
+            "noImportantStyles": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["**/*.test.ts", "tests/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            // Tests index fixture arrays under noUncheckedIndexedAccess; an absent element fails the test with a TypeError at that line.
+            "noNonNullAssertion": "off"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,8 +1,8 @@
 /**
- * Unit tests for harness/skills — standalone, assert-based.
- * Run: bun run harness/skills/skills.test.ts
+ * Unit tests for harness/skills.
  */
 
+import { describe, expect, test } from "bun:test";
 import {
   findSkill,
   PORTING_CONVENTIONS,
@@ -10,38 +10,32 @@ import {
   SKILLS,
 } from "./index.js";
 import type { SkillModule } from "./types.js";
-import { assertEquals, assertTrue, runTestFile } from "../../src/queues/testkit.js";
 
-runTestFile("skills", {
-  "registry contains porting-conventions and lookup works": () => {
-    assertTrue(
-      SKILLS.some((s) => s.name === "porting-conventions"),
-      "porting-conventions is registered",
-    );
-    assertEquals(findSkill("porting-conventions"), PORTING_CONVENTIONS);
-    assertEquals(findSkill("nope"), undefined, "unknown skill is undefined");
-  },
+describe("skills", () => {
+  test("registry contains porting-conventions and lookup works", () => {
+    expect(SKILLS.some((s) => s.name === "porting-conventions")).toBe(true);
+    expect(findSkill("porting-conventions")).toStrictEqual(PORTING_CONVENTIONS);
+    expect(findSkill("nope")).toBeUndefined();
+  });
 
-  "every registered skill satisfies the SkillModule contract": () => {
+  test("every registered skill satisfies the SkillModule contract", () => {
     for (const skill of SKILLS) {
       const asSkill: SkillModule = skill;
-      assertTrue(asSkill.name.length > 0, "name non-empty");
-      assertTrue(asSkill.description.length > 0, "description non-empty");
-      assertTrue(asSkill.instructions.length > 0, "instructions non-empty");
+      expect(asSkill.name.length).toBeGreaterThan(0);
+      expect(asSkill.description.length).toBeGreaterThan(0);
+      expect(asSkill.instructions.length).toBeGreaterThan(0);
     }
-  },
+  });
 
-  "PHP→TS type map covers the core scalars": () => {
-    assertEquals(PHP_TO_TS_TYPE_MAP["string"], "string");
-    assertEquals(PHP_TO_TS_TYPE_MAP["int"], "number");
-    assertEquals(PHP_TO_TS_TYPE_MAP["float"], "number");
-    assertEquals(PHP_TO_TS_TYPE_MAP["bool"], "boolean");
-    assertEquals(PHP_TO_TS_TYPE_MAP["array"], "unknown[]");
-    assertEquals(PHP_TO_TS_TYPE_MAP["mixed"], "unknown");
+  test("PHP→TS type map covers the core scalars", () => {
+    expect(PHP_TO_TS_TYPE_MAP.string).toBe("string");
+    expect(PHP_TO_TS_TYPE_MAP.int).toBe("number");
+    expect(PHP_TO_TS_TYPE_MAP.float).toBe("number");
+    expect(PHP_TO_TS_TYPE_MAP.bool).toBe("boolean");
+    expect(PHP_TO_TS_TYPE_MAP.array).toBe("unknown[]");
+    expect(PHP_TO_TS_TYPE_MAP.mixed).toBe("unknown");
     // Numeric PHP scalars must not map to string-ish TS types.
-    assertTrue(
-      PHP_TO_TS_TYPE_MAP["int"] !== "string" && PHP_TO_TS_TYPE_MAP["float"] !== "string",
-      "numeric PHP types map to number",
-    );
-  },
+    expect(PHP_TO_TS_TYPE_MAP.int).not.toBe("string");
+    expect(PHP_TO_TS_TYPE_MAP.float).not.toBe("string");
+  });
 });

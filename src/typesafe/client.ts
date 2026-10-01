@@ -10,9 +10,14 @@
  * - The IN-MEMORY double (`createInMemoryJevClient`) answers from a scripted
  *   responder: deterministic, offline, and used by all unit tests. With no
  *   responder it throws — it never fabricates judgments silently.
- * - `createJevClient()` is the env-aware factory: TYPESAFE_OFFLINE=1 forces
- *   the in-memory double so real network calls are skippable in tests/CI.
+ * - There is ONE offline factory for production flows: the worker's
+ *   `createOfflineJevClient()` (src/harness/runtime.ts), an in-memory double
+ *   over the scripted first-candidate responder. Its answers are tagged
+ *   `judge: "scripted"` downstream and are never counted as live Jev usage.
+ *   `isTypesafeOffline()` (TYPESAFE_OFFLINE) is the switch that selects it.
  */
+
+import { envFlag, envString } from "../env.js";
 
 // ---- seam types (structural mirrors of @typesafe-ai/sdk 0.6.0) ---------------
 
@@ -146,33 +151,31 @@ export interface JudgmentClient {
 
 // ---- env handling ---------------------------------------------------------------
 
-/** Env var names. The API key comes from TYPESAFE_API_KEY only — never from code. */
+/**
+ * Env var names THIS module reads. The API key comes from TYPESAFE_API_KEY only
+ * — never from code.
+ *
+ * TYPESAFE_BASE_URL, TYPESAFE_DEFAULT_MODEL and TYPESAFE_LOG_LEVEL are read by
+ * the @typesafe-ai/sdk client itself (explicit option, then env, then SDK
+ * default) when createRealJevClient does not pass them. They used to be listed
+ * here as well but nothing in this repo read them, which made them look wired
+ * when only the SDK honoured them; they are deliberately not repeated.
+ * src/typesafe/client-sdk-env.test.ts proves the SDK picks them up.
+ */
 export const TYPESAFE_ENV_VARS = {
   apiKey: "TYPESAFE_API_KEY",
   offline: "TYPESAFE_OFFLINE",
-  baseURL: "TYPESAFE_BASE_URL",
-  defaultModel: "TYPESAFE_DEFAULT_MODEL",
 } as const;
 
 /**
- * Read an env var without importing node typings (this slice must typecheck
- * standalone before the repo-root toolchain lands). Bun/Node both expose
- * `process` on globalThis.
- */
-function readEnv(name: string): string | undefined {
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  return proc?.env?.[name];
-}
-
-/**
- * True when TYPESAFE_OFFLINE is set to anything truthy (1, true, yes...).
- * "0", "false", "" and unset count as online. Offline mode forces the
- * in-memory double so tests never touch the network.
+ * True when TYPESAFE_OFFLINE is on: 1/true/yes/on (any case). 0/false/no/off,
+ * blank and unset count as online, and any other value is an EnvError (the
+ * switch rule of src/env.ts; it used to read "banana" as on). Offline mode
+ * forces the in-memory double so tests never touch the network. Read at call
+ * time, so a test can change it between calls.
  */
 export function isTypesafeOffline(): boolean {
-  const v = readEnv(TYPESAFE_ENV_VARS.offline);
-  if (v === undefined || v === "" || v === "0") return false;
-  return v.toLowerCase() !== "false";
+  return envFlag(TYPESAFE_ENV_VARS.offline, false);
 }
 
 /** Raised when the real client is requested without an API key. */
@@ -255,7 +258,7 @@ export async function createRealJevClient(config?: {
   apiKey?: string;
   baseURL?: string;
 }): Promise<JudgmentClient> {
-  const apiKey = config?.apiKey ?? readEnv(TYPESAFE_ENV_VARS.apiKey);
+  const apiKey = config?.apiKey ?? envString(TYPESAFE_ENV_VARS.apiKey);
   if (apiKey === undefined || apiKey === "") {
     throw new JevConfigError(
       `real TypeSafe client requires an API key via ${TYPESAFE_ENV_VARS.apiKey} (env) — refusing to proceed without credentials`,
@@ -291,14 +294,4 @@ export async function createRealJevClient(config?: {
     },
   };
   return adapter;
-}
-
-/**
- * Env-aware factory used by production flows: TYPESAFE_OFFLINE=1 forces the
- * in-memory double; otherwise the real SDK client (requires TYPESAFE_API_KEY,
- * throws JevConfigError otherwise).
- */
-export async function createJevClient(): Promise<JudgmentClient> {
-  if (isTypesafeOffline()) return createInMemoryJevClient();
-  return createRealJevClient();
 }

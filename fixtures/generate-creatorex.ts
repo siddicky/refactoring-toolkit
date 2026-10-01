@@ -19,26 +19,116 @@
  *   - fixed file order, LF endings, one trailing newline per file;
  *   - two consecutive runs are byte-identical (compare the printed DIGEST).
  *
- * Run:  bun run fixtures/generate-creatorex.ts
- * (or:  npx tsx fixtures/generate-creatorex.ts)
+ * Run:  bun run fixtures/generate-creatorex.ts [--out <dir>]
+ * (or:  npx tsx fixtures/generate-creatorex.ts [--out <dir>])
  *
  * Standalone by design: zero imports beyond node: builtins, and no shared
  * code with fixtures/generate.ts so each fixture regenerates independently.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const outRoot = join(here, "creatorex-middleware");
+
+/** Marker file every generated tree carries; `main()` only wipes trees that have it. */
+const MARKER = "GENERATED.txt";
+
+/**
+ * Output directory: `--out <dir>` or `--out=<dir>` (used by tests to
+ * regenerate into a temp dir), or the committed fixtures/creatorex-middleware
+ * when no argument is given. `--out` is the only option: anything else is an
+ * error, because an unrecognised spelling (`--outdir`, `--out=`) used to fall
+ * back silently to wiping and rewriting the committed tree.
+ */
+function resolveOutRoot(): string {
+  const args = process.argv.slice(2);
+  let out: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    let value: string | undefined;
+    if (arg === "--out") {
+      value = args[++i];
+      if (value === undefined || value === "" || value.startsWith("--")) {
+        throw new Error("--out requires a directory argument");
+      }
+    } else if (arg.startsWith("--out=")) {
+      value = arg.slice("--out=".length);
+      if (value === "") throw new Error("--out requires a directory argument");
+    } else {
+      throw new Error(`unknown argument ${JSON.stringify(arg)}: the only option is --out <dir>`);
+    }
+    if (out !== undefined) throw new Error("--out was given more than once");
+    out = value;
+  }
+  return out === undefined ? join(here, "creatorex-middleware") : resolve(out);
+}
+
+/**
+ * Clears the output directory before regeneration. A missing or empty
+ * directory is fine; a non-empty one must carry GENERATED.txt, so a stray
+ * `--out <dir>` can never wipe a directory this generator does not own.
+ */
+function clearOutRoot(dir: string): void {
+  if (existsSync(dir)) {
+    const entries = readdirSync(dir);
+    if (entries.length > 0 && !entries.includes(MARKER)) {
+      throw new Error(`refusing to wipe ${dir}: it is not empty and has no ${MARKER} marker`);
+    }
+  }
+  rmSync(dir, { recursive: true, force: true });
+}
+
+const outRoot = resolveOutRoot();
 
 type FixtureFile = { readonly path: string; readonly content: string };
+
+/**
+ * Hand-written stub prep artifact: the source map that
+ * `run-demo.ts demo --files creatorex --prep fixtures/creatorex-middleware/prep-stub.md`
+ * consumes. It lives inside the wiped output directory, so the generator has to
+ * emit it or regeneration deletes it. One string per line because the markdown
+ * is full of backticks and backslashes that a String.raw template cannot hold.
+ */
+const PREP_STUB_LINES: readonly string[] = [
+  "# PORTING PREP — `CreatorEx` PHP → TypeScript",
+  "",
+  "> **STATUS: STUB — DEMO BASELINE ARTIFACT.**",
+  "> Hand-written stand-in consumed by the porting loop as the artifact-diff",
+  "> baseline. The flow's prep-analysis phase (implementer-generated spec map +",
+  "> per-symbol table, adversarially reviewed) replaces it before any file is",
+  "> ported. Do not treat these contents as reviewed.",
+  "",
+  "Module root: `fixtures/creatorex-middleware/` — namespace `CreatorEx`",
+  "(PSR-4: `src/`), tests in `tests/` (PHPUnit style; the port targets vitest).",
+  "The PHP side is read-only input; no PHP toolchain runs anywhere in the",
+  "pipeline.",
+  "",
+  "## 1. Source map",
+  "",
+  "| PHP file | Proposed port target | Notes |",
+  "|---|---|---|",
+  "| `src/Access/EntitlementChecker.php` | `src/access/entitlement-checker.ts` | entitlement + age + geo gates composed through `__call` fluent `require*`; non-strict `in_array` and `??` traps |",
+  "| `src/Billing/SubscriptionService.php` | `src/billing/subscription-service.ts` | state machine over assoc-array rows → named states |",
+  "| `src/Moderation/ChatSentinel.php` | `src/moderation/chat-sentinel.ts` | substring (`stripos`) blocklist + `preg_replace` PII redaction; PHP `preg_*` semantics |",
+  "| `src/Payouts/EarningsLedger.php` | `src/payouts/earnings-ledger.ts` | float money math in cents/major units — decide representation |",
+  "| `src/Support/legacy_helpers.php` | `src/support/legacy-helpers.ts` | scalar-coercion helpers; document PHP/TS divergence |",
+  "| `tests/Access/EntitlementCheckerTest.php` | `test/access/entitlement-checker.test.ts` | US-010 TEST PORT: PHPUnit asserts → vitest `expect` (scope: ported output) |",
+  "| `tests/Billing/SubscriptionServiceTest.php` | `test/billing/subscription-service.test.ts` | US-010 TEST PORT: state-machine coverage → vitest suites |",
+  "| `tests/Moderation/ChatSentinelTest.php` | `test/moderation/chat-sentinel.test.ts` | US-010 TEST PORT: regex-rule cases → vitest suites |",
+  "| `tests/Payouts/EarningsLedgerTest.php` | `test/payouts/earnings-ledger.test.ts` | US-010 TEST PORT: money-math cases → vitest suites |",
+  "| `tests/Support/LegacyHelpersTest.php` | `test/support/legacy-helpers.test.ts` | US-010 TEST PORT: coercion cases → vitest suites |",
+  "",
+  "> The `tests/*.php` glob convention ( PHPUnit asserts → vitest `expect` ) is",
+  "> materialized above as one explicit row per test file — exact rows are what",
+  "> the port loop's seed lookup consumes (glob rows are documentation only).",
+];
 
 const FILES: FixtureFile[] = [
   {
     path: "GENERATED.txt",
-    content: String.raw`
+    content: `
 Directory generated by fixtures/generate-creatorex.ts (deterministic generator).
 
 Do not edit files under creatorex-middleware/ by hand. Edit the generator and re-run:
@@ -47,6 +137,10 @@ Do not edit files under creatorex-middleware/ by hand. Edit the generator and re
 
 Two consecutive runs produce byte-identical output (no randomness, no clock).
 `,
+  },
+  {
+    path: "prep-stub.md",
+    content: PREP_STUB_LINES.join("\n"),
   },
   {
     path: "src/Billing/SubscriptionService.php",
@@ -797,8 +891,10 @@ final class EntitlementCheckerTest extends TestCase
 
     public function testStringZeroEntitlementDeniesDespiteLookup(): void
     {
-        // '0' is falsy but not null, so it short-circuits the ?? lookup.
-        $decision = $this->checker()->decide(['user_id' => 42, 'entitled' => '0']);
+        // '0' is falsy but not null, so it short-circuits the ?? lookup even
+        // though user 42 holds a video_pass. The session satisfies the age and
+        // geo gates, so the entitlement gate is the only reason to deny.
+        $decision = $this->checker()->decide(array_merge($this->session(), ['entitled' => '0']));
 
         $this->assertFalse($decision['allowed']);
         $this->assertSame(['entitlement'], $decision['reasons']);
@@ -806,9 +902,16 @@ final class EntitlementCheckerTest extends TestCase
 
     public function testNullEntitlementFallsThroughToLookup(): void
     {
-        $decision = $this->checker()->decide(['user_id' => 42, 'entitled' => null]);
+        // A null 'entitled' falls through ?? to the stored video_pass lookup.
+        $session = array_merge($this->session(), ['entitled' => null]);
 
-        $this->assertTrue($decision['allowed']);
+        $this->assertTrue($this->checker()->decide($session)['allowed']);
+
+        // A user with no stored entitlement row is denied by the same lookup.
+        $denied = $this->checker()->decide(array_merge($session, ['user_id' => 99]));
+
+        $this->assertFalse($denied['allowed']);
+        $this->assertSame(['entitlement'], $denied['reasons']);
     }
 
     public function testEntitlementGateValueFalseDisablesTheCheck(): void
@@ -820,9 +923,20 @@ final class EntitlementCheckerTest extends TestCase
 
     public function testUnknownGateMethodThrows(): void
     {
+        // __call only throws for names that do not start with "require".
         $this->expectException(\BadMethodCallException::class);
 
-        $this->checker()->requireFriendInvite();
+        $this->checker()->forbidMinors();
+    }
+
+    public function testUnknownRequireGateIsRegisteredButNeverEvaluated(): void
+    {
+        // A require* name outside age/geo/entitlement does not throw: __call
+        // stores it as a gate and decide() never looks at it.
+        $checker = (new EntitlementChecker())->requireFriendInvite();
+
+        $this->assertInstanceOf(EntitlementChecker::class, $checker);
+        $this->assertTrue($checker->decide([])['allowed']);
     }
 
     public function testGatesPersistAcrossDecisionsUntilReset(): void
@@ -868,13 +982,16 @@ final class EarningsLedgerTest extends TestCase
         $this->assertSame(2.36, $ledger->roundForPayout(2.355, EarningsLedger::ROUND_BANKERS));
     }
 
-    public function testBankersNeverTriggersForNegativeAmounts(): void
+    public function testBankersNeverChangesTheResultForNegativeTies(): void
     {
         $ledger = new EarningsLedger();
 
-        // floor() moves away from zero for negatives, so the tie branch is
-        // unreachable there: negative ties fall through to half-up.
+        // floor() moves away from zero for negatives, so the banker's branch
+        // never changes the result there: an odd floor (-2.345) falls through
+        // to round(), and an even floor (-2.355) takes the tie branch but
+        // returns the same half-away-from-zero value.
         $this->assertSame(-2.35, $ledger->roundForPayout(-2.345, EarningsLedger::ROUND_BANKERS));
+        $this->assertSame(-2.36, $ledger->roundForPayout(-2.355, EarningsLedger::ROUND_BANKERS));
     }
 
     public function testBalanceMixesCurrenciesOneToOne(): void
@@ -1048,7 +1165,8 @@ final class LegacyHelpersTest extends TestCase
 
     public function testMoneyStringRoundsViaSprintf(): void
     {
-        $this->assertSame('12.99', creatorex_money_string('12.999'));
+        // sprintf('%.2f') rounds to nearest; it does not truncate.
+        $this->assertSame('13.00', creatorex_money_string('12.999'));
         $this->assertSame('7.00', creatorex_money_string(7));
     }
 }
@@ -1057,7 +1175,7 @@ final class LegacyHelpersTest extends TestCase
 ];
 
 function normalize(raw: string): string {
-  return raw.replace(/^\n/, "").replace(/\s+$/, "") + "\n";
+  return `${raw.replace(/^\n/, "").replace(/\s+$/, "")}\n`;
 }
 
 function isCommentOnly(line: string): boolean {
@@ -1080,7 +1198,7 @@ function countLines(content: string): { physical: number; nonBlank: number; code
 }
 
 function main(): void {
-  rmSync(outRoot, { recursive: true, force: true });
+  clearOutRoot(outRoot);
 
   const digest = createHash("sha256");
   const width = Math.max(...FILES.map((f) => f.path.length));
