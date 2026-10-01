@@ -15,6 +15,7 @@ import { promisify } from "node:util";
 
 import { commitLeaseChanges, findCommitByOpId } from "../../src/git/worktree.js";
 import { pathExists } from "./queue-tools.js";
+import { stripDotSlash } from "../../src/file-keys.js";
 
 const execFileP = promisify(execFile);
 
@@ -63,7 +64,7 @@ export function tsconfigIncludeFromSourceMap(
 ): string[] {
   const include = new Set<string>(DEFAULT_TSCONFIG_INCLUDE);
   for (const row of Object.values(sourceMap)) {
-    const rel = row.outPath.replace(/^\.\//, "");
+    const rel = stripDotSlash(row.outPath);
     if (rel === "" || rel.startsWith("/") || rel.includes("*") || rel.split("/").includes("..")) continue;
     const ext = rel.endsWith(".tsx") ? "tsx" : "ts";
     const slash = rel.indexOf("/");

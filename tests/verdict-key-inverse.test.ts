@@ -3,7 +3,7 @@
  *
  * Verdict attributes are keyed `<sanitizeFileKey(file)>#<round>#<reviewer>`,
  * and "/" -> "__" is lossy in reverse for a file whose own name contains "__".
- * T5 centralised the inverse as fileFromSanitizedKey (src/metrics/types.ts);
+ * T5 centralised the inverse as fileFromSanitizedKey (src/file-keys.ts);
  * T6's dashboard kept a private copy in parseVerdictKeySuffix. Two copies of a
  * lossy function drift in exactly the cases nobody tests, so the dashboard now
  * imports the shared one. This pins that, and that the report's tombstone
@@ -12,23 +12,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
 
 import { degradedRoundsOf } from "../src/dashboard/state.js";
 import { collectTombstones, type StateAttribute } from "../src/metrics/collect.js";
 import { fileFromSanitizedKey, sanitizeFileKey } from "../src/metrics/types.js";
 
-import { REPO_ROOT } from "./support/paths.js";
-
-function sources(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) sources(path, out);
-    else if (path.endsWith(".ts") && !path.endsWith(".test.ts")) out.push(path);
-  }
-  return out;
-}
+import { productionSources, readSource } from "./support/source-files.js";
 
 function tombstone(reviewer: string): Record<string, unknown> {
   return { reviewer, discarded: true, reason: "discarded after repair", attempt: 3, tokens: 100 };
@@ -45,14 +34,14 @@ function degradedAttributes(file: string, round: number): StateAttribute[] {
 
 describe("INT-11: one inverse of the verdict-key sanitizer", () => {
   test("the dashboard imports fileFromSanitizedKey and keeps no private `__` -> `/` copy", () => {
-    const state = readFileSync(join(REPO_ROOT, "src", "dashboard", "state.ts"), "utf8");
-    expect(state).toMatch(/import \{ fileFromSanitizedKey \} from "\.\.\/metrics\/types\.js"/);
+    const state = readSource("src/dashboard/state.ts");
+    expect(state).toMatch(/import \{[^}]*\bfileFromSanitizedKey\b[^}]*\} from "\.\.\/metrics\/types\.js"/);
     expect(state).toContain("fileFromSanitizedKey(");
     // across all non-test sources, the inverse is spelled exactly once: in the shared helper
-    const copies = [...sources(join(REPO_ROOT, "src")), ...sources(join(REPO_ROOT, "scripts")), ...sources(join(REPO_ROOT, "flows"))]
-      .filter((path) => /\.replace\(\s*\/__\/g\s*,\s*["']\/["']\s*\)/.test(readFileSync(path, "utf8")))
-      .map((path) => relative(REPO_ROOT, path));
-    expect(copies).toEqual(["src/metrics/types.ts"]);
+    const copies = productionSources("src", "scripts", "flows").filter((rel) =>
+      /\.replace\(\s*\/__\/g\s*,\s*["']\/["']\s*\)/.test(readSource(rel)),
+    );
+    expect(copies).toEqual(["src/file-keys.ts"]);
   });
 
   test("the shared pair round-trips ordinary paths and is documented as lossy for `__` names", () => {

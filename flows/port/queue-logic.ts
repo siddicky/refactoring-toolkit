@@ -5,6 +5,7 @@
  * and the input rebuilders. No I/O, no step classes.
  */
 
+import { identityKeyOf, stripDotSlash } from "../../src/file-keys.js";
 import type { ClassifiedVitestFailure } from "../../src/queues/vitest-queue.js";
 import type {
   FileRoundInput,
@@ -20,14 +21,13 @@ import type {
   WaveEntry,
 } from "./state.js";
 
-export const safe = (file: string): string => file.replace(/\//g, "__");
-
-export const markerKeyOf = (file: string, round: number): string => `${safe(file)}#${round}`;
+// The attribute key of a file-round is the shared identity key (src/file-keys.ts).
+export const markerKeyOf = identityKeyOf;
 export const diffKeyOf = markerKeyOf;
 export const keptKeyOf = markerKeyOf;
 export const outKeyOf = markerKeyOf;
 export const verdictKeyOf = (file: string, round: number, reviewerId: string): string =>
-  `${safe(file)}#${round}#${reviewerId}`;
+  `${markerKeyOf(file, round)}#${reviewerId}`;
 
 /** Envelope identity of every per-file step: the sanitized `file#round` attribute key. */
 export const fileRoundIdentity = (_ctx: unknown, target: { file: string; round: number }): string =>
@@ -106,13 +106,13 @@ export function errorCountsByOutput(
 ): Map<string, number> {
   const counts = new Map<string, number>();
   for (const e of tscErrors) {
-    const rel = e.file.replace(/^\.\//, "");
+    const rel = stripDotSlash(e.file);
     counts.set(rel, (counts.get(rel) ?? 0) + 1);
   }
   for (const c of vitestClassified ?? []) {
     if (c.classification.failureClass !== "port-caused") continue;
     if (c.classification.attributedFile === null) continue;
-    const rel = c.classification.attributedFile.replace(/^\.\//, "");
+    const rel = stripDotSlash(c.classification.attributedFile);
     counts.set(rel, (counts.get(rel) ?? 0) + 1);
   }
   return counts;
@@ -144,7 +144,7 @@ export function selectFixableFiles(
   for (const [file, round] of latestRound) {
     const outPath = sourceMap[file]?.outPath;
     if (outPath === undefined) continue;
-    const count = errorCountByOutput.get(outPath.replace(/^\.\//, "")) ?? 0;
+    const count = errorCountByOutput.get(stripDotSlash(outPath)) ?? 0;
     if (count === 0) continue;
     if (round + 1 > maxRounds) {
       capped.push({ file, round, count });
@@ -168,7 +168,7 @@ export function portedRootsFromSourceMap(
   const srcRoots = new Set<string>();
   const testRoots = new Set<string>();
   for (const row of Object.values(sourceMap)) {
-    const rel = row.outPath.replace(/^\.\//, "");
+    const rel = stripDotSlash(row.outPath);
     const slash = rel.indexOf("/");
     if (slash <= 0) continue;
     const root = rel.slice(0, slash);
@@ -191,12 +191,12 @@ export function vitestRoutedTo(
   classified: readonly ClassifiedVitestFailure[] | undefined,
   relPath: string,
 ): ClassifiedVitestFailure[] {
-  const rel = relPath.replace(/^\.\//, "");
+  const rel = stripDotSlash(relPath);
   return (classified ?? []).filter(
     (c) =>
       c.classification.failureClass === "port-caused" &&
       c.classification.attributedFile !== null &&
-      c.classification.attributedFile.replace(/^\.\//, "") === rel,
+      stripDotSlash(c.classification.attributedFile) === rel,
   );
 }
 
@@ -212,8 +212,8 @@ export function queueFixFeedForFile(
   verify: QueueVerifyState | undefined,
   relPath: string,
 ): { errors: QueueVerifyError[]; testFailures: Array<{ name: string; message: string }> } {
-  const rel = relPath.replace(/^\.\//, "");
-  const errors = (verify?.errors ?? []).filter((e) => e.file.replace(/^\.\//, "") === rel);
+  const rel = stripDotSlash(relPath);
+  const errors = (verify?.errors ?? []).filter((e) => stripDotSlash(e.file) === rel);
   const testFailures = vitestRoutedTo(verify?.vitestState?.classified, rel).map((c) => ({
     name:
       c.record.testName === ""

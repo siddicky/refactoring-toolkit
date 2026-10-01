@@ -51,6 +51,7 @@ import {
 } from "../src/git/worktree.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { identityKeyOf } from "../src/file-keys.js";
 
 const execFileP = promisify(execFile);
 
@@ -102,7 +103,7 @@ export const capturedDiffs = new AttributeMap<string>("captured-diff", stringCod
 
 /** AttributeMap instances prohibit `/`. */
 export function markerKey(file: string, round: number): string {
-  return `${file.replace(/\//g, "__")}#${round}`;
+  return identityKeyOf(file, round);
 }
 
 export function probePersistenceSchema(): {

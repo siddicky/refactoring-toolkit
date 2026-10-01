@@ -13,6 +13,7 @@
 
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { AttributeMap, jsonCodec } from "@superdurable/dex";
+import { sanitizeFileKey } from "../file-keys.js";
 
 // ---------------------------------------------------------------------------
 // Durable session-fence attribute (source of truth for fencing)
@@ -41,7 +42,7 @@ export const PORTING_KIT_LABEL_PREFIX = "porting-kit:";
 
 /** AttributeMap instance keys prohibit `/`, so file paths are sanitized. */
 export function fenceLabel(file: string, round: number, epoch: number): string {
-  return `${PORTING_KIT_LABEL_PREFIX}${file.replace(/\//g, "__")}#${round}#${epoch}`;
+  return `${PORTING_KIT_LABEL_PREFIX}${sanitizeFileKey(file)}#${round}#${epoch}`;
 }
 
 /**

@@ -19,6 +19,8 @@
  * tsconfig, TS2688 missing type library) is never read as a clean typecheck.
  */
 
+import { stripDotSlash } from "../file-keys.js";
+
 /** Location of a single tsc diagnostic. */
 export interface TscErrorLocation {
   file: string;
@@ -342,7 +344,7 @@ export function capErrorsPerFile<T extends { file: string }>(
   const seen = new Map<string, number>();
   const kept: T[] = [];
   for (const err of errors) {
-    const file = err.file.replace(/^\.\//, "");
+    const file = stripDotSlash(err.file);
     const n = seen.get(file) ?? 0;
     if (n >= perFileCap) continue;
     seen.set(file, n + 1);

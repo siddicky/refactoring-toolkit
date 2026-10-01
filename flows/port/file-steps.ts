@@ -20,6 +20,7 @@ import {
   type EnvelopeSpec,
   type EnvelopeStepClass,
 } from "../steps/envelope.js";
+import { sanitizeFileKey, stripDotSlash } from "../../src/file-keys.js";
 import { fenceLabel, sessionFenceMap } from "../../src/harness/opencode.js";
 import {
   commitLeaseChanges,
@@ -56,7 +57,6 @@ import {
   outKeyOf,
   outPathOf,
   queueFixFeedForFile,
-  safe,
   verdictKeyOf,
 } from "./queue-logic.js";
 import { runReviewTurn } from "./review-turn.js";
@@ -168,7 +168,7 @@ export const CaptureDiffStep: EnvelopeStepClass<FileRoundInput> = envelopeStepCl
   identityOf: fileRoundIdentity,
   inner: async (ctx, fri) => {
     const raw = await gitDiffStaged(fri.worktreePath);
-    const diffId = `diff-${safe(fri.file)}-r${fri.round}`;
+    const diffId = `diff-${sanitizeFileKey(fri.file)}-r${fri.round}`;
     const doc: DiffDocument = {
       diff_id: diffId,
       file: fri.file,
@@ -531,7 +531,7 @@ export const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass
     const prep = ppPrep.get(ctx, "prep");
     const outPath = outPathOf(ppOut.get(ctx, outKeyOf(fri.file, fri.round)), prep, fri.file);
     if (outPath === undefined) throw new Error(`output path missing for ${fri.file}#${fri.round}`);
-    const rel = outPath.replace(/^\.\//, "");
+    const rel = stripDotSlash(outPath);
     // Fix-round feed: tsc errors + vitest failures triaged to this file
     // (Lane-B vitest-triage; registry-declared routing by attributedFile).
     const feed = queueFixFeedForFile(verify, rel);

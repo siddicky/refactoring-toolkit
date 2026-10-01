@@ -7,28 +7,13 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
 import { REPO_ROOT } from "./support/paths.js";
+import { readSource as read, walkFiles } from "./support/source-files.js";
 
-const SKIPPED_DIRS = new Set(["node_modules", ".git", ".claude", ".omc", ".worktrees", "dist"]);
-
-/** Repo-relative paths of files under `dir` matching `keep`, sorted. */
-function walk(dir: string, keep: (rel: string) => boolean, out: string[] = []): string[] {
-  for (const entry of readdirSync(join(REPO_ROOT, dir), { withFileTypes: true })) {
-    if (SKIPPED_DIRS.has(entry.name) || entry.name.startsWith(".dex")) continue;
-    const rel = dir === "" ? entry.name : `${dir}/${entry.name}`;
-    if (entry.isDirectory()) walk(rel, keep, out);
-    else if (keep(rel)) out.push(rel);
-  }
-  return out.sort();
-}
-
-const isTestFile = (rel: string): boolean => rel.endsWith(".test.ts");
-const testFiles = walk("", isTestFile);
+const testFiles = walkFiles("", (rel) => rel.endsWith(".test.ts"));
 const colocated = testFiles.filter((f) => f.startsWith("src/") || f.startsWith("harness/"));
-const read = (rel: string): string => readFileSync(join(REPO_ROOT, rel), "utf8");
 
 describe("test tree layout", () => {
   test("the scan sees both colocated and tests/ files", () => {
@@ -69,7 +54,7 @@ describe("test tree layout", () => {
 
   test("fixture and helper directories use the shared names", () => {
     const dirs = new Set<string>();
-    for (const f of walk("", () => true)) {
+    for (const f of walkFiles("")) {
       const parts = f.split("/");
       for (let i = 0; i < parts.length - 1; i++) dirs.add(parts.slice(0, i + 1).join("/"));
     }

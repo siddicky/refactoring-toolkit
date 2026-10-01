@@ -32,6 +32,7 @@ import { closeSync, openSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
+import { sanitizeFileKey } from "../src/file-keys.js";
 
 const execFileP = promisify(execFile);
 import {
@@ -387,7 +388,7 @@ async function startRound(
   try {
     const flow = flows.find((f) => f.getFlowType() === "probe.PortRound");
     if (flow === undefined) throw new Error("probe.PortRound not registered");
-    const flowId = `round-${file.replace(/\//g, "__")}-${round}-${epoch}-${Date.now()}`;
+    const flowId = `round-${sanitizeFileKey(file)}-${round}-${epoch}-${Date.now()}`;
     const runId = await runtime.client.startFlow(flow, flowId, input);
     console.log(`[round] flowId=${flowId} runId=${runId} worktree=${lease.worktreePath}`);
     return await waitAndReport(runtime, flowId, 30, "round");

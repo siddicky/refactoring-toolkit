@@ -78,6 +78,7 @@ import {
   ppWaveChildren,
 } from "./state.js";
 import { RESTART_WINDOW_RETRY } from "./step-options.js";
+import { sanitizeFileKey, stripDotSlash } from "../../src/file-keys.js";
 
 /**
  * DispatchStep output: `done` = the port queue is exhausted; `requeue` = this
@@ -314,7 +315,7 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
       const firstDone = queue.done[0];
       const injectPath = firstDone !== undefined ? prep?.sourceMap[firstDone.file]?.outPath : undefined;
       if (firstDone !== undefined && injectPath !== undefined) {
-        tscOut += `\n${injectPath.replace(/^\.\//, "")}(1,1): error TS9999: injected fault queue-verify:inject-error:seed (synthetic — fix-round durability smoke, not a real port error)\n`;
+        tscOut += `\n${stripDotSlash(injectPath)}(1,1): error TS9999: injected fault queue-verify:inject-error:seed (synthetic — fix-round durability smoke, not a real port error)\n`;
       }
     }
     const tscOutcome = tscOutcomeFromRun({
@@ -395,7 +396,7 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
           : { state: "not-run", reason: vitestRun.reason, passed: null, failed: null, total: null },
     });
     for (const group of tscState.byFile.slice(0, 8)) {
-      ppBurndown.set(ctx, `tsc-${iteration}-${group.file.replace(/\//g, "__")}`, {
+      ppBurndown.set(ctx, `tsc-${iteration}-${sanitizeFileKey(group.file)}`, {
         queue: "tsc",
         iteration,
         error_count: group.count,
@@ -410,7 +411,7 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
     const outPathToPhp = new Map<string, { file: string; round: number }>();
     for (const d of queue.done) {
       const outPath = prep?.sourceMap[d.file]?.outPath;
-      if (outPath !== undefined) outPathToPhp.set(outPath.replace(/^\.\//, ""), { file: d.file, round: d.round });
+      if (outPath !== undefined) outPathToPhp.set(stripDotSlash(outPath), { file: d.file, round: d.round });
     }
     const errorCountByFile = errorCountsByOutput(tscState.errors, vitestState.classified);
     const { fixable, capped } = selectFixableFiles(
@@ -447,7 +448,7 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
       // C05: capped PER FILE (not globally): selection above counts every
       // file's errors, so every fixable file must keep a non-empty feed.
       errors: capErrorsPerFile(tscState.errors).map((e) => ({
-        file: e.file.replace(/^\.\//, ""),
+        file: stripDotSlash(e.file),
         code: e.code,
         message: e.message,
         line: e.line,
@@ -560,7 +561,7 @@ export const WaveDispatchStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeS
       const fixable = (verify?.fixQueue ?? []).slice(0, CHILD_SLOT_CAP);
       if (fixable.length === 0) throw new Error("fix wave dispatched with empty fix queue");
       const outPathOf = (file: string): string =>
-        (prep.sourceMap[file]?.outPath ?? "").replace(/^\.\//, "");
+        stripDotSlash(prep.sourceMap[file]?.outPath ?? "");
       // C03: a fix queue mixes files at different fromRounds. Each entry runs
       // at ITS OWN next round — one shared round skipped a round for the
       // lower-round file, or re-ran the higher-round file at a round whose
