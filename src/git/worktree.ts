@@ -226,8 +226,12 @@ export type AcquireResult =
   | { acquired: false; reason: string };
 
 /**
- * Worktree pool — the SINGLE enforcement point for the 2-worktree cap and
- * stale-lease reclamation (epoch-tagged).
+ * Worktree pool — enforces the worktree cap and stale-lease reclamation
+ * (epoch-tagged) for ONE lease store. The cap counts only leases of the
+ * current epoch in that store. In parallel mode every per-file child flow owns
+ * its own lease store (and builds its own pool), so the pool never limits
+ * concurrency across siblings: the wave planner's slice width (CHILD_SLOT_CAP,
+ * flows/port/project-steps.ts) is the only cross-child bound.
  */
 export class WorktreePool {
   readonly #repoRoot: string;
