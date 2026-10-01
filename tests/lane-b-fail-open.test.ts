@@ -14,23 +14,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { AsyncContext } from "@superdurable/dex";
 
 import {
   classifyVitestRecords,
-  PortProjectFlow,
-  ppConfig,
-  ppPrep,
-  ppQueue,
   ppVerify,
-  queueVerifyTools,
   runCitationGate,
   runPrioritizeGate,
-  type PortQueueState,
-  type PortRunInput,
   type QueueVerifyState,
 } from "../flows/port-project.js";
 import { configurePortJudgment } from "../flows/runtime-hooks.js";
@@ -38,6 +27,12 @@ import { CITATION_MIN_P_JEV, JUDGMENT_REGISTRY } from "../src/judgment-registry.
 import type { DiffDocument, Finding, VerdictRecord } from "../src/metrics/types.js";
 import { parseVitestOutput } from "../src/queues/vitest-queue.js";
 import { createInMemoryJevClient, type JudgmentClient } from "../src/typesafe/client.js";
+import {
+  cleanupQueueVerifyRun,
+  ONE_FAILURE_STDERR,
+  ONE_FAILURE_STDOUT,
+  runQueueVerifyOverFakeTools,
+} from "./helpers/queue-verify-run.js";
 
 // ---------------------------------------------------------------------------
 // Doubles
@@ -64,10 +59,10 @@ beforeEach(() => {
     warnings.push(args.map(String).join(" "));
   };
 });
-afterEach(() => {
+afterEach(async () => {
   console.warn = originalWarn;
   configurePortJudgment(createInMemoryJevClient()); // never leak a real-kind seam
-  Object.assign(queueVerifyTools, PRODUCTION_TOOLS);
+  await cleanupQueueVerifyRun();
 });
 
 const DIFF: DiffDocument = {
@@ -139,33 +134,8 @@ describe("INT-7: the Jev keep threshold stays 0.8 and every gate warns when it f
   });
 });
 
-const VITEST_OUT = `
- RUN  v3.2.4 /itg
-
- ❯ test/price.test.ts (1 test | 1 failed) 5ms
-   × top-level tax 0ms
-     → expected 120 to be 110 // Object.is equality
-
- Test Files  1 failed (1)
-      Tests  1 failed (1)
-`;
-const VITEST_ERR = `
-⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
-
- FAIL  test/price.test.ts > top-level tax
-AssertionError: expected 120 to be 110 // Object.is equality
-
- ❯ test/price.test.ts:14:20
-     12|
-     13| test("top-level tax", () => {
-     14|   expect(tax(100)).toBe(110);
-       |                    ^
-
-⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
-`;
-
 describe("INT-10: vitest-triage records and logs its fail-open", () => {
-  const records = parseVitestOutput(`${VITEST_OUT}\n${VITEST_ERR}`);
+  const records = parseVitestOutput(`${ONE_FAILURE_STDOUT}\n${ONE_FAILURE_STDERR}`);
 
   test("the fixture really parses to one failure", () => {
     expect(records.length).toBe(1);
@@ -224,77 +194,11 @@ describe("INT-10: vitest-triage records and logs its fail-open", () => {
 // QueueVerifyStep persists the record (fake tsc + fake vitest, real step)
 // ---------------------------------------------------------------------------
 
-const tempDirs: string[] = [];
-const PRODUCTION_TOOLS = { ...queueVerifyTools };
-
-async function tempDir(prefix: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), `lane-b-${prefix}-`));
-  tempDirs.push(dir);
-  return dir;
-}
-
-afterEach(async () => {
-  for (const dir of tempDirs.splice(0)) await rm(dir, { recursive: true, force: true });
-});
-
-async function fakeBin(path: string, stdout: string, stderr: string, exit: number): Promise<string> {
-  const data = await tempDir("bin-data");
-  await writeFile(join(data, "stdout"), stdout);
-  await writeFile(join(data, "stderr"), stderr);
-  await mkdir(join(path, ".."), { recursive: true });
-  await writeFile(path, `#!/bin/sh\ncat "${join(data, "stdout")}"\ncat "${join(data, "stderr")}" >&2\nexit ${exit}\n`);
-  await chmod(path, 0o755);
-  return path;
-}
-
-type Stores = Map<unknown, Map<string, unknown>>;
-
-function ctxOver(stores: Stores): AsyncContext {
-  return {
-    attempt: 1,
-    flowId: "int10-triage",
-    getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
-    setAttribute: (attr: unknown, value: unknown, instance: string) => {
-      const store = stores.get(attr) ?? new Map<string, unknown>();
-      store.set(instance, value);
-      stores.set(attr, store);
-    },
-  } as unknown as AsyncContext;
-}
-
 async function runQueueVerify(): Promise<QueueVerifyState | undefined> {
-  const itg = await tempDir("checkout");
-  await mkdir(join(itg, "src"), { recursive: true });
-  await mkdir(join(itg, "test"), { recursive: true });
-  await writeFile(join(itg, "src", "price.ts"), "export const p = 1;\n");
-  await writeFile(join(itg, "test", "price.test.ts"), "// ported test\n");
-  await fakeBin(join(itg, "node_modules", ".bin", "vitest"), VITEST_OUT, VITEST_ERR, 1);
-  queueVerifyTools.tscBin = await fakeBin(join(await tempDir("tsc"), "tsc"), "", "", 0);
-  const queue: PortQueueState = {
-    pending: [],
-    current: null,
-    done: [{ file: "test/PriceTest.php", round: 1, commitSha: null, treeHash: null }],
-    blocked: [],
-  };
-  const stores: Stores = new Map();
-  stores.set(ppQueue, new Map([["queue", queue]]));
-  stores.set(ppConfig, new Map([["config", { maxRounds: 3, prepMaxRounds: 1 }]]));
-  stores.set(
-    ppPrep,
-    new Map([["prep", { raw: "", symbolTable: [], sourceMap: { "test/PriceTest.php": { outPath: "test/price.test.ts", notes: "" } } }]]),
-  );
-  const input: PortRunInput = {
-    repoRoot: itg,
-    worktreeRoot: join(itg, ".wt"),
-    integrationWorktreePath: itg,
-    epoch: 1,
-    sourceRoot: itg,
-    prepPath: "",
-    files: [],
-    maxRounds: 3,
-    dispatchMode: "parallel",
-  };
-  await new PortProjectFlow().queueVerify.execute(ctxOver(stores), input);
+  const stores = await runQueueVerifyOverFakeTools({
+    vitestStdout: ONE_FAILURE_STDOUT,
+    vitestStderr: ONE_FAILURE_STDERR,
+  });
   return stores.get(ppVerify)?.get("verify") as QueueVerifyState | undefined;
 }
 
