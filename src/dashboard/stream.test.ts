@@ -1,24 +1,18 @@
 /**
- * US-007 (Stage 2d) — dashboard ReadStream subscriber, poll fallback, AC-D
- * end-to-end, and the projection-only stream boundary.
+ * US-007 (Stage 2d) — dashboard ReadStream subscriber, poll fallback and AC-D
+ * end-to-end.
  *
  * AC-D: publish → subscriber receipt → event present in the /api/state feed
  * payload; forced subscriber failure → poll fallback ENGAGED (the durable
  * history/state poll path keeps building the feed).
  *
- * Projection-only boundary (same pattern as the US-003 import-boundary test):
- * no control-flow module reads the telemetry stream — flows/, src/git/, and
- * src/queues/ must contain no readStream/listStreamMessages usage. The only
- * consumers are the dashboard/query layer, the serve-status/watcher script
- * compositions, and the injected watcher core.
+ * The projection-only boundary (no control-flow module reads the telemetry
+ * stream) reads source text across directories, so it lives in
+ * tests/architecture-guards.test.ts.
  */
 
 import { describe, expect, test } from "bun:test";
 
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-
-import { REPO_ROOT } from "../../tests/support/paths.js";
 import {
   startEnvelopeStreamSubscriber,
   type EnvelopeStreamReader,
@@ -543,53 +537,10 @@ describe("C52: stream start + completion upsert (the feed never sticks on the in
 });
 
 // ---------------------------------------------------------------------------
-// Projection-only boundary (streams are never read by control flow)
+// The unknown-typed stream event is shape-checked at the boundary
 // ---------------------------------------------------------------------------
 
-describe("US-007 projection-only boundary: streams are never read for correctness", () => {
-  test("control-flow modules contain no stream reads (readStream/listStreamMessages)", () => {
-    const controlRoots = ["flows", join("src", "git"), join("src", "queues")];
-    const offenders: string[] = [];
-    const walk = (dir: string) => {
-      for (const e of readdirSync(join(REPO_ROOT, dir), { withFileTypes: true })) {
-        const p = join(dir, e.name);
-        if (e.isDirectory()) walk(p);
-        else if (e.name.endsWith(".ts")) {
-          const src = readFileSync(join(REPO_ROOT, p), "utf8");
-          if (/readStream|listStreamMessages/.test(src)) offenders.push(p);
-        }
-      }
-    };
-    for (const r of controlRoots) walk(r);
-    expect(offenders).toEqual([]);
-  });
-
-  test("the durable envelope attribute remains the only correctness source (structural check, not comment text)", () => {
-    const envelope = readFileSync(join(REPO_ROOT, "flows", "steps", "envelope.ts"), "utf8");
-    // The durable store exists under the key prefix every consumer matches on...
-    expect(envelope).toMatch(/new AttributeMap<EnvelopeEvent>\(\s*"envelope-event"/);
-    // ...and every durable write is immediately MIRRORED to the stream with the
-    // same arguments (the stream copy follows the write; it never replaces it).
-    const durableWrites = envelope.match(/envelopeEvents\.set\(/g) ?? [];
-    const mirroredWrites =
-      envelope.match(/envelopeEvents\.set\((\w+), (\w+), (\w+)\);\s*\n\s*publishEnvelopeEvent\(\1, \2, \3\);/g) ?? [];
-    expect(durableWrites.length).toBeGreaterThan(0);
-    expect(mirroredWrites.length).toBe(durableWrites.length);
-    // The envelope module itself never READS a stream.
-    expect(envelope).not.toMatch(/readStream|listStreamMessages/);
-    // Stream consumers exist ONLY in the projection layer.
-    for (const allowed of [
-      join("src", "dashboard", "queries.ts"),
-      join("scripts", "serve-status.ts"),
-      join("scripts", "watch-queue-verify.ts"),
-    ]) {
-      expect(readFileSync(join(REPO_ROOT, allowed), "utf8")).toMatch(/readStream/);
-    }
-    // The watcher core takes an INJECTED source — no direct SDK read.
-    const core = readFileSync(join(REPO_ROOT, "src", "watcher", "queue-verify-watcher.ts"), "utf8");
-    expect(core).not.toMatch(/readStream/);
-  });
-
+describe("US-007 stream boundary: the unknown-typed event is shape-checked", () => {
   test("parseEnvelope shape-checks (boundary defense for the unknown-typed stream event)", () => {
     expect(parseEnvelope({ stepId: "s", role: "review", attempt: 1, started_at: "x", outcome: "completed" })).not.toBeNull();
     expect(parseEnvelope(null)).toBeNull();

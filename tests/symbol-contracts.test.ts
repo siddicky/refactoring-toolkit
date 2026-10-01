@@ -28,7 +28,9 @@ import {
   type SymbolTableRow,
 } from "../flows/port-project.js";
 import { configurePortJudgment } from "../flows/runtime-hooks.js";
+import { configureWorkerJudgment } from "../scripts/run-demo.js";
 import { stubContext, type AttributeStores } from "./support/dex-context.js";
+import { clearHarnessEnv } from "./support/env.js";
 import { portFlowFiles } from "./support/port-flow-source.js";
 import { envelopeEvents } from "../flows/steps/envelope.js";
 import type { EnvelopeEvent } from "../src/metrics/types.js";
@@ -474,9 +476,20 @@ describe("C18: one offline factory, and the lane banner names the symbol table",
     expect(live).not.toContain("SCRIPTED");
   });
 
-  test("the worker prints the summary under its JUDGMENT LANE label", () => {
-    const src = readFileSync(join(REPO_ROOT, "scripts", "run-demo.ts"), "utf8");
-    expect(src).toContain(`JUDGMENT LANE: \${judgmentLaneSummary(judgment.kind)}`);
+  test("the worker prints exactly this summary under its JUDGMENT LANE label (run, not grepped)", async () => {
+    const restoreEnv = clearHarnessEnv();
+    const original = console.log;
+    const lines: string[] = [];
+    console.log = (...args: unknown[]) => void lines.push(args.join(" "));
+    try {
+      process.env.TYPESAFE_OFFLINE = "1";
+      const judgment = await configureWorkerJudgment();
+      expect(judgment.kind).toBe("in-memory");
+      expect(lines).toContain(`[worker] JUDGMENT LANE: ${judgmentLaneSummary("in-memory")}`);
+    } finally {
+      console.log = original;
+      restoreEnv();
+    }
   });
 });
 

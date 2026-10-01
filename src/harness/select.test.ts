@@ -19,7 +19,7 @@ import {
   selectHarness,
   type ProbeableHarness,
 } from "./select.js";
-import { clearHarnessEnv } from "../../tests/support/opencode-env.js";
+import { clearHarnessEnv } from "../../tests/support/env.js";
 
 let restoreEnv: () => void;
 beforeEach(() => {

@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { CLI_EXIT } from "../src/cli/args.js";
 import { makeFixtureRepo } from "../src/git/fixture.js";
 import { parseRunDemoArgs } from "../scripts/run-demo.js";
+import { isolatedEnv } from "./support/env.js";
 import { REPO_ROOT } from "./support/paths.js";
 
 const RUN_DEMO = join(REPO_ROOT, "scripts", "run-demo.ts");
@@ -32,19 +33,11 @@ async function tmp(prefix: string): Promise<string> {
 }
 
 async function runDemo(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    // Nothing listens here: a command that gets as far as dex fails with ECONNREFUSED.
-    DEX_SERVER_ADDRESS: "127.0.0.1:1",
-    RECOVER_FILE: undefined,
-    RECOVER_ROUND: undefined,
-    HARNESS: undefined,
-    ...opts.env,
-  };
   const proc = Bun.spawn({
     cmd: [process.execPath, "run", RUN_DEMO, ...args],
     ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
-    env: env as Record<string, string>,
+    // Nothing listens at that dex address: a command that gets as far as dex fails with ECONNREFUSED.
+    env: isolatedEnv({ DEX_SERVER_ADDRESS: "127.0.0.1:1", ...opts.env }),
     stdout: "pipe",
     stderr: "pipe",
   });

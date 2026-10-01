@@ -450,27 +450,55 @@ function portFlows(harness: AgentSessionClient): AnyFlow[] {
  * - TYPESAFE_OFFLINE=1 → deterministic in-memory double (scripted fixtures,
  *   never reported as live usage);
  * - TYPESAFE_API_KEY set → REAL billed Jev client;
- * - no key → in-memory double for the symbol table (BLOCKED-pending-key for
- *   Jev-live + the n≥30 spot-check); verdict-check/prioritize stay NAIVE.
+ * - no key (unset or blank) → in-memory double for the symbol table
+ *   (BLOCKED-pending-key for Jev-live + the n≥30 spot-check); verdict-check/
+ *   prioritize stay NAIVE.
+ * Offline wins over a key: an operator with TYPESAFE_OFFLINE=1 and a key in
+ * .env is never billed. The factories are injectable so the precedence is tested
+ * without a network (tests/jev-wiring.test.ts).
  */
-async function resolveJudgment(): Promise<JudgmentClient> {
+export async function resolveJudgment(
+  deps: {
+    createReal?: (config: { apiKey: string }) => Promise<JudgmentClient>;
+    createOffline?: () => JudgmentClient;
+  } = {},
+): Promise<JudgmentClient> {
+  const createReal = deps.createReal ?? createRealJevClient;
+  const createOffline = deps.createOffline ?? createOfflineJevClient;
   if (isTypesafeOffline()) {
     console.log("[worker] Jev: OFFLINE in-memory double (scripted fixtures)");
-    return createOfflineJevClient();
+    return createOffline();
   }
-  const key = process.env.TYPESAFE_API_KEY?.trim();
-  if (key === undefined || key === "") {
+  const key = envString("TYPESAFE_API_KEY");
+  if (key === undefined) {
     console.log("[worker] Jev: TYPESAFE_API_KEY absent — in-memory double; live Jev + n>=30 spot-check BLOCKED-pending-key");
-    return createOfflineJevClient();
+    return createOffline();
   }
   try {
-    const client = await createRealJevClient({ apiKey: key });
+    const client = await createReal({ apiKey: key });
     console.log("[worker] Jev: REAL client (billed System One calls)");
     return client;
   } catch (err) {
     console.error(`[worker] Jev real client unavailable (${(err as Error).message}) — in-memory double`);
-    return createOfflineJevClient();
+    return createOffline();
   }
+}
+
+/**
+ * The worker's judgment wiring, in one place so it can be tested: resolve the
+ * client, inject it into the flows' ONE judgment seam (flows/runtime-hooks.ts,
+ * which liveJevClient() reads for verdict-check, prioritize and vitest triage),
+ * and say which lane is active in ONE loud startup line. The lane line is
+ * derived from the client that was injected, so it cannot claim REAL while the
+ * steps run naive.
+ */
+export async function configureWorkerJudgment(
+  deps: Parameters<typeof resolveJudgment>[0] = {},
+): Promise<JudgmentClient> {
+  const judgment = await resolveJudgment(deps);
+  configurePortJudgment(judgment);
+  console.log(`[worker] JUDGMENT LANE: ${judgmentLaneSummary(judgment.kind)}`);
+  return judgment;
 }
 
 /**
@@ -1085,6 +1113,26 @@ async function startDashboardChild(
   };
 }
 
+/**
+ * `demo --dashboard`: start the status server next to the run and say where it
+ * is. Without the flag nothing is started, and it never throws (the flow is
+ * already running when this is called). `launch` is injectable for tests.
+ */
+export async function maybeLaunchDashboard(
+  enabled: boolean,
+  dir: string,
+  launch: (dir: string) => Promise<DashboardLaunch> = launchDashboard,
+): Promise<void> {
+  if (!enabled) return;
+  let message: string;
+  try {
+    message = (await launch(dir)).message;
+  } catch (err) {
+    message = `dashboard not started: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  console.log(`[demo] dashboard: ${message}`);
+}
+
 async function startDemo(options: DemoOptions): Promise<number> {
   const config = dexConfigFromEnv();
   const inputs = resolveDemoInputs(options);
@@ -1122,11 +1170,9 @@ async function startDemo(options: DemoOptions): Promise<number> {
     };
     const runId = await runtime.client.startFlow(flow, flowId, input);
     console.log(`[demo] started flowId=${flowId} runId=${runId} files=${files.join(",")} epoch=${epoch}`);
-    // Optional live-dashboard hook (worker-5, plan v6.1), OPT-IN via --dashboard:
-    // launches the read-only status server next to the run; never fatal.
-    if (options.dashboard) {
-      console.log(`[demo] dashboard: ${(await launchDashboard(dir)).message}`);
-    }
+    // Optional live-dashboard hook, OPT-IN via --dashboard: the read-only status
+    // server next to the run; never fatal.
+    await maybeLaunchDashboard(options.dashboard, dir);
     if (options.startOnly) return 0;
     return await waitAndReport(runtime, flowId, waitMinutes, "demo");
   } finally {
@@ -1394,8 +1440,7 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
       const harness = await pickHarness(options.harness);
       const flows = options.flows === "port" ? portFlows(harness) : probeFlows();
       configureProbe(harness);
-      const judgment = await resolveJudgment();
-      configurePortJudgment(judgment);
+      await configureWorkerJudgment();
       configurePortFault(fault);
       // US-003 Tier-1 turn-health (evidence-only, fail-open): a real client
       // when TYPESAFE_API_KEY is present, the scripted in-memory double under
@@ -1407,16 +1452,6 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
         turnHealth === null
           ? "[worker] turn-health: Tier-1 unavailable — ambiguous turns run with no diagnosis (fail-open)"
           : "[worker] turn-health: Tier-1 assessor configured (evidence-only; control flow never reads it)",
-      );
-      // US-007 (dex-sdk review, vertical-slice wiring fix): ONE loud startup
-      // line stating which judgment lane is active. The lane rides the client
-      // resolveJudgment configured above; flows/port-project.ts liveJevClient()
-      // resolves every consumer (verdict-check, prioritize, vitest triage)
-      // from that SAME seam — the old never-called configurePortJevLive
-      // second seam is gone, so the log can no longer claim REAL while the
-      // steps silently run naive.
-      console.log(
-        `[worker] JUDGMENT LANE: ${judgmentLaneSummary(judgment.kind)}`,
       );
       const handle = await startDexWorker(flows, config);
       // US-002 stream publish (runner-side deviation, see envelope.ts): the

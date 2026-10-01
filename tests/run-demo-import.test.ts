@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { expandFilesArg, makeFixtureRepo, parseRunDemoArgs } from "../scripts/run-demo.js";
+import { isolatedEnv } from "./support/env.js";
 import { REPO_ROOT } from "./support/paths.js";
 
 const RUN_DEMO = join(REPO_ROOT, "scripts", "run-demo.ts");
@@ -65,7 +66,7 @@ describe("running run-demo.ts directly still executes main()", () => {
     tmpDirs.push(tmpRoot);
     const proc = Bun.spawn({
       cmd: [process.execPath, "run", RUN_DEMO, "git-selftest"],
-      env: { ...process.env, TMPDIR: tmpRoot },
+      env: isolatedEnv({ TMPDIR: tmpRoot }),
       stdout: "pipe",
       stderr: "pipe",
     });

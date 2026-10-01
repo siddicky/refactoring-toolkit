@@ -24,6 +24,7 @@ import { discoverChildFlowIds, flowFactsFromSummary } from "../src/metrics/colle
 import { extractDispatchEntries } from "../src/metrics/dispatch-anchor.js";
 import eventStreamRaw from "../src/metrics/fixtures/event-stream-run-a.json" with { type: "json" };
 import historyRaw from "../src/metrics/fixtures/dex-history-run-a.json" with { type: "json" };
+import { isolatedEnv } from "./support/env.js";
 import { REPO_ROOT } from "./support/paths.js";
 
 const tmp = mkdtempSync(join(tmpdir(), "render-metrics-test-"));
@@ -298,7 +299,7 @@ async function runDriver(
   const proc = Bun.spawn(["bun", SCRIPT, ...args], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, DEXCLI_BIN: "/nonexistent/dexcli", ...env },
+    env: isolatedEnv({ DEXCLI_BIN: "/nonexistent/dexcli", ...env }),
   });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),

@@ -29,7 +29,7 @@ import {
   promptCallTimeoutMs,
   promptWaitMs,
 } from "./opencode.js";
-import { clearHarnessEnv } from "../../tests/support/opencode-env.js";
+import { clearHarnessEnv } from "../../tests/support/env.js";
 
 let restoreEnv: () => void;
 let restoreConsole: () => void;

@@ -80,15 +80,8 @@ describe("INT-5: pickHarness requireReal at every recovery call site", () => {
     expect(r.stdout).not.toContain("aborted 0 foreign session(s)");
   }, 60_000);
 
-  test("every pickHarness call site is accounted for: two recovery sites require the real harness, the worker may fall back", () => {
-    const source = readFileSync(RUN_DEMO, "utf8");
-    const sites = [...source.matchAll(/await pickHarness\(([^)]*\)?[^)]*)\)/g)].map((m) => m[1] ?? "");
-    const real = sites.filter((s) => s.includes("requireReal: true"));
-    const plain = sites.filter((s) => !s.includes("requireReal"));
-    expect(real).toHaveLength(2); // recover (HARNESS env) + recover-port (--harness)
-    expect(plain).toHaveLength(1); // worker start: auto may fall back, loudly
-    expect(plain[0]).toContain("options.harness");
-  });
+  // That these are the only two recovery call sites of pickHarness, and that the
+  // worker's own call may fall back, is pinned in tests/architecture-guards.test.ts.
 });
 
 describe("INT-5: the logged dashboard URL is the port serve-status binds", () => {

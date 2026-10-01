@@ -36,7 +36,7 @@ import {
   type EnvelopeStreamMessage,
 } from "../flows/steps/envelope.js";
 import { stagingContext } from "./support/dex-context.js";
-import { clearHarnessEnv } from "./support/opencode-env.js";
+import { clearHarnessEnv } from "./support/env.js";
 
 // The harness reads OPENCODE_PROMPT_* at call time and lane routing reads
 // OPENCODE_*: start every test from a clean env regardless of the operator's

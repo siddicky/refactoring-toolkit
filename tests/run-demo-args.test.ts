@@ -20,6 +20,7 @@ import { PROBE_LONG_STEP_OPTIONS, PROBE_ROUND_OPTIONS } from "../scripts/probe-f
 import { RUN_DEMO_CLI, RUN_DEMO_EXIT, parseRunDemoArgs } from "../scripts/run-demo.js";
 import { CLI_EXIT, commandUsageText, programUsageText } from "../src/cli/args.js";
 import { parseHarnessChoice } from "../src/harness/select.js";
+import { isolatedEnv } from "./support/env.js";
 import { REPO_ROOT } from "./support/paths.js";
 
 const RUN_DEMO = join(REPO_ROOT, "scripts", "run-demo.ts");
@@ -388,7 +389,7 @@ describe("the real CLI", () => {
   async function run(args: string[]) {
     const proc = Bun.spawn([process.execPath, "run", RUN_DEMO, ...args], {
       // A dex address nothing listens on: a command that got past the parse and tried dex would show ECONNREFUSED.
-      env: { ...process.env, DEX_SERVER_ADDRESS: "127.0.0.1:1" },
+      env: isolatedEnv({ DEX_SERVER_ADDRESS: "127.0.0.1:1" }),
       stdout: "pipe",
       stderr: "pipe",
     });

@@ -23,6 +23,7 @@ import {
 import { git } from "../src/git/exec.js";
 import { makeFixtureRepo } from "../src/git/fixture.js";
 
+import { isolatedEnv } from "./support/env.js";
 import { REPO_ROOT } from "./support/paths.js";
 const FIXTURES = join(REPO_ROOT, "fixtures");
 const RUN_DEMO = join(REPO_ROOT, "scripts", "run-demo.ts");
@@ -221,7 +222,7 @@ describe("demo CLI fails before contacting dex or creating anything", () => {
     const proc = Bun.spawn({
       cmd: [process.execPath, "run", RUN_DEMO, "demo", ...args],
       // A dex address nothing listens on: reaching startFlow would show up as ECONNREFUSED.
-      env: { ...process.env, DEX_SERVER_ADDRESS: "127.0.0.1:1" },
+      env: isolatedEnv({ DEX_SERVER_ADDRESS: "127.0.0.1:1" }),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -245,7 +246,7 @@ describe("demo CLI fails before contacting dex or creating anything", () => {
     const dir = join(parent, "proj");
     const proc = Bun.spawn({
       cmd: [process.execPath, "run", RUN_DEMO, "demo", "--dir", dir, "--init-fixture", "--dashboard"],
-      env: { ...process.env, DEX_SERVER_ADDRESS: "127.0.0.1:1", STATUS_PORT: "abc" },
+      env: isolatedEnv({ DEX_SERVER_ADDRESS: "127.0.0.1:1", STATUS_PORT: "abc" }),
       stdout: "pipe",
       stderr: "pipe",
     });

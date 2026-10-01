@@ -15,17 +15,15 @@
  *    path is protected either way.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { DexServiceError, ErrorSubStatus } from "@superdurable/dex";
 import { status } from "@grpc/grpc-js";
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
 import { configurePortJudgment } from "../flows/runtime-hooks.js";
+import { configureWorkerJudgment } from "../scripts/run-demo.js";
 import { stagingContext, stubContext } from "./support/dex-context.js";
-import { portFlowSource } from "./support/port-flow-source.js";
+import { clearHarnessEnv } from "./support/env.js";
 import {
   liveJevClient,
   markerKeyOf,
@@ -45,8 +43,6 @@ import {
   createInMemoryJevClient,
   type JudgmentClient,
 } from "../src/typesafe/client.js";
-
-import { REPO_ROOT } from "./support/paths.js";
 
 // ---------------------------------------------------------------------------
 // 1: wiring — key present -> the REAL client reaches the consumption sites;
@@ -177,25 +173,128 @@ describe("Jev live wiring (US-007): single seam to all three consumers", () => {
     expect(calls).toEqual({ verdictCheckCalls: 0, prioritizeCalls: 0 });
   });
 
-  test("the vitest-triage site (QueueVerifyStep -> classifyVitestRecords) resolves through liveJevClient()", () => {
-    // QueueVerifyStep shells out to tsc/vitest, so it is not executed here;
-    // the call site is pinned narrowly. The dead second seam is GONE (the
-    // drift cannot regrow silently) — code-shape checks: comments may still
-    // recount the history.
-    const src = portFlowSource();
-    const callSites = src.split("\n").filter((l) => /\bclassifyVitestRecords\(/.test(l) && !l.includes("function classifyVitestRecords"));
-    expect(callSites.length).toBe(1);
-    expect(callSites[0]).toContain("liveJevClient()");
-    expect(src.match(/let PORT_JEV_LIVE\b/)).toBeNull();
-    expect(src.match(/function configurePortJevLive\b/)).toBeNull();
-    expect(src.match(/function portJevLiveClient\b/)).toBeNull();
+  // The vitest-triage call site (QueueVerifyStep shells out to tsc/vitest, so it
+  // cannot run here) is pinned in tests/architecture-guards.test.ts.
+});
+
+// ---------------------------------------------------------------------------
+// 1b: the worker's wiring, run for real (B30 / C78): which client reaches the
+//     flows' seam for each environment, and the lane line that says so. The
+//     precedence "TYPESAFE_OFFLINE wins over a key" used to be pinned only by
+//     grepping run-demo.ts for variable names.
+// ---------------------------------------------------------------------------
+
+describe("worker judgment wiring (configureWorkerJudgment): the environment decides the lane", () => {
+  let restoreEnv: () => void;
+  let logs: string[] = [];
+  let errors: string[] = [];
+  const original = { log: console.log, error: console.error };
+
+  beforeEach(() => {
+    restoreEnv = clearHarnessEnv();
+    logs = [];
+    errors = [];
+    console.log = (...args: unknown[]) => void logs.push(args.join(" "));
+    console.error = (...args: unknown[]) => void errors.push(args.join(" "));
+  });
+  afterEach(() => {
+    console.log = original.log;
+    console.error = original.error;
+    restoreEnv();
+    configurePortJudgment(createInMemoryJevClient());
   });
 
-  test("the worker wires configurePortJudgment from resolveJudgment and announces the lane", () => {
-    const src = readFileSync(join(REPO_ROOT, "scripts", "run-demo.ts"), "utf8");
-    expect(src).toContain("const judgment = await resolveJudgment();");
-    expect(src).toContain("configurePortJudgment(judgment);");
-    expect(src).toContain("JUDGMENT LANE:");
+  /** A real-kind client that fails loudly if anything calls it, and counts how it was created. */
+  function fakeReal(): { deps: Parameters<typeof configureWorkerJudgment>[0]; created: Array<{ apiKey: string }>; client: JudgmentClient } {
+    const client: JudgmentClient = {
+      kind: "real",
+      systemOne: (() => {
+        throw new Error("no network in unit tests");
+      }) as JudgmentClient["systemOne"],
+    };
+    const created: Array<{ apiKey: string }> = [];
+    return {
+      client,
+      created,
+      deps: {
+        createReal: async (config) => {
+          created.push(config);
+          return client;
+        },
+      },
+    };
+  }
+  const laneLine = (): string => logs.find((l) => l.startsWith("[worker] JUDGMENT LANE:")) ?? "";
+
+  test("TYPESAFE_OFFLINE wins over a key: the scripted double is configured, the real client is never even created", async () => {
+    process.env.TYPESAFE_OFFLINE = "1";
+    process.env.TYPESAFE_API_KEY = "sk-live";
+    const { deps, created } = fakeReal();
+    const judgment = await configureWorkerJudgment(deps);
+    expect(created).toEqual([]);
+    expect(judgment.kind).toBe("in-memory");
+    expect(liveJevClient()).toBeUndefined(); // verdict-check, prioritize and triage stay naive
+    expect(logs.some((l) => l.includes("Jev: OFFLINE in-memory double"))).toBe(true);
+    expect(laneLine()).toContain("NAIVE");
+    expect(laneLine()).not.toContain("LIVE JEV");
+  });
+
+  test("a key alone: the real client is created with the (trimmed) key and reaches every consumer through the seam", async () => {
+    process.env.TYPESAFE_API_KEY = "  sk-live  ";
+    const { deps, created, client } = fakeReal();
+    const judgment = await configureWorkerJudgment(deps);
+    expect(created).toEqual([{ apiKey: "sk-live" }]);
+    expect(judgment).toBe(client);
+    expect(liveJevClient()).toBe(client);
+    expect(logs.some((l) => l.includes("Jev: REAL client"))).toBe(true);
+    expect(laneLine()).toContain("LIVE JEV");
+  });
+
+  test("no key: the scripted double, no real client, and the log says live Jev is blocked pending a key", async () => {
+    const { deps, created } = fakeReal();
+    const judgment = await configureWorkerJudgment(deps);
+    expect(created).toEqual([]);
+    expect(judgment.kind).toBe("in-memory");
+    expect(liveJevClient()).toBeUndefined();
+    expect(logs.some((l) => l.includes("TYPESAFE_API_KEY absent"))).toBe(true);
+    expect(laneLine()).toContain("NAIVE");
+  });
+
+  test("a blank key (an empty `.env` line) is no key", async () => {
+    for (const blank of ["", "   "]) {
+      process.env.TYPESAFE_API_KEY = blank;
+      const { deps, created } = fakeReal();
+      expect((await configureWorkerJudgment(deps)).kind).toBe("in-memory");
+      expect(created).toEqual([]);
+    }
+  });
+
+  test("TYPESAFE_OFFLINE=0 or false is online: a key then selects the real client", async () => {
+    for (const off of ["0", "false"]) {
+      process.env.TYPESAFE_OFFLINE = off;
+      process.env.TYPESAFE_API_KEY = "sk-live";
+      const { deps, created } = fakeReal();
+      expect((await configureWorkerJudgment(deps)).kind).toBe("real");
+      expect(created).toHaveLength(1);
+    }
+  });
+
+  test("a real client that cannot be created degrades to the double, loudly, and the lane line says NAIVE", async () => {
+    process.env.TYPESAFE_API_KEY = "sk-live";
+    const judgment = await configureWorkerJudgment({
+      createReal: async () => {
+        throw new Error("sdk missing");
+      },
+    });
+    expect(judgment.kind).toBe("in-memory");
+    expect(errors.some((l) => l.includes("Jev real client unavailable (sdk missing)"))).toBe(true);
+    expect(laneLine()).toContain("NAIVE");
+  });
+
+  test("the lane line is derived from the client that was injected: exactly one, whatever the environment", async () => {
+    process.env.TYPESAFE_API_KEY = "sk-live";
+    await configureWorkerJudgment(fakeReal().deps);
+    expect(logs.filter((l) => l.startsWith("[worker] JUDGMENT LANE:"))).toHaveLength(1);
   });
 });
 

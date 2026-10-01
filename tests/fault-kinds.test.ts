@@ -12,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { FAULT_KINDS, faultKindsUsage, faultSpecProblem } from "../flows/runtime-hooks.js";
 import { CLI_EXIT } from "../src/cli/args.js";
 import { productionSources, readSource } from "./support/source-files.js";
+import { isolatedEnv } from "./support/env.js";
 import { REPO_ROOT } from "./support/paths.js";
 import { join } from "node:path";
 
@@ -69,7 +70,7 @@ describe("run-demo worker refuses a fault that cannot fire (exit 64, nothing sta
     const proc = Bun.spawn({
       cmd: [process.execPath, "run", join(REPO_ROOT, "scripts", "run-demo.ts"), "worker", ...args],
       // Nothing listens here, and a worker that did start would connect to it.
-      env: { ...process.env, PORTING_KIT_FAULT: "", DEX_SERVER_ADDRESS: "127.0.0.1:1", ...env },
+      env: isolatedEnv({ DEX_SERVER_ADDRESS: "127.0.0.1:1", ...env }),
       stdout: "pipe",
       stderr: "pipe",
     });

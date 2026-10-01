@@ -9,15 +9,15 @@
  * serving the first run's repository.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { dashboardPort, launchDashboard, probePortInUse } from "../scripts/run-demo.js";
-import { REPO_ROOT } from "./support/paths.js";
+import { dashboardPort, launchDashboard, maybeLaunchDashboard, probePortInUse } from "../scripts/run-demo.js";
+import { isolatedEnv } from "./support/env.js";
 
 const tmpDirs: string[] = [];
 const servers: Server[] = [];
@@ -101,7 +101,7 @@ describe("launchDashboard", () => {
     logs.push(logPath);
     const res = await launchDashboard("/some/repo", {
       serveStatusPath: serveStatus,
-      env: { ...process.env, STATUS_PORT: String(port) },
+      env: isolatedEnv({ STATUS_PORT: String(port) }),
     });
     expect(res.status).toBe("in-use");
     expect(res.message).toContain("already in use");
@@ -117,7 +117,7 @@ describe("launchDashboard", () => {
     logs.push(logPath);
     const res = await launchDashboard("/some/repo", {
       serveStatusPath: serveStatus,
-      env: { ...process.env, STATUS_PORT: String(port), PORT: "1" }, // generic PORT must not leak through
+      env: isolatedEnv({ STATUS_PORT: String(port), PORT: "1" }), // generic PORT must not leak through
     });
     if (res.status === "started") pids.push(res.pid);
     expect(res.status).toBe("started");
@@ -147,7 +147,7 @@ describe("launchDashboard", () => {
     logs.push(logPath);
     const res = await launchDashboard("/some/repo", {
       serveStatusPath: serveStatus,
-      env: { ...process.env, STATUS_PORT: String(port) },
+      env: isolatedEnv({ STATUS_PORT: String(port) }),
       readyTimeoutMs: 5_000,
     });
     expect(res.status).toBe("failed");
@@ -166,7 +166,7 @@ describe("launchDashboard", () => {
     for (const bad of ["abc", "70000"]) {
       const res = await launchDashboard("/some/repo", {
         serveStatusPath: serveStatus,
-        env: { ...process.env, STATUS_PORT: bad },
+        env: isolatedEnv({ STATUS_PORT: bad }),
       });
       expect(res.status).toBe("error");
       expect(res.message).toContain("dashboard not started");
@@ -182,7 +182,7 @@ describe("launchDashboard", () => {
     try {
       const res = await launchDashboard("/some/repo", {
         serveStatusPath: serveStatus,
-        env: { ...process.env, STATUS_PORT: String(port) },
+        env: isolatedEnv({ STATUS_PORT: String(port) }),
       });
       expect(res.status).toBe("error");
       expect(res.message).toContain("dashboard not started");
@@ -194,18 +194,41 @@ describe("launchDashboard", () => {
   });
 });
 
-describe("demo only launches the dashboard on request", () => {
-  test("startDemo reaches launchDashboard only behind --dashboard and never spawns serve-status itself", () => {
-    const src = readFileSync(join(REPO_ROOT, "scripts", "run-demo.ts"), "utf8");
-    const start = src.indexOf("async function startDemo(");
-    const end = src.indexOf("\n}\n", start);
-    const body = src.slice(start, end);
-    expect(body).toContain("if (options.dashboard)");
-    expect(body).toContain("launchDashboard(dir)");
-    expect(body).not.toContain("spawn(");
-    expect(body).not.toContain("serve-status");
-    // the launch sits inside the --dashboard guard, before the --start-only return
-    expect(body.indexOf("options.dashboard")).toBeLessThan(body.indexOf("launchDashboard(dir)"));
-    expect(body.indexOf("launchDashboard(dir)")).toBeLessThan(body.indexOf("options.startOnly"));
+describe("demo only launches the dashboard on request (maybeLaunchDashboard)", () => {
+  let lines: string[] = [];
+  const originalLog = console.log;
+  beforeEach(() => {
+    lines = [];
+    console.log = (...args: unknown[]) => void lines.push(args.join(" "));
+  });
+  afterEach(() => {
+    console.log = originalLog;
+  });
+
+  test("without --dashboard nothing is launched and nothing is printed", async () => {
+    let launches = 0;
+    await maybeLaunchDashboard(false, "/some/repo", async () => {
+      launches += 1;
+      return { status: "missing", message: "never" };
+    });
+    expect(launches).toBe(0);
+    expect(lines).toEqual([]);
+  });
+
+  test("with --dashboard it launches for the given repository and prints where it is", async () => {
+    const dirs: string[] = [];
+    await maybeLaunchDashboard(true, "/some/repo", async (dir) => {
+      dirs.push(dir);
+      return { status: "in-use", port: 4646, message: "127.0.0.1:4646 is already in use" };
+    });
+    expect(dirs).toEqual(["/some/repo"]);
+    expect(lines).toEqual(["[demo] dashboard: 127.0.0.1:4646 is already in use"]);
+  });
+
+  test("a launcher that throws (a contract violation) still cannot fail the demo: never fatal", async () => {
+    await maybeLaunchDashboard(true, "/some/repo", async () => {
+      throw new Error("boom");
+    });
+    expect(lines).toEqual(["[demo] dashboard: dashboard not started: boom"]);
   });
 });
