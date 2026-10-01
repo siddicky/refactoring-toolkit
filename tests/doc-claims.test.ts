@@ -374,6 +374,8 @@ describe("doc claims: the fixed verification stack", () => {
   test("the runner reference states the vitest pin and the test directories the bootstrap uses", () => {
     expect(BOOTSTRAP_TEST_GLOBS.map((g) => g.split("/")[0])).toEqual(["test", "tests"]);
     expect(missingFrom(runner, [BOOTSTRAP_VITEST_PIN, ...BOOTSTRAP_TEST_GLOBS])).toEqual([]);
+    // B32: discovery and the vitest include are the same pair, and the doc says what that excludes.
+    expect(missingFrom(runner, ["only `*.test.ts`", "a `*.test.tsx` is neither found nor run"])).toEqual([]);
   });
 
   test("the toolkit's TypeScript version is the one the runner reference names", () => {

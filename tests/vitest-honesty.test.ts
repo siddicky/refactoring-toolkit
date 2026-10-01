@@ -42,6 +42,7 @@ import {
   parseVitestSummary,
   type VitestFailureRecord,
 } from "../src/queues/vitest-queue.js";
+import { BOOTSTRAP_TEST_GLOBS } from "../flows/port/bootstrap.js";
 import { findCommitByOpId } from "../src/git/worktree.js";
 import { git } from "../src/git/exec.js";
 import { renderReport } from "../src/metrics/render.js";
@@ -393,6 +394,46 @@ Error: Failed to load url ./php-semantics
       await writeFile(join(root, "tests", "helper.ts"), "not a test\n");
       const files = await findVitestTestFiles(root);
       expect(files).toEqual(["test/support/a.test.ts", "tests/b.test.ts"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("B32: discovery and the scaffolded vitest `include` agree: a counted file is a file vitest runs, and `.test.tsx` is neither", async () => {
+    const root = join(tmpdir(), `b32-testfiles-${Date.now()}`);
+    try {
+      await mkdir(join(root, "test", "nested"), { recursive: true });
+      await mkdir(join(root, "tests"), { recursive: true });
+      await mkdir(join(root, "src"), { recursive: true });
+      for (const f of [
+        "test/a.test.ts",
+        "test/nested/b.test.ts",
+        "tests/c.test.ts",
+        "test/d.test.tsx", // discovery used to count this, the include never matched it
+        "tests/e.spec.ts",
+        "tests/helper.ts",
+        "src/f.test.ts", // colocated: outside the directories the scaffold's config looks in
+      ]) {
+        await writeFile(join(root, f), "x\n");
+      }
+      const discovered = await findVitestTestFiles(root);
+      const included = new Set<string>();
+      for (const glob of BOOTSTRAP_TEST_GLOBS) {
+        for await (const match of new Bun.Glob(glob).scan({ cwd: root })) included.add(match);
+      }
+      expect(discovered).toEqual([...included].sort());
+      expect(discovered).toEqual(["test/a.test.ts", "test/nested/b.test.ts", "tests/c.test.ts"]);
+
+      // A checkout whose only test is a .test.tsx has NO test files: an honest not-run, not a crash reading.
+      const onlyTsx = join(root, "only-tsx");
+      await mkdir(join(onlyTsx, "test"), { recursive: true });
+      await writeFile(join(onlyTsx, "test", "x.test.tsx"), "x\n");
+      const tsxFiles = await findVitestTestFiles(onlyTsx);
+      expect(tsxFiles).toEqual([]);
+      expect(vitestOutcomeFromRun(true, tsxFiles, null).vitestRun).toEqual({
+        kind: "not-run",
+        reason: "no test files in the integrated checkout",
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

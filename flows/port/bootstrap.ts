@@ -13,7 +13,7 @@ import { join } from "node:path";
 
 import { execTool } from "../../src/exec.js";
 import { commitLeaseChanges, findCommitByOpId, isWorktreeClean } from "../../src/git/worktree.js";
-import { pathExists } from "./queue-tools.js";
+import { pathExists, VITEST_TEST_DIRS, VITEST_TEST_SUFFIX } from "./queue-tools.js";
 import { stripDotSlash } from "../../src/file-keys.js";
 
 /** Sole-committer op-ID for the bootstrap commit (dedup across kill/replay). */
@@ -47,7 +47,7 @@ export interface BootstrapPlan {
 }
 
 /** Where the scaffold's vitest config looks for tests; the scaffold tsconfig includes the same directories. */
-export const BOOTSTRAP_TEST_GLOBS: readonly string[] = ["test/**/*.test.ts", "tests/**/*.test.ts"];
+export const BOOTSTRAP_TEST_GLOBS: readonly string[] = VITEST_TEST_DIRS.map((dir) => `${dir}/**/*${VITEST_TEST_SUFFIX}`);
 
 /** tsconfig `include` globs every scaffold covers, whatever the source map says. */
 const DEFAULT_TSCONFIG_INCLUDE: readonly string[] = [

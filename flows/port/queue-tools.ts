@@ -71,7 +71,18 @@ export async function pathExists(p: string): Promise<boolean> {
   }
 }
 
-/** The deterministic vitest runner artifacts the bootstrap writes. */
+/**
+ * Where the scaffolded vitest config looks for tests: these directories, files
+ * named `*.test.ts`. Discovery below and the config's `include` (bootstrap.ts
+ * BOOTSTRAP_TEST_GLOBS) both come from this pair, so a file the queue counts as
+ * a test is a file vitest runs. (`.test.tsx` was counted by discovery but never
+ * included, so a lone `.test.tsx` read as a crash and a mixed set reported
+ * `ran N/N` with the tsx tests silently unrun: B32.)
+ */
+export const VITEST_TEST_DIRS: readonly string[] = ["test", "tests"];
+export const VITEST_TEST_SUFFIX = ".test.ts";
+
+/** Test files the integrated checkout's vitest will run (VITEST_TEST_DIRS, VITEST_TEST_SUFFIX). */
 export async function findVitestTestFiles(integrationWorktreePath: string): Promise<string[]> {
   const out: string[] = [];
   const walk = async (abs: string, rel: string): Promise<void> => {
@@ -79,12 +90,12 @@ export async function findVitestTestFiles(integrationWorktreePath: string): Prom
     for (const e of entries) {
       if (e.isDirectory()) {
         await walk(join(abs, e.name), `${rel}/${e.name}`);
-      } else if (e.isFile() && /\.test\.tsx?$/.test(e.name)) {
+      } else if (e.isFile() && e.name.endsWith(VITEST_TEST_SUFFIX)) {
         out.push(`${rel}/${e.name}`);
       }
     }
   };
-  for (const dir of ["test", "tests"]) {
+  for (const dir of VITEST_TEST_DIRS) {
     const root = join(integrationWorktreePath, dir);
     if (await pathExists(root)) await walk(root, dir);
   }
