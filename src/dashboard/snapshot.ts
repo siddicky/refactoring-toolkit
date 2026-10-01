@@ -45,7 +45,7 @@ import type {
 class AsyncTtlCache<T> {
   readonly #ttlMs: number;
   readonly #clock: () => number;
-  #value: { value: T; at: number } | null = null;
+  #value: { value: T; at: number; final: boolean } | null = null;
   #inflight: Promise<T> | null = null;
 
   constructor(ttlMs: number, clock: () => number = Date.now) {
@@ -53,15 +53,19 @@ class AsyncTtlCache<T> {
     this.#clock = clock;
   }
 
-  get(load: () => Promise<T>): Promise<T> {
-    if (this.#value !== null && this.#clock() - this.#value.at <= this.#ttlMs) {
+  /**
+   * `isFinal(value)` marks a loaded value that can never change (a good read of
+   * a finished flow): it is served until the entry is evicted, not for one TTL.
+   */
+  get(load: () => Promise<T>, isFinal: (value: T) => boolean = () => false): Promise<T> {
+    if (this.#value !== null && (this.#value.final || this.#clock() - this.#value.at <= this.#ttlMs)) {
       return Promise.resolve(this.#value.value);
     }
     if (this.#inflight !== null) return this.#inflight;
     const started = this.#clock();
     const promise = load().then(
       (value) => {
-        this.#value = { value, at: started };
+        this.#value = { value, at: started, final: isFinal(value) };
         this.#inflight = null;
         return value;
       },
@@ -74,6 +78,14 @@ class AsyncTtlCache<T> {
     return promise;
   }
 }
+
+/**
+ * A flow in one of these statuses will not change again, so a good state or
+ * history read of it is kept for as long as the flow stays selected. The whole
+ * headline run is selected (flow-select.ts), and without this every finished
+ * child would be re-queried every poll.
+ */
+const FINISHED_STATUS = /COMPLETED|FAILED|TERMINATED|CANCEL/i;
 
 /** Not shorter than the client poll interval (a shorter TTL never hits for one client). */
 export const STATE_TTL_MS = CLIENT_POLL_MS + 500;
@@ -130,6 +142,9 @@ export function createSnapshotter(options: SnapshotOptions): Snapshotter {
     }
   }
 
+  /** The flows the last SUCCESSFUL search listed (empty until one succeeds). */
+  let lastKnownFlows: DexFlowSummaryWire[] = [];
+
   const snapshot = async function snapshot(): Promise<DashboardStateView> {
     const stream = getStream();
     const search = await searchCache.get(() => dex.searchFlows());
@@ -137,13 +152,19 @@ export function createSnapshotter(options: SnapshotOptions): Snapshotter {
     let dexError: string | null = null;
     if (search.ok) {
       flows = (search.value.flows ?? []).filter((f) => flowOfInterest(f.flowType ?? ""));
+      lastKnownFlows = flows;
     } else {
       dexError = search.error;
+      // Stale-while-error: with dex down, keep the last flows it listed. The
+      // headline needs its flow to say "killed (dex down)", which is the state
+      // this outage is: an empty list read "no port flow found" instead (B20).
+      flows = lastKnownFlows;
     }
 
     // Priority selection (parents first, children under their own cap); each
     // selected flow gets state + history queries.
     const selected = selectFlows(flows, { maxFlows: cfg.maxFlows, maxChildFlows: cfg.maxChildFlows });
+    const finished = (f: DexFlowSummaryWire): boolean => FINISHED_STATUS.test(f.flowStatus ?? "");
     evictUnselected(new Set(selected.map((f) => f.flowId)));
 
     // US-007: follow the selection with the stream subscriber; its buffered
@@ -159,13 +180,25 @@ export function createSnapshotter(options: SnapshotOptions): Snapshotter {
       Promise.all(
         selected.map(
           async (f) =>
-            [f.flowId, await cacheFor(stateCacheByFlow, f.flowId, STATE_TTL_MS).get(() => dex.flowState(f.flowId))] as const,
+            [
+              f.flowId,
+              await cacheFor(stateCacheByFlow, f.flowId, STATE_TTL_MS).get(
+                () => dex.flowState(f.flowId),
+                (res) => res.ok && finished(f),
+              ),
+            ] as const,
         ),
       ),
       Promise.all(
         selected.map(
           async (f) =>
-            [f.flowId, await cacheFor(historyCacheByFlow, f.flowId, HISTORY_TTL_MS).get(() => dex.flowHistory(f.flowId))] as const,
+            [
+              f.flowId,
+              await cacheFor(historyCacheByFlow, f.flowId, HISTORY_TTL_MS).get(
+                () => dex.flowHistory(f.flowId),
+                (res) => res.ok && finished(f),
+              ),
+            ] as const,
         ),
       ),
     ]);

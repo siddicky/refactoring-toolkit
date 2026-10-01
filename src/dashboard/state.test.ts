@@ -16,6 +16,7 @@ import {
   burnDownSeries,
   deriveGridRows,
   feedFromState,
+  feedFromStreamMessages,
   headlineKillEvents,
   killTimeline,
   lifecycleHeadline,
@@ -32,6 +33,7 @@ import {
   readBurnDownFile,
   readKillEventsFile,
 } from "./queries.js";
+import { PORT_FLOW_STEPS } from "../metrics/dispatch-anchor.js";
 import type {
   DexFlowSummaryWire,
   DexHistoryEventWire,
@@ -165,6 +167,14 @@ describe("stageLabel", () => {
 
   test("passes unknown step types through", () => {
     expect(stageLabel("ProbeLongSleep")).toBe("ProbeLongSleep");
+  });
+
+  test("C49: every model, support and record step of the flow has a label, by step id and by step type", () => {
+    // Markers (the `...Start` mini-steps) share their target's stepId, so they are covered by it.
+    for (const spec of PORT_FLOW_STEPS.filter((s) => s.kind !== "marker")) {
+      expect([spec.stepId, stageLabel(spec.stepId) !== spec.stepId]).toEqual([spec.stepId, true]);
+      expect([spec.stepType, stageLabel(spec.stepType)]).toEqual([spec.stepType, stageLabel(spec.stepId)]);
+    }
   });
 });
 
@@ -790,7 +800,10 @@ describe("buildDashboardState", () => {
       );
     }
 
-    expect(state.burnDown.some((s) => s.queue === "tsc" && s.points.length >= 3)).toBe(true);
+    // The run's own samples win; the BURN_DOWN_FILES samples are the offline fallback (B18).
+    expect(state.burnDown.map((s) => [s.queue, s.points.map((p) => [p.iteration, p.errorCount])])).toEqual([
+      ["tsc", [[1, 3]]],
+    ]);
     expect(state.commits[0]?.opId).toBe("src/Money.php#1");
     expect(state.killTimeline).toHaveLength(2);
   });
@@ -1322,5 +1335,241 @@ describe("kill-event contract B: fired / flow_run_id (C59)", () => {
       ["intent", null],
       ["completed", false],
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B16 / B21: headline kill overlay
+// ---------------------------------------------------------------------------
+
+describe("B16: post-kill activity in a SubFlow child flips the headline to resumed", () => {
+  const args = { filesDone: 1, filesTotal: 5, dexAvailable: true };
+  const kills = [killEvent({ utc: "2026-09-26T10:30:00Z" })];
+
+  test("the parent waits on the wave join and emits nothing; its children resume and do", () => {
+    const child = { flowId: "SubFlow:cx-5-PpWaveJoin-1-0", startedAt: "2026-09-26T10:35:00Z" } as FeedEntry;
+    const view = lifecycleHeadlineView({ ...args, flow: flowView(), killEvents: kills, feed: [child] });
+    expect(view.state).toBe("resumed");
+  });
+
+  test("a child of ANOTHER run does not flip it, and neither does pre-kill activity", () => {
+    const other = { flowId: "SubFlow:cx-6-PpWaveJoin-1-0", startedAt: "2026-09-26T10:35:00Z" } as FeedEntry;
+    const before = { flowId: "SubFlow:cx-5-PpWaveJoin-1-0", startedAt: "2026-09-26T10:20:00Z" } as FeedEntry;
+    expect(lifecycleHeadlineView({ ...args, flow: flowView(), killEvents: kills, feed: [other, before] }).state).toBe("awaiting-resume");
+    // a flow whose id merely starts like the run's is not its child
+    const lookalike = { flowId: "cx-5-other", startedAt: "2026-09-26T10:35:00Z" } as FeedEntry;
+    expect(lifecycleHeadlineView({ ...args, flow: flowView(), killEvents: kills, feed: [lookalike] }).state).toBe("awaiting-resume");
+  });
+});
+
+describe("B21: a no-op completion is paired with its OWN intent, not the whole run label", () => {
+  const flow = flowView({ runId: "run-abc" });
+  const ev = killEvent;
+  const noop = [
+    ev({ kind: "intent", runId: "watch", utc: "2026-09-26T10:30:00Z" }),
+    ev({ kind: "completed", runId: "watch", utc: "2026-09-26T10:30:01Z", pids: [], fired: false }),
+  ];
+  const real = [
+    ev({ kind: "intent", runId: "watch", utc: "2026-09-26T10:40:00Z" }),
+    ev({ kind: "completed", runId: "watch", utc: "2026-09-26T10:40:01Z", fired: true }),
+  ];
+
+  test("an earlier no-op under a reused label does not hide a later real kill", () => {
+    const kept = headlineKillEvents([...noop, ...real], flow);
+    expect(kept.map((e) => [e.kind, e.utc])).toEqual([
+      ["intent", "2026-09-26T10:40:00Z"],
+      ["completed", "2026-09-26T10:40:01Z"],
+    ]);
+    const headline = lifecycleHeadline({ flow, filesDone: 1, filesTotal: 5, killEvents: kept, dexAvailable: true, feed: [] });
+    expect(headline).toContain("awaiting resume");
+  });
+
+  test("the order of the file does not matter (events are paired by time)", () => {
+    expect(headlineKillEvents([...real, ...noop], flow)).toHaveLength(2);
+  });
+
+  test("the no-op alone still removes both of its events", () => {
+    expect(headlineKillEvents(noop, flow)).toEqual([]);
+  });
+
+  test("a real kill followed by a later no-op under the same label keeps the real one", () => {
+    const later = [
+      ev({ kind: "intent", runId: "watch", utc: "2026-09-26T10:50:00Z" }),
+      ev({ kind: "completed", runId: "watch", utc: "2026-09-26T10:50:01Z", pids: [], fired: false }),
+    ];
+    expect(headlineKillEvents([...real, ...later], flow)).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B18: the burn-down chart is the headline run's
+// ---------------------------------------------------------------------------
+
+describe("B18: burn-down samples are scoped to the headline run", () => {
+  const wire = (flowId: string, startTime: string, status: "RUNNING" | "COMPLETED"): DexFlowSummaryWire => ({
+    flowId,
+    flowType: "port.Project",
+    flowStatus: `FLOW_STATUS_${status}`,
+    flowStatusCode: status === "RUNNING" ? 1 : 2,
+    runId: `run-${flowId}`,
+    startTime,
+  });
+  const historyOf = (flowId: string, counts: Array<[number, number]>): DexHistoryWire => ({
+    flowId,
+    runId: `run-${flowId}`,
+    events: counts.map(([iteration, errorCount], i) => ({
+      eventId: String(i + 1),
+      eventTime: `2026-09-26T10:0${i}:00.000000Z`,
+      type: "StepExecuteCompleted",
+      payload: {
+        context: { stepExecutionId: `PpQueueVerify-${i + 1}`, stepType: "PpQueueVerify", finalAttempt: 1 },
+        output: {
+          upsertAttributes: [
+            {
+              key: `queue-burndown/tsc-${iteration}`,
+              value: { queue: "tsc", file: null, iteration, error_count: errorCount, recorded_at: `2026-09-26T10:0${i}:00.000Z` },
+            },
+          ],
+        },
+      },
+    })),
+  });
+  const build = (burnDownFiles: Parameters<typeof buildDashboardState>[0]["burnDownFiles"] = []) =>
+    buildDashboardState({
+      now: "2026-09-26T12:00:00.000Z",
+      burnDownFiles,
+      feedLimit: 80,
+      commitLimit: 40,
+      dex: {
+        available: true,
+        error: null,
+        detail: "d",
+        flows: [wire("old-run", "2026-09-26T08:00:00Z", "COMPLETED"), wire("cx-5", "2026-09-26T10:00:00Z", "RUNNING")],
+        states: {},
+        histories: {
+          "old-run": historyOf("old-run", [[1, 40], [2, 30], [3, 20], [4, 10], [5, 0]]),
+          "cx-5": historyOf("cx-5", [[1, 31], [2, 32]]),
+        },
+      },
+      git: { available: true, error: null, repoRoot: "/r", commits: [], worktrees: [] },
+      killEvents: { available: true, error: null, filesScanned: [], events: [] },
+    });
+
+  test("an older run's iterations are not spliced into the current run's series", () => {
+    const tsc = build().burnDown.find((s) => s.queue === "tsc");
+    expect(tsc?.points.map((p) => [p.iteration, p.errorCount])).toEqual([
+      [1, 31],
+      [2, 32],
+    ]);
+  });
+
+  test("BURN_DOWN_FILES are the source only when the run publishes none, and never merged with live samples", () => {
+    const fileSamples = [{ queue: "tsc" as const, file: null, iteration: 9, error_count: 7, recorded_at: null }];
+    const merged = build(fileSamples).burnDown.find((s) => s.queue === "tsc");
+    expect(merged?.points.map((p) => p.iteration)).toEqual([1, 2]); // the stale file is ignored while live samples exist
+
+    const noLive = buildDashboardState({
+      now: "2026-09-26T12:00:00.000Z",
+      burnDownFiles: fileSamples,
+      feedLimit: 80,
+      commitLimit: 40,
+      dex: { available: true, error: null, detail: "d", flows: [wire("cx-5", "2026-09-26T10:00:00Z", "RUNNING")], states: {}, histories: {} },
+      git: { available: true, error: null, repoRoot: "/r", commits: [], worktrees: [] },
+      killEvents: { available: true, error: null, filesScanned: [], events: [] },
+    });
+    expect(noLive.burnDown.find((s) => s.queue === "tsc")?.points.map((p) => p.iteration)).toEqual([9]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B19: a running model step is not a provenance alarm
+// ---------------------------------------------------------------------------
+
+describe("B19: the stream's start event of a real attempt is a running step, not MISSING tokens", () => {
+  const startEvent = {
+    stepId: "pp-implement",
+    role: "agent",
+    attempt: 1,
+    started_at: "2026-09-26T10:00:00.000Z",
+    ended_at: null,
+    outcome: "interrupted",
+    tokens: null,
+    wall_clock_ms: null,
+    identity: "src__Pricing__Flat.php#2",
+  };
+
+  test("an interrupted model-role envelope does not require tokens (validateProvenance exempts it the same way)", () => {
+    expect(parseEnvelope(startEvent)?.tokensRequired).toBe(false);
+    // completed model steps still do, and so do attempt-0-free failures
+    expect(parseEnvelope({ ...startEvent, outcome: "completed", ended_at: "2026-09-26T10:01:00.000Z" })?.tokensRequired).toBe(true);
+    expect(parseEnvelope({ ...startEvent, outcome: "failed", ended_at: "2026-09-26T10:01:00.000Z" })?.tokensRequired).toBe(true);
+  });
+
+  test("the feed row recovers file and round from the envelope identity when the stream row has no context", () => {
+    const [entry] = feedFromStreamMessages([{ flowId: "SubFlow:cx-5-PpWaveJoin-1-0", event: startEvent }]);
+    expect(entry).toMatchObject({ file: "src/Pricing/Flat.php", round: 2, tokensRequired: false, outcome: "interrupted", endedAt: null });
+  });
+
+  test("a flow-level identity names no file", () => {
+    const [entry] = feedFromStreamMessages([{ flowId: "cx-5", event: { ...startEvent, role: "record", identity: "bootstrap" } }]);
+    expect(entry?.file).toBeNull();
+    expect(entry?.round).toBeNull();
+  });
+
+  test("an in-flight step is not counted as an uncosted-token provenance failure in the usage table", () => {
+    const [entry] = feedFromStreamMessages([{ flowId: "cx-5", event: startEvent }]);
+    expect(aggregateAgentUsage(entry === undefined ? [] : [entry])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B22 / B23: usage and cost honesty on the dashboard (same definitions as the report)
+// ---------------------------------------------------------------------------
+
+describe("B22/B23: aggregateAgentUsage counts calls and costs the way the report does", () => {
+  const usage = (costUsd: number) => ({ input: 100, output: 10, reasoning: 0, cacheRead: 0, cacheWrite: 0, costUsd });
+  const entry = (over: Partial<FeedEntry>): FeedEntry => ({
+    flowId: "cx-5",
+    ts: "2026-09-26T10:00:00.000Z",
+    startedAt: "2026-09-26T10:00:00.000Z",
+    endedAt: "2026-09-26T10:01:00.000Z",
+    stepId: "pp-implement",
+    role: "agent",
+    file: null,
+    round: null,
+    attempt: 1,
+    outcome: "completed",
+    tokens: 110,
+    usage: usage(0.5),
+    wallClockMs: 1000,
+    tokensRequired: true,
+    ...over,
+  });
+
+  test("B23: a mixed costed/uncosted lane is an estimate (a lower bound), bare totals included", () => {
+    const [agent] = aggregateAgentUsage([
+      entry({}),
+      entry({ startedAt: "2026-09-26T10:02:00.000Z", usage: usage(0) }), // a split with no cost
+      entry({ startedAt: "2026-09-26T10:03:00.000Z", usage: null, tokens: 5000 }), // a bare total
+    ]);
+    expect(agent).toMatchObject({ role: "agent", calls: 3, costUsd: 0.5, costedCalls: 1, uncostedCalls: 2, estimated: true });
+  });
+
+  test("B23: every call costed is exact; nothing costed with a split is the ~$0 estimate; only bare totals is n/a", () => {
+    expect(aggregateAgentUsage([entry({}), entry({ startedAt: "2026-09-26T10:02:00.000Z", usage: usage(0.25) })])[0]).toMatchObject({
+      costUsd: 0.75,
+      uncostedCalls: 0,
+      estimated: false,
+    });
+    expect(aggregateAgentUsage([entry({ usage: usage(0) })])[0]).toMatchObject({ costUsd: 0, estimated: true });
+    expect(aggregateAgentUsage([entry({ usage: null, tokens: 5000 })])[0]).toMatchObject({ costUsd: null, uncostedCalls: 1, estimated: false });
+  });
+
+  test("B22: a skipped model-role step with zero tokens is not a call and does not make the cost an estimate", () => {
+    const [agent] = aggregateAgentUsage([
+      entry({}),
+      entry({ stepId: "pp-queue-fix", startedAt: "2026-09-26T10:05:00.000Z", outcome: "skipped", usage: null, tokens: 0 }),
+    ]);
+    expect(agent).toMatchObject({ calls: 1, costUsd: 0.5, uncostedCalls: 0, estimated: false });
   });
 });

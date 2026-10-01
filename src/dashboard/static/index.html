@@ -217,7 +217,7 @@ function renderFeed(entries) {
       <td>${fileCell}</td>
       <td>${e.round == null ? "-" : esc(e.round)}</td>
       <td>${esc(e.attempt)}</td>
-      <td>${outcomeBadge(e.outcome)}</td>
+      <td>${outcomeBadge(e.outcome === "interrupted" && e.endedAt == null ? "running" : e.outcome)}</td>
       <td>${tok}</td>
       <td class="dim">${e.wallClockMs == null ? "-" : esc(e.wallClockMs.toLocaleString("en-US"))}</td>
     </tr>`;
@@ -378,7 +378,9 @@ function renderUsage(rows) {
       u.costUsd == null
         ? '<span class="faint">n/a</span>'
         : u.costUsd > 0
-          ? `$${Number(u.costUsd).toFixed(4)}`
+          ? (u.estimated
+              ? `<span class="amber" title="lower bound: ${esc(u.uncostedCalls)} of ${esc(u.calls)} call(s) carried tokens with no provider-reported cost">~$${Number(u.costUsd).toFixed(4)}</span>`
+              : `$${Number(u.costUsd).toFixed(4)}`)
           : '<span class="amber" title="tokens flowed but the provider reports no per-call cost (plan-authed) — estimate, not exact">~$0</span>';
     return `<tr>
       <td class="cyan">${esc(u.role)}</td>

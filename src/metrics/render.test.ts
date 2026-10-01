@@ -634,6 +634,29 @@ describe("renderReport cost_estimated (mixed lanes, C40)", () => {
     expect(rendered.json.cost_estimated).toBe(false);
     expect(rendered.markdown).toContain("- total cost: n/a");
   });
+
+  test("B22: a skipped model-role step with zero tokens (a queue-fix with nothing to fix) is not a call, so the exact cost stays exact", () => {
+    const skippedFix: EnvelopeEvent = {
+      ...review(0, "src__a.php#1"),
+      stepId: "pp-queue-fix",
+      role: "agent",
+      outcome: "skipped",
+    };
+    const rendered = render([review({ input_tokens: 10, output_tokens: 5, cost_usd: 0.5 }), skippedFix]);
+    expect(rendered.json.costed_calls).toBe(1);
+    expect(rendered.json.uncosted_calls).toBe(0);
+    expect(rendered.json.cost_estimated).toBe(false);
+    expect(rendered.json.usage_by_role.map((u) => [u.role, u.calls])).toEqual([["review", 1]]);
+    expect(rendered.markdown).toContain("- total cost: $0.5000");
+    expect(rendered.markdown).not.toContain("1 of 2 model call(s)");
+  });
+
+  test("B22: a skipped step that DID spend tokens still counts (only the no-tokens case is exempt)", () => {
+    const skippedButSpent: EnvelopeEvent = { ...review(500, "src__a.php#1"), outcome: "skipped" };
+    const rendered = render([skippedButSpent]);
+    expect(rendered.json.usage_by_role[0]?.calls).toBe(1);
+    expect(rendered.json.uncosted_calls).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

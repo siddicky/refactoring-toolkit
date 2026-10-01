@@ -533,6 +533,11 @@ function buildReportJson(input: MetricsRenderInput, cross: ProvenanceCrossCheck 
   const usageAggs = new Map<EnvelopeRole, UsageAgg>();
   for (const env of envelopes) {
     if (isStartMarker(env) || !isModelCallingRole(env.role)) continue;
+    // A step that ran no model call (skipped, no tokens: a queue-fix with
+    // nothing to fix reports tokens 0) is neither a call nor an uncosted one:
+    // counting it overstated `calls` and turned an exact cost into a lower
+    // bound with a note about tokens that never flowed (B22).
+    if (env.outcome === "skipped" && (env.tokens === null || tokenTotalOf(env.tokens) === 0)) continue;
     let agg = usageAggs.get(env.role);
     if (!agg) {
       agg = {

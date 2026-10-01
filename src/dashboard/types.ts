@@ -323,7 +323,11 @@ export interface AgentUsageView {
   output: number | null;
   reasoning: number | null;
   costUsd: number | null;
-  /** True when tokens flowed without provider-reported per-call cost. */
+  /** Calls whose provider usage carried a cost (the same definition as the report's costed_calls). */
+  costedCalls: number;
+  /** Calls that carried tokens with no provider-reported cost (bare totals included). */
+  uncostedCalls: number;
+  /** True when ANY call carried tokens without a provider-reported cost: the cost is a lower bound. */
   estimated: boolean;
 }
 

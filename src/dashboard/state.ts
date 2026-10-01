@@ -11,7 +11,7 @@
  * both are accepted.
  */
 
-import { fileFromSanitizedKey, MODEL_CALLING_ROLES, tokenTotalOf } from "../metrics/types.js";
+import { fileFromIdentity, fileFromSanitizedKey, MODEL_CALLING_ROLES, tokenTotalOf } from "../metrics/types.js";
 import type {
   BurnDownPointView,
   BurnDownSample,
@@ -67,6 +67,13 @@ export interface ParsedEnvelope {
   usage: UsageSplitView | null;
   wall_clock_ms: number | null;
   tokensRequired: boolean;
+  /**
+   * The file and round recovered from the envelope's `identity` (`<file with
+   * "/" as "__">#<round>`) when it names none itself: the live factory writes
+   * `file: null` and stream rows carry no step context. Lossy for file names
+   * that hold "__", so it is only ever the last fallback.
+   */
+  identityFile: { file: string; round: number } | null;
 }
 
 /** Shape-checks a durable attribute value into a ParsedEnvelope. */
@@ -91,9 +98,14 @@ export function parseEnvelope(value: unknown): ParsedEnvelope | null {
     tokens: normalizeTokens(rec.tokens),
     usage: parseUsageSplit(rec.tokens),
     wall_clock_ms: typeof rec.wall_clock_ms === "number" ? rec.wall_clock_ms : null,
-    // Attempt 0 is the durable start marker (envelopeStartMarker): tokens are
-    // null by construction, so it must never read as a provenance failure.
-    tokensRequired: MODEL_ROLES.has(role) && attempt > 0,
+    // Attempt 0 is the durable start marker (envelopeStartMarker), and an
+    // `interrupted` envelope is a step still running (the start event of a real
+    // attempt, which the stream delivers before the completion replaces it) or
+    // killed: tokens are null by construction. Neither may read as a
+    // provenance failure; validateProvenance (src/metrics/render.ts) exempts
+    // `interrupted` the same way.
+    tokensRequired: MODEL_ROLES.has(role) && attempt > 0 && rec.outcome !== "interrupted",
+    identityFile: typeof rec.identity === "string" ? fileFromIdentity(rec.identity) : null,
   };
 }
 
@@ -142,6 +154,25 @@ export function stageLabel(stepIdOrType: string): string {
     "ppprep": "prep",
     "ppfinal": "final",
     "ppcapturediff": "diff-capture",
+    // Verification and parallel-wave steps (a label for every non-marker step of
+    // the flow: tests/state.test.ts walks PORT_FLOW_STEPS).
+    "ppbootstrap": "bootstrap",
+    "ppqueueverify": "queue-verify",
+    "ppqueuefix": "queue-fix",
+    "ppwavedispatch": "wave-dispatch",
+    "ppwavejoin": "wave-join",
+    "ppchildlease": "child-lease",
+    "ppchildrelease": "child-release",
+    // Prep analysis.
+    "ppsymboltable": "symbol-table",
+    "ppprepgenerate": "prep-generate",
+    "ppprepdiffcapture": "prep-diff-capture",
+    "ppprepreviewa": "prep-reviewer-1",
+    "ppprepreviewb": "prep-reviewer-2",
+    "ppprepverdictcheck": "prep-verdict-check",
+    "pppreploopdecision": "prep-loop",
+    "pppreprevise": "prep-revise",
+    "ppprepfinalize": "prep-finalize",
   };
   return map[compact] ?? stepIdOrType;
 }
@@ -274,8 +305,8 @@ function collectUpsert(
       endedAt: parsed.ended_at,
       stepId: parsed.stepId,
       role: parsed.role,
-      file: parsed.file ?? ctx?.file ?? null,
-      round: parsed.round ?? ctx?.round ?? null,
+      file: parsed.file ?? ctx?.file ?? parsed.identityFile?.file ?? null,
+      round: parsed.round ?? ctx?.round ?? parsed.identityFile?.round ?? null,
       attempt: parsed.attempt,
       outcome: parsed.outcome,
       tokens: parsed.tokens,
@@ -383,8 +414,8 @@ export function feedFromStreamMessages(
       endedAt: parsed.ended_at,
       stepId: parsed.stepId,
       role: parsed.role,
-      file: parsed.file,
-      round: parsed.round,
+      file: parsed.file ?? parsed.identityFile?.file ?? null,
+      round: parsed.round ?? parsed.identityFile?.round ?? null,
       attempt: parsed.attempt,
       outcome: parsed.outcome,
       tokens: parsed.tokens,
@@ -919,21 +950,44 @@ function statusOf(available: boolean, error: string | null, detail: string | nul
 // Wave-5 cost honesty: per-role agent usage aggregate (takeaways-synthesis #2)
 // ---------------------------------------------------------------------------
 
-/** Aggregates the provider usage split per role over real-attempt feed entries. */
+/**
+ * Aggregates the provider usage split per role over real-attempt feed entries,
+ * counting calls the way the report does (src/metrics/render.ts): a step that
+ * ran no model call (skipped, zero tokens: a queue-fix with nothing to fix) is
+ * not a call, and a call is costed only when the provider reported a cost, so
+ * `estimated` (a lower bound) is true as soon as ANY call carried tokens
+ * without one, bare totals included (B22, B23).
+ */
 export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[] {
   const aggs = new Map<
     string,
-    { role: string; calls: number; splitCalls: number; input: number; cacheRead: number; output: number; reasoning: number; cost: number; costReported: boolean }
+    {
+      role: string;
+      calls: number;
+      splitCalls: number;
+      costedCalls: number;
+      uncostedCalls: number;
+      input: number;
+      cacheRead: number;
+      output: number;
+      reasoning: number;
+      cost: number;
+    }
   >();
   for (const e of feed) {
     if (e.attempt === 0 || !e.tokensRequired) continue;
+    if (e.outcome === "skipped" && (e.tokens === null || e.tokens === 0)) continue;
     let agg = aggs.get(e.role);
     if (!agg) {
-      agg = { role: e.role, calls: 0, splitCalls: 0, input: 0, cacheRead: 0, output: 0, reasoning: 0, cost: 0, costReported: false };
+      agg = { role: e.role, calls: 0, splitCalls: 0, costedCalls: 0, uncostedCalls: 0, input: 0, cacheRead: 0, output: 0, reasoning: 0, cost: 0 };
       aggs.set(e.role, agg);
     }
     agg.calls += 1;
-    if (e.usage === null) continue;
+    if (e.usage === null) {
+      // A bare token total: tokens flowed but no provider cost can be attached.
+      if (e.tokens !== null) agg.uncostedCalls += 1;
+      continue;
+    }
     agg.splitCalls += 1;
     agg.input += e.usage.input;
     agg.cacheRead += e.usage.cacheRead;
@@ -941,7 +995,9 @@ export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[
     agg.reasoning += e.usage.reasoning;
     if (e.usage.costUsd > 0) {
       agg.cost += e.usage.costUsd;
-      agg.costReported = true;
+      agg.costedCalls += 1;
+    } else {
+      agg.uncostedCalls += 1;
     }
   }
   return [...aggs.values()]
@@ -954,8 +1010,10 @@ export function aggregateAgentUsage(feed: readonly FeedEntry[]): AgentUsageView[
       cacheRead: agg.splitCalls > 0 ? agg.cacheRead : null,
       output: agg.splitCalls > 0 ? agg.output : null,
       reasoning: agg.splitCalls > 0 ? agg.reasoning : null,
-      costUsd: agg.costReported ? agg.cost : agg.splitCalls > 0 ? 0 : null,
-      estimated: agg.splitCalls > 0 && !agg.costReported,
+      costUsd: agg.costedCalls > 0 ? agg.cost : agg.splitCalls > 0 ? 0 : null,
+      costedCalls: agg.costedCalls,
+      uncostedCalls: agg.uncostedCalls,
+      estimated: agg.splitCalls > 0 && agg.uncostedCalls > 0,
     }))
     .sort((a, b) => a.role.localeCompare(b.role));
 }
@@ -1040,8 +1098,11 @@ export function lifecycleHeadlineView(input: LifecycleHeadlineInput): HeadlineVi
   }
   if (killAfterStart !== undefined) {
     const killMs = tsMs(killAfterStart.utc);
+    // The per-file work of a parallel run happens in SubFlow children while the
+    // parent waits on the wave join and emits nothing, so activity of the run
+    // is activity of the parent OR of any of its children (B16).
     const activityAfterKill = input.feed.some(
-      (e) => e.flowId === flow.flowId && tsMs(e.startedAt) > killMs,
+      (e) => belongsToRun(e.flowId, flow.flowId) && tsMs(e.startedAt) > killMs,
     );
     const at = killAfterStart.utc.slice(11, 19);
     if (activityAfterKill) {
@@ -1067,8 +1128,11 @@ function terminalStatusWord(status: string): string {
 
 /**
  * The kill events that may colour `flow`'s headline (data contract B):
- * - a run whose completion recorded `fired: false` killed nothing, so neither
- *   its intent nor its completion is a kill (never a killed/resumed overlay);
+ * - a completion that recorded `fired: false` killed nothing, so neither it nor
+ *   the intent it closes is a kill (never a killed/resumed overlay). run_id is
+ *   only a label that a watcher or killer may reuse (watch-queue-verify defaults
+ *   it to a constant), so a no-op is judged per completion and paired with ITS
+ *   intent, never by excluding every event that shares the label (B21);
  * - an event that names a Dex run id (`flow_run_id`) only applies to the flow
  *   with that run id (legacy sidecars may carry the flow id there instead).
  */
@@ -1077,10 +1141,27 @@ export function headlineKillEvents(
   flow: FlowView | undefined,
 ): NormalizedKillEvent[] {
   if (flow === undefined) return [];
-  const noopRuns = new Set(events.filter((e) => e.kind === "completed" && e.fired === false).map((e) => e.runId));
+  // Walk the sidecar in time order: a completion closes the latest still-open
+  // intent of its run label; a fired:false completion removes the pair.
+  const noops = new Set<NormalizedKillEvent>();
+  const open = new Map<string, NormalizedKillEvent[]>();
+  const byTime = events
+    .map((event, index) => ({ event, index }))
+    .sort((a, b) => tsMs(a.event.utc) - tsMs(b.event.utc) || a.index - b.index);
+  for (const { event } of byTime) {
+    if (event.kind === "intent") {
+      open.set(event.runId, [...(open.get(event.runId) ?? []), event]);
+    } else if (event.kind === "completed") {
+      const closed = open.get(event.runId)?.pop();
+      if (event.fired === false) {
+        noops.add(event);
+        if (closed !== undefined) noops.add(closed);
+      }
+    }
+  }
   return events.filter(
     (e) =>
-      !noopRuns.has(e.runId) &&
+      !noops.has(e) &&
       (e.flowRunId == null || e.flowRunId === flow.runId || e.flowRunId === flow.flowId),
   );
 }
@@ -1094,7 +1175,7 @@ export function isSubFlowChild(flowId: string): boolean {
  * True when `flowId` is the run flow itself or one of its SubFlow children
  * (dex names them `SubFlow:<parentFlowId>-<stepExecutionId>-<index>`).
  */
-function belongsToRun(flowId: string, runFlowId: string): boolean {
+export function belongsToRun(flowId: string, runFlowId: string): boolean {
   return flowId === runFlowId || flowId.startsWith(`SubFlow:${runFlowId}-`);
 }
 
@@ -1130,23 +1211,33 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     ...(input.streamModes?.[f.flowId] !== undefined ? { streamMode: input.streamModes[f.flowId] } : {}),
   }));
 
+  // Wave-5 lifecycle headline: newest TOP-LEVEL port.Project flow (SubFlow
+  // children of the parallel wave join surface as their own flows; the run
+  // headline belongs to the parent) + its queue progress + kill overlay.
+  const headlineFlow = pickHeadlineFlow(flowViews);
+
   // Feed: history walk (with context threading), state fallback per flow.
   const feedByFlow = new Map<string, FeedEntry[]>();
-  const samples: BurnDownSample[] = [...input.burnDownFiles];
+  // Burn-down is ONE run's series (B18): iteration numbers restart with every run,
+  // so samples of an older run (up to 3 port.Project runs are selected) spliced
+  // by iteration into the current run's chart read "latest 0 errors @ iteration
+  // 5" over a run that is at 32. Only the headline run's samples are plotted.
+  const liveSamples: BurnDownSample[] = [];
   const feed: FeedEntry[] = [];
   for (const flow of flowsSorted) {
     const flowId = flow.flowId;
     const history = input.dex.histories[flowId];
     const state = input.dex.states[flowId] ?? null;
+    const inHeadlineRun = headlineFlow === undefined || belongsToRun(flowId, headlineFlow.flowId);
     let flowFeed: FeedEntry[] = [];
     if (history !== undefined && history !== null) {
       const walked = walkHistory(flowId, history);
       flowFeed = walked.feed;
-      samples.push(...walked.burnDown);
+      if (inHeadlineRun) liveSamples.push(...walked.burnDown);
     } else if (state !== null) {
       const fallback = feedFromState(flowId, state);
       flowFeed = fallback.feed;
-      samples.push(...fallback.burnDown);
+      if (inHeadlineRun) liveSamples.push(...fallback.burnDown);
     }
     // State attributes can hold envelope keys the history page has not shown
     // yet (fresh upserts) — merge without duplicating stepId#attempt keys.
@@ -1233,10 +1324,6 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     contentHash: c.contentHash,
   }));
 
-  // Wave-5 lifecycle headline: newest TOP-LEVEL port.Project flow (SubFlow
-  // children of the parallel wave join surface as their own flows; the run
-  // headline belongs to the parent) + its queue progress + kill overlay.
-  const headlineFlow = pickHeadlineFlow(flowViews);
   const headlineQueue = headlineQueueFor(headlineFlow, queueSummaries);
   // US-006 degraded rounds: derived per flow from the verdict attributes. The
   // verdict attributes live in whichever flow ran the review steps, which in
@@ -1275,7 +1362,10 @@ export function buildDashboardState(input: DashboardInput): DashboardStateView {
     grid,
     queueSummaries,
     feed: feedCapped,
-    burnDown: burnDownSeries(samples),
+    // BURN_DOWN_FILES are the source when the run publishes no samples of its own
+    // (offline analysis of a recorded run). They are never merged with live ones:
+    // a stale file from an earlier run would be spliced into the live series.
+    burnDown: burnDownSeries(liveSamples.length > 0 ? liveSamples : [...input.burnDownFiles]),
     commits,
     worktrees: input.git.worktrees.map((w) => ({
       path: w.path,
