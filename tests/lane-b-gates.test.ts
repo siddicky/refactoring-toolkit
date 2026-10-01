@@ -259,7 +259,7 @@ describe("VerdictCheckStep: live Jev scores", () => {
     expect(decision.kind).toBe("next");
 
     const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
-    expect(record?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
+    expect(record?.findings.map((f) => f.finding_id)).toEqual(["reviewer-A:A1"]);
     expect(record?.dropped).toEqual([
       { finding_id: "A2", reviewer: "reviewer-A", reason: "citation check failed (p_cited=0.2)", p_cited: 0.2 },
     ]);
@@ -280,7 +280,7 @@ describe("VerdictCheckStep: live Jev scores", () => {
     // UNCITED_QUOTE scores 0 naively; under Jev the probability is what counts.
     const stores = gateStores([finding("A1", UNCITED_QUOTE)], []);
     await flow.verdictCheck.execute(ctxFor(stores, flow.verdictCheck) as never, FRI);
-    expect(peekAttribute<KeptFindings>(stores, ppKept, KEY)?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
+    expect(peekAttribute<KeptFindings>(stores, ppKept, KEY)?.findings.map((f) => f.finding_id)).toEqual(["reviewer-A:A1"]);
   });
 });
 
@@ -294,7 +294,7 @@ describe("VerdictCheckStep: live Jev failure fails open to the naive check", () 
 
     const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
     // Naive semantics apply: cited quote kept (1), uncited quote dropped (0).
-    expect(record?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
+    expect(record?.findings.map((f) => f.finding_id)).toEqual(["reviewer-A:A1"]);
     expect(record?.dropped.map((d) => d.finding_id)).toEqual(["A2"]);
     const gateA = record?.citationGate?.find((g) => g.reviewer === "reviewer-A");
     expect(gateA?.checker).toBe("naive-fallback");
@@ -329,7 +329,7 @@ describe("VerdictCheckStep: live Jev failure fails open to the naive check", () 
       ["reviewer-A", "jev"],
       ["reviewer-B", "naive-fallback"],
     ]);
-    expect(record?.findings.map((f) => f.finding_id).sort()).toEqual(["A1", "B1"]);
+    expect(record?.findings.map((f) => f.finding_id).sort()).toEqual(["reviewer-A:A1", "reviewer-B:B1"]);
     const usage = peekAttribute<Array<{ tokens: number }>>(stores, ppJevUsage, "usage");
     expect(usage?.map((u) => u.tokens)).toEqual([15]);
   });
@@ -340,7 +340,7 @@ describe("VerdictCheckStep: no live client keeps the naive default", () => {
     const stores = gateStores([finding("A1", CITED_QUOTE), finding("A2", UNCITED_QUOTE)], []);
     await flow.verdictCheck.execute(ctxFor(stores, flow.verdictCheck) as never, FRI);
     const record = peekAttribute<KeptFindings>(stores, ppKept, KEY);
-    expect(record?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
+    expect(record?.findings.map((f) => f.finding_id)).toEqual(["reviewer-A:A1"]);
     expect(record?.dropped).toEqual([
       { finding_id: "A2", reviewer: "reviewer-A", reason: "citation check failed (p_cited=0)", p_cited: 0 },
     ]);
@@ -441,7 +441,7 @@ describe("PrepVerdictCheckStep: naive-only gate through the shared predicate", (
     expect(decision.kind).toBe("next");
     expect(jev.calls).toBe(0);
     const record = peekAttribute<KeptFindings>(stores, ppPrepFindings, "findings");
-    expect(record?.findings.map((f) => f.finding_id)).toEqual(["A1"]);
+    expect(record?.findings.map((f) => f.finding_id)).toEqual(["reviewer-A:A1"]);
     expect(record?.dropped).toEqual([
       { finding_id: "A2", reviewer: "reviewer-A", reason: "citation check failed (p_cited=0)", p_cited: 0 },
     ]);

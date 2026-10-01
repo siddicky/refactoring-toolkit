@@ -30,7 +30,8 @@ import {
   type ReviewVerdict,
 } from "../flows/port-project.js";
 import { openFencedSession } from "../flows/port/agent-turns.js";
-import { countingJevClient, keepFindings, recordJevUsage, type CitationScores } from "../flows/port/lane-b.js";
+import { countingJevClient, keepFindings, recordJevUsage, runPrioritizeGate, type CitationScores } from "../flows/port/lane-b.js";
+import { createInMemoryJevClient } from "../src/typesafe/client.js";
 import { leasePool } from "../flows/port/leases.js";
 import { fileRoundIdentity, outPathOf } from "../flows/port/queue-logic.js";
 import { plannerPromptOpts } from "../src/harness/lanes.js";
@@ -178,7 +179,7 @@ describe("keepFindings", () => {
         } as unknown as CitationScores),
     });
 
-    expect(kept.findings).toEqual([{ finding_id: "f-keep" }] as never);
+    expect(kept.findings).toEqual([{ finding_id: "reviewer-A:f-keep" }] as never);
     expect(kept.dropped).toEqual([
       { finding_id: "f-uncited", reviewer: "reviewer-A", reason: "citation check failed (p_cited=0.5)", p_cited: 0.5 },
       { finding_id: "f-wontfix", reviewer: "reviewer-A", reason: 'disposition "wontfix"' },
@@ -218,12 +219,54 @@ describe("keepFindings", () => {
       scoreCitations: (id) => Promise.resolve(scores[id] as CitationScores),
     });
     // 0.85 clears the jev floor (0.8) but not the naive floor (1).
-    expect(kept.findings).toEqual([{ finding_id: "f1" }] as never);
+    expect(kept.findings).toEqual([{ finding_id: "reviewer-A:f1" }] as never);
     expect(kept.dropped.map((d) => d.finding_id)).toEqual(["f2"]);
     expect(kept.citationGate?.map((g) => [g.reviewer, g.checker, g.fallbackReason])).toEqual([
       ["reviewer-A", "jev", null],
       ["reviewer-B", "naive-fallback", "Jev down"],
     ]);
+  });
+
+  test("B5: both reviewers number their findings F1, F2: the merged kept list has distinct ids, and the prioritizer asks about every finding", async () => {
+    const verdicts: Record<string, ReviewVerdict> = {
+      "reviewer-A": tuple([{ id: "F1", disposition: "fix" }, { id: "F2", disposition: "fix" }]),
+      "reviewer-B": tuple([{ id: "F1", disposition: "fix" }]),
+    };
+    const kept = await keepFindings({
+      verdictOf: (id) => verdicts[id] as ReviewVerdict,
+      scoreCitations: (id) =>
+        Promise.resolve({
+          checker: "naive",
+          fallbackReason: null,
+          checks: (verdicts[id] as ReviewTuple).metrics.findings.map((f) => ({ finding_id: f.finding_id, p_cited: 1 })),
+        } as unknown as CitationScores),
+    });
+    expect(kept.findings.map((f) => f.finding_id)).toEqual(["reviewer-A:F1", "reviewer-A:F2", "reviewer-B:F1"]);
+
+    // Live Jev: one question per kept finding, so none is overwritten, and the result is still a Jev rerank.
+    const asked: string[] = [];
+    const client = createInMemoryJevClient((request) => {
+      asked.push(...Object.keys(request.questions));
+      return Object.fromEntries(Object.keys(request.questions).map((id) => [id, { type: "noul", noul: 0.5 }]));
+    });
+    const ranked = await runPrioritizeGate(kept.findings.map((f) => ({ ...f, severity: "minor", summary: "s", evidence: null })), client);
+    expect(asked.sort()).toEqual(["reviewer-A:F1", "reviewer-A:F2", "reviewer-B:F1"]);
+    expect(ranked.checker).toBe("jev");
+    expect(ranked.value.length).toBe(3);
+  });
+
+  test("B5: a batch that still repeats an id falls back to the naive order and records why, instead of claiming a Jev rerank", async () => {
+    const dup = [
+      { finding_id: "F1", severity: "nit", summary: "A: rename variable (style)", evidence: null },
+      { finding_id: "F1", severity: "blocker", summary: "B: wrong rounding mode (behavior)", evidence: null },
+    ] as const;
+    const client = createInMemoryJevClient(() => {
+      throw new Error("must not be called");
+    });
+    const ranked = await runPrioritizeGate(dup, client);
+    expect(ranked.checker).toBe("naive-fallback");
+    expect(ranked.fallbackReason).toContain('duplicate finding_id "F1"');
+    expect(ranked.value.map((f) => f.severity)).toEqual(["blocker", "nit"]);
   });
 
   test("both reviewers discarded: nothing kept, nothing scored", async () => {

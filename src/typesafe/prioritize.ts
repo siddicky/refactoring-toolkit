@@ -9,7 +9,9 @@
  *   probability desc, tie-break severity class, then input order.
  *
  * Both are pure over their inputs and never mutate the input array.
- * Precondition: finding_ids are unique within a batch (verdict schema).
+ * Precondition: finding_ids are unique within a batch. The verdict schema
+ * guarantees that per verdict only; keepFindings namespaces ids per reviewer
+ * when it merges two, and jevPrioritize rejects a batch that still repeats one.
  */
 import { noul, type JudgmentClient } from "./client.js";
 import { SEVERITY_RANK, type Finding } from "../metrics/types.js";
@@ -51,6 +53,18 @@ export async function jevPrioritize(
   options: PrioritizeOptions = {},
 ): Promise<Finding[]> {
   if (findings.length === 0) return [];
+
+  // Questions and answers are keyed by finding_id, so two findings sharing an id
+  // would overwrite one question and receive one answer between them while the
+  // result still claimed a Jev rerank. Throwing lets the gate fail open to the
+  // naive order and record why (flows/port/lane-b.ts withJevFallback).
+  const seenIds = new Set<string>();
+  for (const finding of findings) {
+    if (seenIds.has(finding.finding_id)) {
+      throw new Error(`jevPrioritize: duplicate finding_id "${finding.finding_id}" in one batch`);
+    }
+    seenIds.add(finding.finding_id);
+  }
 
   const questions: Record<string, ReturnType<typeof noul>> = {};
   for (const finding of findings) {

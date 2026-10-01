@@ -69,6 +69,16 @@ describe("jevPrioritize (noul rerank behind the same interface)", () => {
     expect(await jevPrioritize(client, [])).toEqual([]);
     expect(client.callCount).toBe(0);
   });
+
+  test("B5: a batch that repeats a finding_id is rejected before any model call (one question per id would half-rank it)", async () => {
+    const client = createInMemoryJevClient(() => {
+      throw new Error("must not be called");
+    });
+    await expect(jevPrioritize(client, [f("F1", "nit"), f("F2", "major"), f("F1", "blocker")])).rejects.toThrow(
+      'duplicate finding_id "F1"',
+    );
+    expect(client.callCount).toBe(0);
+  });
 });
 
 describe("jevPrioritize state (C12)", () => {

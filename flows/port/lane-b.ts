@@ -202,7 +202,11 @@ export async function keepFindings(source: {
         });
         continue;
       }
-      kept.push(metricsFinding);
+      // Both reviewers are told to number findings F1, F2, ... in independent
+      // sessions, and the verdict schema only checks uniqueness inside ONE
+      // verdict. The merged list (what the prioritizer ranks and the fixer
+      // reads) must be unambiguous, so each kept id carries its reviewer (B5).
+      kept.push({ ...metricsFinding, finding_id: `${reviewerId}:${metricsFinding.finding_id}` });
     }
   }
   return { findings: kept, dropped, citationGate: gate };
