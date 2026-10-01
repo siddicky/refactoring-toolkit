@@ -532,14 +532,25 @@ export function flowOutcome(
   const tsc = port.verification?.tscTotal ?? 0;
   const vitest = port.verification?.vitestTotal ?? 0;
   const unresolved = blocked > 0 || tsc > 0 || vitest > 0;
-  // A vitest pass that never executed is not "0 failures": say so in the line
-  // (the exit code only reflects counted failures and blocked files).
+  // A vitest pass that never executed is not "0 failures", and neither is a
+  // typecheck that never ran: say so in the line (the exit code only reflects
+  // counted failures and blocked files). tscTotal counts LOCATED diagnostics
+  // only; the accounting (Contract A) says whether that count can be trusted.
   const run = port.verification?.vitestRun;
   const vitestState = run == null ? "" : run.kind === "ran" ? ` (ran ${run.passed}/${run.total})` : ` (NOT RUN: ${run.reason})`;
+  const tscRun = port.verification?.tscRun;
+  const tscState =
+    tscRun == null
+      ? ""
+      : tscRun.state === "not-run"
+        ? ` (NOT RUN: ${tscRun.reason ?? "reason unrecorded"})`
+        : tscRun.unlocated > 0
+          ? ` (+${tscRun.unlocated} unlocated diagnostic(s))`
+          : "";
   return {
     code: unresolved ? EXIT_UNRESOLVED : 0,
     lines: [
-      `${head} completed=${port.completed.length} blocked=${blocked} tsc=${tsc} vitest=${vitest}${vitestState}${unresolved ? " (unresolved work remains)" : ""}`,
+      `${head} completed=${port.completed.length} blocked=${blocked} tsc=${tsc}${tscState} vitest=${vitest}${vitestState}${unresolved ? " (unresolved work remains)" : ""}`,
       `[${label}] result: ${JSON.stringify(port)}`,
     ],
   };

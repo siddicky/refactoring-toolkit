@@ -10,6 +10,8 @@
  * - The dashboard URL run-demo logs is the port serve-status really binds.
  * - scripts/probe-flow.ts documents the harness semantics T4a implemented.
  * - run-demo stays importable (this file imports it).
+ * - flowOutcome surfaces T1's tsc accounting (T3's note: "like it already does
+ *   for vitest"): a typecheck that did not run is not "tsc=0".
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
@@ -19,7 +21,10 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { dashboardChildEnv, dashboardPort } from "../scripts/run-demo.js";
+import type { FlowResult, StepCompletion } from "@superdurable/dex";
+
+import type { PortRunResult } from "../flows/port-project.js";
+import { dashboardChildEnv, dashboardPort, EXIT_UNRESOLVED, flowOutcome } from "../scripts/run-demo.js";
 import { configFromEnv } from "../src/dashboard/config.js";
 
 const ROOT = join(import.meta.dir, "..");
@@ -118,5 +123,68 @@ describe("INT-5: probe-flow.ts documents the harness semantics T4a implemented",
   test("the stale claim (OPENCODE_BASE_URL alone selects the real harness) is gone", () => {
     expect(header).not.toContain("With\n * OPENCODE_BASE_URL the real opencode harness is used");
     expect(header).not.toContain("otherwise run-demo.ts\n * injects an explicit StubHarness");
+  });
+});
+
+describe("INT-5: flowOutcome surfaces T1's tsc accounting like vitest's", () => {
+  function completed(port: PortRunResult): FlowResult {
+    const final: StepCompletion = {
+      stepType: "PpFinal",
+      stepExecutionId: "PpFinal#1",
+      decode<T>() {
+        return port as T;
+      },
+    };
+    return {
+      status: "completed",
+      errorType: undefined,
+      errorMessage: undefined,
+      isTerminal: true,
+      completions: [final],
+      singleOutput() {
+        throw new TypeError("unused");
+      },
+    };
+  }
+  const verification = (over: Partial<NonNullable<PortRunResult["verification"]>>): PortRunResult => ({
+    completed: [],
+    blocked: [],
+    verification: { iteration: 1, tscTotal: 0, vitestTotal: 0, vitestNote: null, vitestRun: null, ...over },
+  });
+
+  test("a NOT RUN typecheck is named in the line instead of reading as a clean tsc=0", () => {
+    const out = flowOutcome(
+      "demo",
+      "f1",
+      completed(
+        verification({
+          tscRun: { state: "not-run", reason: "tsc exited 2 with no located diagnostics: error TS18003", exit_code: 2, unlocated: 1 },
+        }),
+      ),
+    );
+    expect(out.lines[0]).toContain("tsc=0 (NOT RUN: tsc exited 2 with no located diagnostics: error TS18003)");
+    // the exit code still reflects counted failures only, as for vitest
+    expect(out.code).toBe(0);
+  });
+
+  test("unlocated diagnostics on a ran typecheck are shown; a clean ran typecheck and legacy results are unchanged", () => {
+    const unlocated = flowOutcome(
+      "demo",
+      "f1",
+      completed(verification({ tscTotal: 2, tscRun: { state: "ran", reason: null, exit_code: 2, unlocated: 1 } })),
+    );
+    expect(unlocated.lines[0]).toContain("tsc=2 (+1 unlocated diagnostic(s))");
+    expect(unlocated.code).toBe(EXIT_UNRESOLVED);
+
+    const clean = flowOutcome(
+      "demo",
+      "f1",
+      completed(verification({ tscRun: { state: "ran", reason: null, exit_code: 0, unlocated: 0 } })),
+    );
+    expect(clean.lines[0]).toContain("tsc=0 vitest=0");
+    expect(clean.code).toBe(0);
+
+    const legacy = flowOutcome("demo", "f1", completed(verification({})));
+    expect(legacy.lines[0]).toContain("tsc=0 vitest=0");
   });
 });
