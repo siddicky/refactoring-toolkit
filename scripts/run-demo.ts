@@ -61,6 +61,7 @@ import {
   OpencodeHarness,
   type AgentSessionClient,
 } from "../src/harness/opencode.js";
+import { describeHarness, selectHarness } from "../src/harness/select.js";
 import {
   InMemoryLeaseStore,
   WorktreePool,
@@ -136,23 +137,32 @@ class StubHarness implements AgentSessionClient {
   }
 }
 
-async function pickHarness(name: string | undefined): Promise<AgentSessionClient> {
-  if (name === "stub") return new StubHarness();
-  const baseUrl = process.env.OPENCODE_BASE_URL?.trim() || undefined;
-  try {
-    return await OpencodeHarness.connect(
-      baseUrl,
+/**
+ * `--harness stub|opencode|auto` (absent = auto; anything else is rejected):
+ * stub = the labelled test double; opencode = the real harness, FAILS when
+ * the server does not answer; auto = the real harness when the server answers,
+ * otherwise a loud warning and the stub. Reachability is probed
+ * (src/harness/select.ts) because connect() performs no I/O. Recovery passes
+ * `requireReal`: it must enumerate and abort the real server's sessions, so
+ * there `auto` fails like `opencode` instead of skipping the fence on a stub.
+ */
+async function pickHarness(
+  name: string | undefined,
+  opts: { requireReal?: boolean } = {},
+): Promise<AgentSessionClient> {
+  return selectHarness({
+    choice: name,
+    requireReal: opts.requireReal,
+    baseUrl: process.env.OPENCODE_BASE_URL?.trim() || undefined,
+    model:
       process.env.OPENCODE_MODEL_PROVIDER && process.env.OPENCODE_MODEL_ID
         ? {
             providerID: process.env.OPENCODE_MODEL_PROVIDER,
             modelID: process.env.OPENCODE_MODEL_ID,
           }
         : undefined,
-    );
-  } catch (err) {
-    console.error(`[run-demo] opencode harness unavailable (${(err as Error).message}); falling back to StubHarness (labeled test double)`);
-    return new StubHarness();
-  }
+    makeStub: () => new StubHarness(),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +326,7 @@ async function orderedRecover(repoDir: string, epoch: number): Promise<number> {
   // 1-2. Abort + confirm persisted sessions; enumeration fallback when the
   // persisted fence is unavailable (attribute reads need a live flow context,
   // so Phase 0 uses the enumeration path against the surviving server).
-  const harness = await pickHarness(process.env.HARNESS);
+  const harness = await pickHarness(process.env.HARNESS, { requireReal: true });
   const aborted = await harness.abortSessionsNotTagged(epoch);
   console.log(`[recover] aborted ${aborted.length} foreign session(s): ${aborted.join(",") || "none"}`);
 
@@ -1048,7 +1058,7 @@ async function recoverPort(): Promise<number> {
   // 1-2. Ordered abort: persisted fences carry epoch-tagged labels; when the
   // fence attribute is not reachable outside a flow context, use the plan's
   // ENUMERATION FALLBACK against the surviving opencode server.
-  const harness = await pickHarness(argValue("--harness"));
+  const harness = await pickHarness(argValue("--harness"), { requireReal: true });
   const aborted = await harness.abortSessionsNotTagged(epoch);
   console.log(`[recover-port] aborted ${aborted.length} foreign session(s): ${aborted.join(",") || "none"}`);
 
@@ -1173,7 +1183,7 @@ async function main(): Promise<number> {
             );
           });
       });
-      console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${argValue("--harness") ?? "auto"} flows=${argValue("--flows") ?? "probe"}`);
+      console.log(`[worker] up: target=${handle.workerTargetAddress} server=${config.serverAddress} fault=${fault ?? "none"} harness=${describeHarness(harness)} (requested=${argValue("--harness") ?? "auto"}) flows=${argValue("--flows") ?? "probe"}`);
       await new Promise(() => {}); // run until killed
       return 0;
     }

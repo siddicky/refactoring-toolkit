@@ -36,9 +36,39 @@ export const sessionFenceMap = new AttributeMap<SessionFence>(
   jsonCodec<SessionFence>(),
 );
 
+/** Every session the toolkit creates carries this title prefix (fence label). */
+export const PORTING_KIT_LABEL_PREFIX = "porting-kit:";
+
 /** AttributeMap instance keys prohibit `/`, so file paths are sanitized. */
 export function fenceLabel(file: string, round: number, epoch: number): string {
-  return `porting-kit:${file.replace(/\//g, "__")}#${round}#${epoch}`;
+  return `${PORTING_KIT_LABEL_PREFIX}${file.replace(/\//g, "__")}#${round}#${epoch}`;
+}
+
+/**
+ * Inverse of {@link fenceLabel}: `porting-kit:<file>#<round>#<epoch>` ->
+ * its parts, or null when the title is not a well-formed fence label. The
+ * `<file>` part is greedy so a `#` inside a file name cannot steal the
+ * trailing round/epoch segments.
+ */
+export function parseFenceLabel(
+  title: string,
+): { file: string; round: number; epoch: number } | null {
+  if (!title.startsWith(PORTING_KIT_LABEL_PREFIX)) return null;
+  const m = /^(.*)#(\d+)#(\d+)$/.exec(title.slice(PORTING_KIT_LABEL_PREFIX.length));
+  if (m === null) return null;
+  return { file: m[1] as string, round: Number(m[2]), epoch: Number(m[3]) };
+}
+
+/**
+ * Recovery fence predicate: true for a session the toolkit created
+ * (`porting-kit:` prefix) that does not belong to `epoch`. The epoch is the
+ * parsed label segment compared exactly — never a substring test, which also
+ * matched the round segment and longer epochs.
+ */
+function isStaleToolkitSession(title: string, epoch: number): boolean {
+  if (!title.startsWith(PORTING_KIT_LABEL_PREFIX)) return false;
+  const parsed = parseFenceLabel(title);
+  return parsed === null || parsed.epoch !== epoch;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,8 +110,9 @@ export interface PromptOptions {
   /**
    * Per-turn model override (lane swap, wave-5): when set, THIS turn runs on
    * the given provider/model instead of the harness default — e.g. reviewer
-   * turns on `openai/gpt-6-luna` while implementer/fixer stay on the default
-   * zai lane. Takes precedence over the constructor model.
+   * turns on `nano-gpt/openai/gpt-6-luna` while implementer/fixer run on the
+   * executor lane (zai-coding-plan/glm-5.3-flash). Lane policy lives in
+   * lanes.ts. Takes precedence over the constructor model.
    */
   model?: { providerID: string; modelID: string };
   /**
@@ -93,19 +124,28 @@ export interface PromptOptions {
   variant?: string;
 }
 
-/** How long prompt() polls for a completed assistant reply (0(g) provenance). */
-const PROMPT_WAIT_MS = parseWaitMs(
-  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
-    ?.OPENCODE_PROMPT_WAIT_MS,
-);
+/** Default window prompt() polls for a completed assistant reply (0(g) provenance): 15 min. */
+export const DEFAULT_PROMPT_WAIT_MS = 900_000;
+/** Default hard ceiling on ONE SDK prompt call: 20 min. */
+export const DEFAULT_PROMPT_CALL_TIMEOUT_MS = 1_200_000;
+/** Gap between polls of a usage-less prompt. */
+const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
-/** m4: invalid values (NaN, ≤0, absurdly large) fall back to 15 minutes. */
-function parseWaitMs(raw: string | undefined): number {
+/**
+ * m4: invalid values (NaN, <=0, above 24h) fall back to `fallbackMs`. A valid
+ * value is used exactly as given — never scaled.
+ */
+export function parseWaitMs(raw: string | undefined, fallbackMs: number): number {
   const parsed = Number.parseInt(raw ?? "", 10);
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 24 * 60 * 60_000) {
-    return 900_000;
+    return fallbackMs;
   }
   return parsed;
+}
+
+/** OPENCODE_PROMPT_WAIT_MS, read at call time; default 15 minutes. */
+export function promptWaitMs(): number {
+  return parseWaitMs(readEnvVar("OPENCODE_PROMPT_WAIT_MS"), DEFAULT_PROMPT_WAIT_MS);
 }
 
 /**
@@ -114,25 +154,48 @@ function parseWaitMs(raw: string | undefined): number {
  * assistant message has completed server-side — the turn hangs, heartbeats
  * keep the step alive, and the flow stalls. Race the call against this
  * deadline and fail RETRYABLE so dex re-dispatches on a fresh attempt.
- * OPENCODE_PROMPT_CALL_TIMEOUT_MS; default 20 minutes.
+ * OPENCODE_PROMPT_CALL_TIMEOUT_MS, read at call time; default 20 minutes.
  */
-const PROMPT_CALL_TIMEOUT_MS = parseWaitMs(
-  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
-    ?.OPENCODE_PROMPT_CALL_TIMEOUT_MS,
-) *  (4 / 3); // 20 min default (parseWaitMs falls back to 15 min; ×4/3 = 20)
+export function promptCallTimeoutMs(): number {
+  return parseWaitMs(readEnvVar("OPENCODE_PROMPT_CALL_TIMEOUT_MS"), DEFAULT_PROMPT_CALL_TIMEOUT_MS);
+}
+
+/**
+ * Races `work` against a deadline that rejects with `onDeadline()`. The timer
+ * is unref'd and cleared as soon as either side settles.
+ */
+function withDeadline<T>(work: Promise<T>, timeoutMs: number, onDeadline: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(onDeadline()), timeoutMs);
+    void (timer as unknown as { unref?: () => void }).unref?.();
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
 
 /** Races one promise against the prompt-call deadline (retryable timeout). */
-function withCallTimeout<T>(promise: Promise<T>, what: string): Promise<T> {
-  return Promise.race([
+function withCallTimeout<T>(promise: Promise<T>, what: string, timeoutMs: number): Promise<T> {
+  return withDeadline(
     promise,
-    new Promise<never>((_, reject) => {
-      const t = setTimeout(
-        () => reject(new OpencodePromptError(`SDK call timed out after ${PROMPT_CALL_TIMEOUT_MS}ms (${what})`, true)),
-        PROMPT_CALL_TIMEOUT_MS,
-      );
-      void (t as unknown as { unref?: () => void }).unref?.();
-    }),
-  ]);
+    timeoutMs,
+    () => new OpencodePromptError(`SDK call timed out after ${timeoutMs}ms (${what})`, true),
+  );
+}
+
+/**
+ * Optional per-harness knobs. Unset fields resolve at call time from the
+ * environment (wait / call timeout) or the defaults above, so tests and
+ * operators can shrink them without touching module state.
+ */
+export interface OpencodeHarnessOptions {
+  /** Server base URL this harness talks to (informational; set by connect()). */
+  baseUrl?: string | undefined;
+  /** Poll window for a usage-less prompt (default OPENCODE_PROMPT_WAIT_MS / 15 min). */
+  waitMs?: number | undefined;
+  /** Hard ceiling on one session.prompt call (default OPENCODE_PROMPT_CALL_TIMEOUT_MS / 20 min). */
+  callTimeoutMs?: number | undefined;
+  /** Gap between polls (default 5 s). */
+  pollIntervalMs?: number | undefined;
 }
 
 /**
@@ -209,6 +272,12 @@ export interface SessionRef {
 
 export const DEFAULT_OPENCODE_BASE_URL = "http://127.0.0.1:4096";
 
+/** How long probe() waits for the server to answer `session.list`. */
+const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
+
+/** Outcome of {@link OpencodeHarness.probe}: reachable, or why not. */
+export type ProbeResult = { ok: true } | { ok: false; reason: string };
+
 /**
  * Structural interface used by durable agent steps, so flows can run against
  * the real harness or an explicit test double (never silently).
@@ -225,24 +294,62 @@ export class OpencodeHarness {
   readonly #model: { providerID: string; modelID: string } | undefined;
   /** Default opencode agent for turns (OPENCODE_AGENT env), if configured. */
   readonly defaultAgent: string | undefined;
+  /** Server base URL when built through connect(); undefined for a bare client. */
+  readonly baseUrl: string | undefined;
+  readonly #options: OpencodeHarnessOptions;
 
   constructor(
     client: OpencodeClient,
     model?: { providerID: string; modelID: string } | undefined,
     defaultAgent?: string | undefined,
+    options: OpencodeHarnessOptions = {},
   ) {
     this.#client = client;
     this.#model = model;
     this.defaultAgent = defaultAgent;
+    this.baseUrl = options.baseUrl;
+    this.#options = options;
   }
 
+  /**
+   * Builds the SDK client for `baseUrl`. Performs NO I/O and cannot fail for
+   * an unreachable or malformed server — use {@link probe} (or
+   * selectHarness in select.ts) to learn whether the server answers.
+   */
   static async connect(
     baseUrl: string = DEFAULT_OPENCODE_BASE_URL,
     model?: { providerID: string; modelID: string } | undefined,
   ): Promise<OpencodeHarness> {
     const client = createOpencodeClient({ baseUrl } as never);
     const defaultAgent = readEnvVar("OPENCODE_AGENT");
-    return new OpencodeHarness(client, model, defaultAgent);
+    return new OpencodeHarness(client, model, defaultAgent, { baseUrl });
+  }
+
+  /**
+   * Reachability check: one `session.list` against the server, bounded by
+   * `timeoutMs`. connect() builds a client without touching the network, so
+   * this is the only way to learn that the server answers. Never throws: a
+   * connection error, a non-2xx answer, an unexpected payload and a hang are
+   * all reported as `{ ok: false, reason }`.
+   */
+  async probe(timeoutMs: number = DEFAULT_PROBE_TIMEOUT_MS): Promise<ProbeResult> {
+    try {
+      const res = (await withDeadline(
+        this.#client.session.list(),
+        timeoutMs,
+        () => new Error(`no response to session.list within ${timeoutMs}ms`),
+      )) as { error?: unknown; response?: { status?: number } } | undefined;
+      if (res?.error !== undefined) {
+        const status = res.response?.status;
+        return { ok: false, reason: `server answered ${status === undefined ? "with an error" : `HTTP ${status}`}` };
+      }
+      if (!Array.isArray(unwrap(res))) {
+        return { ok: false, reason: "session.list did not return a session array (not an opencode server?)" };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /** Creates a session with an epoch-tagged label as its title (fencing tag). */
@@ -271,6 +378,9 @@ export class OpencodeHarness {
   async prompt(sessionId: string, text: string, opts?: PromptOptions): Promise<PromptResult> {
     const agent = opts?.agent ?? this.defaultAgent;
     const model = opts?.model ?? this.#model;
+    const waitMs = this.#options.waitMs ?? promptWaitMs();
+    const callTimeoutMs = this.#options.callTimeoutMs ?? promptCallTimeoutMs();
+    const pollIntervalMs = this.#options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     const res = await withCallTimeout(
       this.#client.session.prompt({
         path: { id: sessionId },
@@ -283,6 +393,7 @@ export class OpencodeHarness {
         },
       } as never),
       `session.prompt (session=${sessionId})`,
+      callTimeoutMs,
     );
     const data = unwrap(res) as
       | { info?: unknown; parts?: unknown }
@@ -301,10 +412,10 @@ export class OpencodeHarness {
     let textOut = extractText(data.parts);
 
     if (usage === null && !aborted) {
-      const deadline = Date.now() + PROMPT_WAIT_MS;
+      const deadline = Date.now() + waitMs;
       let polls = 0;
       while (usage === null && !aborted && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 5_000));
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
         polls++;
         let last: { info: unknown; parts: unknown } | undefined;
         try {
@@ -329,7 +440,7 @@ export class OpencodeHarness {
         if (completed.length > 0) textOut = completed;
       }
       console.error(
-        `[opencode] poll loop exit (session=${sessionId}) usage=${usage === null ? "null" : "present"} aborted=${aborted} waitedMs=${Date.now() - (deadline - PROMPT_WAIT_MS)}`,
+        `[opencode] poll loop exit (session=${sessionId}) usage=${usage === null ? "null" : "present"} aborted=${aborted} waitedMs=${Date.now() - (deadline - waitMs)}`,
       );
       if (usage === null && !aborted) {
         if (textOut.length === 0) {
@@ -417,12 +528,17 @@ export class OpencodeHarness {
   }
 
   /**
-   * Enumeration fallback (plan §Session fencing): abort every session whose
-   * title is not tagged with the current epoch. Returns the aborted IDs.
+   * Enumeration fallback (plan §Session fencing): abort every TOOLKIT session
+   * (title prefix `porting-kit:`) that is not tagged with the current epoch.
+   * The epoch is the parsed trailing segment of the fence label, compared
+   * exactly; a toolkit-prefixed title with no parseable epoch (for example the
+   * `porting-kit:agent-roundtrip` evidence session) cannot be current, so it
+   * is foreign too. Sessions without the prefix are not the toolkit's and are
+   * left alone. Returns the aborted IDs.
    */
   async abortSessionsNotTagged(epoch: number): Promise<string[]> {
     const sessions = await this.listSessions();
-    const foreign = sessions.filter((s) => !s.title.includes(`#${epoch}`));
+    const foreign = sessions.filter((s) => isStaleToolkitSession(s.title, epoch));
     const aborted: string[] = [];
     for (const s of foreign) {
       if (await this.abortAndConfirm(s.id)) aborted.push(s.id);

@@ -14,30 +14,26 @@
  *    (server 1.18.32 field; SDK type lags) and is ABSENT when unset.
  */
 
-import { describe, expect, test, afterEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   executorPromptOpts,
+  isDemotedAttempt,
   laneRouting,
   parseModelRef,
   plannerPromptOpts,
   reviewLaneRouting,
 } from "../src/harness/lanes.js";
 import { OpencodeHarness } from "../src/harness/opencode.js";
+import { clearHarnessEnv } from "./support/opencode-env.js";
 
-const ENV_KEYS = [
-  "OPENCODE_PLANNER_MODEL",
-  "OPENCODE_PLANNER_VARIANT",
-  "OPENCODE_EXECUTOR_MODEL",
-  "OPENCODE_EXECUTOR_VARIANT",
-  "OPENCODE_REVIEWER_MODEL",
-  "OPENCODE_REVIEWER_VARIANT",
-  "OPENCODE_REVIEWER_MODEL_FALLBACK",
-  "OPENCODE_REVIEWER_MODEL_FALLBACK_VARIANT",
-] as const;
-
-afterEach(() => {
-  for (const k of ENV_KEYS) delete process.env[k];
+// Bun auto-loads the operator's .env, which README tells them to fill with
+// OPENCODE_*_MODEL/VARIANT overrides: clear BEFORE each test (not only after)
+// so the "defaults (no env required)" tests really see no env (audit C22/C78).
+let restoreEnv: () => void;
+beforeEach(() => {
+  restoreEnv = clearHarnessEnv();
 });
+afterEach(() => restoreEnv());
 
 describe("lane defaults (in code — no env required)", () => {
   test("planner = glm-5.3 @ high", () => {
@@ -97,12 +93,49 @@ describe("env overrides", () => {
     expect(laneRouting("executor").variant).toBe("low");
   });
 
+  test("variant 'none' (any case) omits the variant so a non-glm model override is not sent 'max' (C24)", () => {
+    process.env.OPENCODE_EXECUTOR_MODEL = "acme/no-variant-ladder";
+    for (const none of ["none", "NONE", "None"]) {
+      process.env.OPENCODE_EXECUTOR_VARIANT = none;
+      expect(laneRouting("executor")).toEqual({
+        model: { providerID: "acme", modelID: "no-variant-ladder" },
+        variant: undefined,
+      });
+      // The spread helper drops the field entirely (exactOptionalPropertyTypes-clean).
+      expect("variant" in executorPromptOpts()).toBe(false);
+    }
+  });
+
+  test("a blank variant env keeps the lane default; 'none' only affects its own lane", () => {
+    process.env.OPENCODE_EXECUTOR_VARIANT = "   ";
+    expect(laneRouting("executor").variant).toBe("max");
+    process.env.OPENCODE_PLANNER_VARIANT = "none";
+    expect(laneRouting("planner").variant).toBeUndefined();
+    expect(laneRouting("reviewer").variant).toBe("high");
+  });
+
   test("parseModelRef contract", () => {
     expect(parseModelRef("a/b/c")).toEqual({ providerID: "a", modelID: "b/c" });
     expect(parseModelRef(undefined)).toBeUndefined();
     expect(parseModelRef("  ")).toBeUndefined();
     expect(parseModelRef("x/")).toBeUndefined();
     expect(parseModelRef("/y")).toBeUndefined();
+  });
+});
+
+describe("isDemotedAttempt — the single home of the attempt threshold (C25)", () => {
+  test("attempt 1, 0 and undefined stay on the reviewer lane; attempt >= 2 demotes", () => {
+    for (const a of [undefined, 0, 1]) expect(isDemotedAttempt(a)).toBe(false);
+    for (const a of [2, 3, 10]) expect(isDemotedAttempt(a)).toBe(true);
+  });
+
+  test("reviewLaneRouting flips to the demotion lane exactly where isDemotedAttempt does", () => {
+    const reviewer = reviewLaneRouting(1);
+    for (const a of [undefined, 0, 1, 2, 3, 7]) {
+      const routed = reviewLaneRouting(a);
+      if (isDemotedAttempt(a)) expect(routed).not.toEqual(reviewer);
+      else expect(routed).toEqual(reviewer);
+    }
   });
 });
 
@@ -132,6 +165,14 @@ describe("review demotion over lanes (f(attempt), US-002)", () => {
     });
     process.env.OPENCODE_REVIEWER_MODEL_FALLBACK_VARIANT = "low";
     expect(reviewLaneRouting(2)?.variant).toBe("low");
+  });
+
+  test("fallback variant 'none' omits the variant on the demoted turn (C24)", () => {
+    process.env.OPENCODE_REVIEWER_MODEL_FALLBACK = "acme/plain-model";
+    process.env.OPENCODE_REVIEWER_MODEL_FALLBACK_VARIANT = "none";
+    const demoted = reviewLaneRouting(2);
+    expect(demoted).toEqual({ model: { providerID: "acme", modelID: "plain-model" } });
+    expect("variant" in demoted).toBe(false);
   });
 });
 

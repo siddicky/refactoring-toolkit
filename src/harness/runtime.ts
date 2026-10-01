@@ -39,6 +39,7 @@ import type {
 import type { PhpSymbol } from "../typesafe/symbol-types.js";
 import { createInMemoryJevClient, type InMemoryResponder, type JudgmentClient } from "../typesafe/client.js";
 import type { TokenUsage } from "../metrics/types.js";
+import { isDemotedAttempt } from "./lanes.js";
 
 // ---------------------------------------------------------------------------
 // Effective permissions (config + plugin merge, deny authoritative)
@@ -149,56 +150,26 @@ export function toEnvelopeUsage(u: {
 }
 
 /**
- * Per-turn REVIEWER model override (wave-5 lane swap): when set, every
- * reviewer turn (prep reviews + per-file review-A/B — all through
- * runReviewTurn) runs on this provider/model instead of the harness default,
- * so the reviewer lane can move independently of implementer/fixer (which
- * stay on the default lane). Format: `OPENCODE_REVIEWER_MODEL=<providerID>/<modelID>`
- * e.g. `openai/gpt-6-luna`. Invalid formats are ignored (undefined).
- */
-export function reviewerModelOverride(): { providerID: string; modelID: string } | undefined {
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  const v = proc?.env?.OPENCODE_REVIEWER_MODEL?.trim();
-  if (v === undefined || v === "") return undefined;
-  const slash = v.indexOf("/");
-  if (slash <= 0 || slash >= v.length - 1) return undefined;
-  return { providerID: v.slice(0, slash), modelID: v.slice(slash + 1) };
-}
-
-/**
- * Tier-0 demotion FALLBACK lane (US-002): `OPENCODE_REVIEWER_MODEL_FALLBACK`
- * in the same `providerID/modelID` format. When unset the fallback lane IS
- * the implementer lane (undefined override → harness default model), so an
- * operator only sets this to demote to a DIFFERENT second-choice model.
- */
-export function reviewerModelFallback(): { providerID: string; modelID: string } | undefined {
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  const v = proc?.env?.OPENCODE_REVIEWER_MODEL_FALLBACK?.trim();
-  if (v === undefined || v === "") return undefined;
-  const slash = v.indexOf("/");
-  if (slash <= 0 || slash >= v.length - 1) return undefined;
-  return { providerID: v.slice(0, slash), modelID: v.slice(slash + 1) };
-}
-
-/**
  * Demotion policy = f(attempt) ONLY (US-002, plan v5.1 §Stage 1). Attempt
- * >= 2 on a REVIEW turn demotes the lane from the OPENCODE_REVIEWER_MODEL
- * default to the fallback lane (default: the implementer lane). PURE: no env
- * reads, no durable state, no clock — the dex attempt count is the durable
- * signal (intra-step writes do not survive a kill; 0(g)). A failed attempt
- * re-enters the step with attempt+1, so every Tier-0 retry lands here.
+ * >= 2 on a REVIEW turn leaves the reviewer lane for the demotion lane
+ * (OPENCODE_REVIEWER_MODEL_FALLBACK, else the executor lane — see
+ * reviewLaneRouting in lanes.ts). PURE: no env reads, no durable state, no
+ * clock — the dex attempt count is the durable signal (intra-step writes do
+ * not survive a kill; 0(g)). A failed attempt re-enters the step with
+ * attempt+1, so every Tier-0 retry lands here.
  *
- * Generic over the lane type so the SAME policy also labels the lane in the
- * US-003 successor diagnosis record (demoteReviewerLane(attempt, "default",
- * "demoted")) — one policy source, no duplicated attempt rule. NO Tier-1
- * input: the attempt count is a deterministic dex signal (AC-B2).
+ * The threshold lives in ONE place, `isDemotedAttempt` (lanes.ts), which this
+ * helper and the lane router both call. Generic over the lane type so callers
+ * can label a turn (e.g. "default" | "demoted" in the US-003 successor
+ * diagnosis record) without restating the attempt rule. NO Tier-1 input: the
+ * attempt count is a deterministic dex signal (AC-B2).
  */
 export function demoteReviewerLane<L>(
   attempt: number | undefined,
   defaultLane: L,
   fallbackLane: L,
 ): L {
-  return (attempt ?? 1) >= 2 ? fallbackLane : defaultLane;
+  return isDemotedAttempt(attempt) ? fallbackLane : defaultLane;
 }
 
 // ---------------------------------------------------------------------------
