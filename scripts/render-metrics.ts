@@ -2,358 +2,208 @@
  * render-metrics — AC2 evidence driver (Phase 7): collects one flow's durable
  * evidence from the read-only dex surfaces and renders the metrics report.
  *
- *   bun scripts/render-metrics.ts --flow-id <id> [--kill-events <jsonl>] \
+ *   bun scripts/render-metrics.ts --flow-id <id> [--kill-events|--events <jsonl>] [--all-runs] \
+ *     [--legacy-flow-keyed-envelopes] \
  *     [--out-dir metrics] [--generated-at <utc-iso>]
+ *
+ * dexcli is resolved like every other dex caller: DEXCLI_BIN (default
+ * `dexcli`) and DEX_SERVER_ADDRESS (passed as `-server`).
  *
  * Inputs (all read-only, matching the proven surfaces):
  * - `dexcli flow state <flowId>` attribute store: `envelope-event/*` (the
  *   envelope stream), `pp-verdict/*` + `pp-prep-verdict/*` (ReviewTuple — the
  *   `metrics` member is the AC2 VerdictRecord — plus the US-006 tombstone
- *   variant `{reviewer, discarded, reason, attempt, tokens}`), `queue-burndown/*`;
+ *   variant `{reviewer, discarded, reason, attempt, tokens}`), `queue-burndown/*`,
+ *   `pp-jev-usage/*` (live TypeSafe Jev spend — reported as its own
+ *   "judgment (Jev)" line, never folded into the model-calling totals);
  * - `dexcli flow history <flowId>` (typed dispatch anchoring);
+ * - `dexcli flow summary <flowId>` (run ids + flowStatus; fetched once);
  * - optional chaos sidecar (JSON lines, intent/completed records) merged into
  *   the renderer's KillEventsFile shape (`resumed` is supplied by this driver
- *   from the flow's terminal status: a kill + a completed terminal state means
- *   the run resumed).
+ *   per kill: the flow completed, or an envelope started after the kill).
  *
  * Pure render via src/metrics/render.ts (renderReport); this script only
  * adapts wire shapes and writes metrics/report.md + metrics/report.json.
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { dexConfigFromEnv } from "../src/dex/client.js";
+import {
+  collectBurnDown,
+  collectEnvelopes,
+  collectJevUsage,
+  collectTombstones,
+  collectVerdicts,
+  discoverChildFlowIds,
+  type FlowFacts,
+  flowFactsFromSummary,
+  type FlowSummaryWire,
+  type StateAttribute,
+} from "../src/metrics/collect.js";
+import { loadKillEvents, resumedAfterKill, withResumed } from "../src/metrics/kill-events.js";
 import { renderReport } from "../src/metrics/render.js";
 import type {
   EnvelopeEvent,
-  KillEvent,
-  KillEventsFile,
+  JevUsageEntry,
   QueueBurnDownEvent,
-  QueueKind,
-  TokenUsage,
   VerdictRecord,
   VerdictTombstone,
 } from "../src/metrics/types.js";
 import type { DispatchHistory } from "../src/metrics/dispatch-anchor.js";
 
-interface StateAttribute {
-  key: string;
-  value: unknown;
-}
-
+/** `dexcli flow state` wire: attributes only (run ids / status live on `flow summary`). */
 interface FlowState {
-  flowId?: string;
-  runId?: string;
-  flowStatus?: string;
   attributes?: StateAttribute[];
 }
 
-interface SidecarLine {
-  kind: "intent" | "completed";
-  run_id: string;
-  utc: string;
-  monotonic_ms: number;
-  target_pids?: number[];
-  killed_pids?: number[];
-  notes?: string;
+class UsageError extends Error {}
+
+/**
+ * Value of `--flag <value>`; undefined when the flag is absent. A missing
+ * value or one that is itself a flag (`--flow-id --out-dir x`) is a usage
+ * error rather than silently swallowing the next flag as the value.
+ */
+export function argValueFrom(argv: readonly string[], flag: string): string | undefined {
+  const i = argv.indexOf(flag);
+  if (i < 0) return undefined;
+  const value = argv[i + 1];
+  if (value === undefined || value.startsWith("--")) {
+    throw new UsageError(`${flag} requires a value`);
+  }
+  return value;
 }
 
-function argValue(flag: string): string | undefined {
-  const i = process.argv.indexOf(flag);
-  return i >= 0 ? process.argv[i + 1] : undefined;
+/**
+ * The dexcli call every read goes through: the binary honours DEXCLI_BIN and
+ * the server honours DEX_SERVER_ADDRESS (same resolution as run-demo,
+ * serve-status, watch-queue-verify and the dashboard queries), so a non-default
+ * dex is never silently bypassed in favour of dexcli's own 127.0.0.1:8801.
+ */
+export function dexcliInvocation(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): { bin: string; args: string[] } {
+  return {
+    bin: env.DEXCLI_BIN?.trim() || "dexcli",
+    args: [...args, "-server", dexConfigFromEnv(env).serverAddress, "-output", "json"],
+  };
 }
 
-function runDexcli(args: string[]): unknown {
-  const stdout = execFileSync("dexcli", args, {
+/** One dexcli read returning the parsed JSON payload (injectable for tests). */
+export type DexRunner = (args: readonly string[]) => unknown;
+
+const runDexcli: DexRunner = (args) => {
+  const call = dexcliInvocation(args);
+  const stdout = execFileSync(call.bin, call.args, {
     encoding: "utf8",
     maxBuffer: 256 * 1024 * 1024,
   });
   return JSON.parse(stdout);
-}
-
-interface FlowSummary {
-  flowId?: string;
-  runId?: string;
-  firstRunId?: string;
-  flowStatus?: string;
-}
+};
 
 /**
- * Merged dispatch history across ALL runs of the flow: a continue-as-new flow
- * (dex housekeeping at its event threshold) accumulates envelopes across runs
- * while `flow history` returns one run at a time — the anchor needs every
- * run's dispatch entries or first-run envelopes fail as anchorless.
+ * Dispatch history of a flow's FIRST and CURRENT run (from its `flow
+ * summary`). A continue-as-new flow (dex housekeeping at its event threshold)
+ * accumulates envelopes across runs while `flow history` returns one run at a
+ * time, so the anchor needs both runs' dispatch entries or first-run envelopes
+ * fail as anchorless. `dexcli flow summary` exposes no run chain, so the
+ * middle runs of a flow with three or more runs are NOT enumerable and not
+ * covered. The parent and every child use this same helper.
  */
-function mergedHistory(flowId: string): DispatchHistory {
-  // firstRunId lives on the summary surface, not on flow state.
-  const summary = runDexcli(["flow", "summary", flowId]) as FlowSummary;
-  const runIds = [...new Set([summary.firstRunId, summary.runId].filter(
-    (r): r is string => typeof r === "string" && r.length > 0,
-  ))];
-  const events = runIds.flatMap((rid) => {
-    const h = runDexcli(["flow", "history", flowId, "-run-id", rid, "-all"]) as DispatchHistory;
+export function mergedHistory(facts: FlowFacts, run: DexRunner = runDexcli): DispatchHistory {
+  // A summary without run ids falls back to dexcli's default (latest) run
+  // instead of silently fetching nothing.
+  const runs: Array<string | undefined> = facts.runIds.length > 0 ? facts.runIds : [undefined];
+  const events = runs.flatMap((rid) => {
+    const args =
+      rid === undefined
+        ? ["flow", "history", facts.flowId, "-all"]
+        : ["flow", "history", facts.flowId, "-run-id", rid, "-all"];
+    const h = run(args) as DispatchHistory;
     return h.events ?? [];
   });
-  return {
-    flowId: summary.flowId ?? flowId,
-    ...(summary.runId !== undefined ? { runId: summary.runId } : {}),
-    events,
-  };
+  return { flowId: facts.flowId, runId: facts.runId, events };
 }
 
-/**
- * Burn-down total rows (flow writes `file: null`) carry the iteration total;
- * per-file rows carry the groups. The renderer SUMS per iteration, so feed
- * per-file rows plus a "(total)" row only when a 0-count iteration has no
- * per-file rows (otherwise totals would double-count).
- */
-function collectBurnDown(attrs: StateAttribute[]): QueueBurnDownEvent[] {
-  const perFile: QueueBurnDownEvent[] = [];
-  const totals = new Map<string, QueueBurnDownEvent>();
-  for (const a of attrs) {
-    if (!a.key.startsWith("queue-burndown/")) continue;
-    const v = a.value as Partial<QueueBurnDownEvent> & { file?: string | null };
-    if (
-      typeof v?.queue !== "string" ||
-      typeof v.iteration !== "number" ||
-      typeof v.error_count !== "number" ||
-      typeof v.recorded_at !== "string"
-    ) {
-      continue;
-    }
-    const queue = v.queue as QueueKind;
-    // US-010 honest vitest accounting: state travels with the sample when the
-    // flow wrote it (legacy rows keep the field absent).
-    let vitest: QueueBurnDownEvent["vitest"];
-    if (
-      v.vitest !== undefined &&
-      typeof v.vitest === "object" &&
-      v.vitest !== null &&
-      (v.vitest.state === "ran" || v.vitest.state === "not-run")
-    ) {
-      vitest = {
-        state: v.vitest.state,
-        reason: typeof v.vitest.reason === "string" ? v.vitest.reason : null,
-        passed: typeof v.vitest.passed === "number" ? v.vitest.passed : null,
-        failed: typeof v.vitest.failed === "number" ? v.vitest.failed : null,
-        total: typeof v.vitest.total === "number" ? v.vitest.total : null,
-      };
-    }
-    const sample: QueueBurnDownEvent = {
-      queue,
-      // Renderer's QueueBurnDownEvent.file is a string; "(total)" marks the
-      // flow's aggregate row and is only emitted when no per-file rows exist.
-      file: typeof v.file === "string" && v.file !== "" ? v.file : "(total)",
-      iteration: v.iteration,
-      error_count: v.error_count,
-      recorded_at: v.recorded_at,
-      ...(vitest !== undefined ? { vitest } : {}),
-    };
-    if (typeof v.file === "string" && v.file !== "") {
-      perFile.push(sample);
-    } else {
-      totals.set(`${queue}\u0000${v.iteration}`, sample);
-    }
-  }
-  const iterationsWithFiles = new Set(perFile.map((s) => `${s.queue}\u0000${s.iteration}`));
-  const out = [...perFile];
-  for (const [key, total] of totals) {
-    if (!iterationsWithFiles.has(key)) out.push(total);
-  }
-  return out;
+/** {@link mergedHistory} for a flow known only by id (fetches its summary first). */
+export function mergedHistoryOf(flowId: string, run: DexRunner = runDexcli): DispatchHistory {
+  const summary = run(["flow", "summary", flowId]) as FlowSummaryWire;
+  return mergedHistory(flowFactsFromSummary(flowId, summary), run);
 }
 
-function collectVerdicts(attrs: StateAttribute[]): VerdictRecord[] {
-  const out: VerdictRecord[] = [];
-  for (const a of attrs) {
-    if (!a.key.startsWith("pp-verdict/") && !a.key.startsWith("pp-prep-verdict/")) continue;
-    const tuple = a.value as { metrics?: VerdictRecord } | null;
-    const rec = tuple?.metrics;
-    if (
-      rec !== undefined &&
-      rec !== null &&
-      typeof rec.file === "string" &&
-      typeof rec.reviewer === "string" &&
-      Array.isArray(rec.findings)
-    ) {
-      out.push(rec);
-    }
-  }
-  return out.sort((p, q) =>
-    `${p.file}#${p.round}#${p.reviewer}`.localeCompare(`${q.file}#${q.round}#${q.reviewer}`),
-  );
-}
-
-/**
- * US-006 tombstones (discarded reviewer verdicts) stored under the same
- * pp-verdict / pp-prep-verdict keys a completed tuple would use. The value
- * carries {reviewer, discarded, reason, attempt, tokens}; file+round are
- * recovered from the attribute key (`<sanitized-file>#<round>#<reviewer>` —
- * "__" -> "/" is lossy for filenames containing "__", documented pattern of
- * fileFromIdentity). Tombstones never enter the VerdictRecord stream; the
- * renderer uses them for the degraded marker and the exhaustion under-count
- * note.
- */
-function collectTombstones(
-  attrs: StateAttribute[],
-): Array<VerdictTombstone & { file: string; round: number }> {
-  const out: Array<VerdictTombstone & { file: string; round: number }> = [];
-  for (const a of attrs) {
-    if (!a.key.startsWith("pp-verdict/") && !a.key.startsWith("pp-prep-verdict/")) continue;
-    const suffix = a.key.slice(a.key.indexOf("/") + 1);
-    const reviewerSep = suffix.lastIndexOf("#");
-    const roundSep = reviewerSep > 0 ? suffix.lastIndexOf("#", reviewerSep - 1) : -1;
-    if (reviewerSep <= 0 || roundSep <= 0) continue;
-    const v = a.value as Partial<VerdictTombstone> | null;
-    if (v === null || typeof v !== "object" || v.discarded !== true) continue;
-    if (typeof v.reviewer !== "string" || typeof v.reason !== "string") continue;
-    if (typeof v.attempt !== "number") continue;
-    out.push({
-      file: suffix.slice(0, roundSep).replace(/__/g, "/"),
-      round: Number(suffix.slice(roundSep + 1, reviewerSep)),
-      reviewer: v.reviewer,
-      discarded: true,
-      reason: v.reason,
-      attempt: v.attempt,
-      tokens: (v.tokens ?? null) as number | TokenUsage | null,
-    });
-  }
-  return out.sort((p, q) =>
-    `${p.file}#${p.round}#${p.reviewer}`.localeCompare(`${q.file}#${q.round}#${q.reviewer}`),
-  );
-}
-
-function collectEnvelopes(attrs: StateAttribute[]): EnvelopeEvent[] {
-  const out: EnvelopeEvent[] = [];
-  for (const a of attrs) {
-    if (!a.key.startsWith("envelope-event/")) continue;
-    const v = a.value as Partial<EnvelopeEvent> | null;
-    if (
-      v !== null &&
-      typeof v === "object" &&
-      typeof v.stepId === "string" &&
-      typeof v.role === "string" &&
-      typeof v.attempt === "number" &&
-      typeof v.outcome === "string"
-    ) {
-      out.push(v as EnvelopeEvent);
-    }
-  }
-  return out.sort((p, q) => p.started_at.localeCompare(q.started_at));
-}
-
-/** Sidecar JSONL (kind "intent"/"completed") → renderer KillEventsFile. */
-function collectKillEvents(path: string | undefined, runId: string, flowCompleted: boolean): KillEventsFile | null {
-  if (path === undefined || !existsSync(path)) return null;
-  const events: KillEvent[] = [];
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    if (line.trim() === "") continue;
-    let raw: SidecarLine;
-    try {
-      raw = JSON.parse(line) as SidecarLine;
-    } catch {
-      continue;
-    }
-    if (raw.kind === "intent") {
-      events.push({
-        kind: "kill-intent",
-        run_id: raw.run_id,
-        utc: raw.utc,
-        monotonic_ms: raw.monotonic_ms,
-        target_pids: raw.target_pids ?? [],
-      });
-    } else if (raw.kind === "completed") {
-      events.push({
-        kind: "kill-completed",
-        run_id: raw.run_id,
-        utc: raw.utc,
-        monotonic_ms: raw.monotonic_ms,
-        // "resumed" is a post-kill fact this driver supplies from the flow's
-        // terminal status (kill + completed terminal path = resumed).
-        resumed: flowCompleted,
-        note: raw.notes ?? null,
-      });
-    }
-  }
-  return events.length > 0 ? { run_id: runId, events } : null;
-}
-
-async function main(): Promise<number> {
+async function main(argv: readonly string[]): Promise<number> {
+  const argValue = (flag: string): string | undefined => argValueFrom(argv, flag);
   const flowId = argValue("--flow-id");
   if (flowId === undefined) {
-    console.error("usage: render-metrics.ts --flow-id <id> [--kill-events <jsonl>] [--out-dir metrics] [--generated-at <iso>]");
+    console.error("usage: render-metrics.ts --flow-id <id> [--kill-events|--events <jsonl>] [--all-runs] [--legacy-flow-keyed-envelopes] [--out-dir metrics] [--generated-at <iso>]");
+    return 2;
+  }
+  // `--events` is the flag name chaos-kill / watch-queue-verify use.
+  const killEventsPath = argValue("--kill-events") ?? argValue("--events");
+  if (killEventsPath !== undefined && !existsSync(killEventsPath)) {
+    console.error(`[render-metrics] kill-events sidecar not found: ${killEventsPath}`);
     return 2;
   }
   const outDir = argValue("--out-dir") ?? "metrics";
   const generatedAt = argValue("--generated-at") ?? new Date().toISOString();
 
-  const state = runDexcli(["flow", "state", flowId]) as FlowState & FlowSummary;
-  const runId = state.runId ?? flowId;
+  // flowStatus / runId / firstRunId come from ONE `flow summary` call; the
+  // `flow state` payload only carries the attribute store.
+  const facts = flowFactsFromSummary(flowId, runDexcli(["flow", "summary", flowId]) as FlowSummaryWire);
+  const state = runDexcli(["flow", "state", flowId]) as FlowState;
+  const runId = facts.runId;
   const attrs = state.attributes ?? [];
-  const flowCompleted = state.flowStatus === "FLOW_STATUS_COMPLETED";
+  const flowCompleted = facts.flowCompleted;
 
-  // Parallel topology (v1.1): child flows are published by the parent under
-  // `pp-wave-children/children` — but that attribute is OVERWRITTEN on every wave, so
-  // the final state only names the LAST wave's children (live finding cx-5e:
-  // 10 children across 6 waves, 1 in final state). Walk the parent's durable
-  // HISTORY for every pp-wave-children upsert, then merge the final state's
-  // copy; every child's envelope/verdict/burn-down evidence joins the report.
-  const childIds: Set<string> = new Set();
-  for (const a of attrs) {
-    if (!a.key.startsWith("pp-wave-children")) continue;
-    const v = a.value as { children?: Array<{ flowId?: string }> } | null;
-    for (const c of v?.children ?? []) {
-      if (typeof c?.flowId === "string" && c.flowId.length > 0) childIds.add(c.flowId);
-    }
-  }
-  interface HistoryChildrenWire {
-    events?: Array<{
-      payload?: {
-        output?: {
-          upsertAttributes?: Array<{
-            key?: string;
-            value?: { children?: Array<{ flowId?: string }> };
-          }>;
-        };
-      };
-    }>;
-  }
-  const parentHistory = runDexcli(["flow", "history", flowId, "-all"]) as HistoryChildrenWire;
-  for (const event of parentHistory.events ?? []) {
-    for (const up of event.payload?.output?.upsertAttributes ?? []) {
-      if (up?.key === undefined || !up.key.startsWith("pp-wave-children")) continue;
-      for (const c of up.value?.children ?? []) {
-        if (typeof c?.flowId === "string" && c.flowId.length > 0) childIds.add(c.flowId);
-      }
-    }
-  }
+  // Parallel topology (v1.1): every child's envelope/verdict/burn-down
+  // evidence joins the report. Children come from the parent's final state AND
+  // every pp-wave-children upsert in its durable history.
+  const history = mergedHistory(facts);
+  const childIds = discoverChildFlowIds(attrs, history.events);
   const envelopes: EnvelopeEvent[] = [];
   const verdicts: VerdictRecord[] = [];
   const tombstones: Array<VerdictTombstone & { file: string; round: number }> = [];
   const burnDown: QueueBurnDownEvent[] = [];
+  const jevUsage: JevUsageEntry[] = [];
   for (const id of [flowId, ...childIds]) {
     const s = id === flowId ? state : (runDexcli(["flow", "state", id]) as FlowState);
     envelopes.push(...collectEnvelopes(s.attributes ?? []));
     verdicts.push(...collectVerdicts(s.attributes ?? []));
     tombstones.push(...collectTombstones(s.attributes ?? []));
     burnDown.push(...collectBurnDown(s.attributes ?? []));
+    jevUsage.push(...collectJevUsage(s.attributes ?? []));
   }
 
-  const history = mergedHistory(flowId);
   for (const id of childIds) {
-    const h = runDexcli(["flow", "history", id, "-all"]) as DispatchHistory;
-    history.events.push(...(h.events ?? []));
+    history.events.push(...mergedHistoryOf(id).events);
   }
-  const killEvents = collectKillEvents(argValue("--kill-events"), runId, flowCompleted);
+  // Contract B: one sidecar parser; only this flow's kills (run id, flow id)
+  // are attributed to it; malformed lines are reported, not dropped.
+  const runIds = [...new Set([...facts.runIds, flowId])];
+  const loaded = loadKillEvents({
+    explicitPath: killEventsPath,
+    matchIds: runIds,
+    allRuns: argv.includes("--all-runs"),
+    runId,
+  });
+  // "resumed" is a post-kill fact this driver supplies per kill: the flow
+  // completed, or an envelope started after the kill.
+  const killEvents = withResumed(loaded.file, (c) => resumedAfterKill(c.utc, envelopes, flowCompleted));
 
   const report = renderReport({
     envelopes,
     verdicts,
     tombstones,
     burnDown,
+    jevUsage,
     ...(killEvents !== null ? { killEvents } : {}),
+    killEventDiagnostics: loaded.diagnostics,
     history,
+    // Old (pre-identityOf, cx-5e style) evidence only; strict anchoring otherwise.
+    ...(argv.includes("--legacy-flow-keyed-envelopes") ? { legacyFlowKeyedEnvelopes: true } : {}),
     generatedAt,
   });
 
@@ -364,15 +214,26 @@ async function main(): Promise<number> {
   writeFileSync(jsonPath, `${JSON.stringify(report.json, null, 2)}\n`, "utf8");
 
   console.log(
-    `[render-metrics] flow=${flowId} run=${runId} envelopes=${envelopes.length} verdicts=${verdicts.length} tombstones=${tombstones.length} degradedRounds=${report.json.summary.degraded_round_count} burnDown=${burnDown.length} killEvents=${killEvents?.events.length ?? 0} provenance_ok=${report.json.provenance_ok}`,
+    `[render-metrics] flow=${flowId} run=${runId} envelopes=${envelopes.length} verdicts=${verdicts.length} tombstones=${tombstones.length} degradedRounds=${report.json.summary.degraded_round_count} burnDown=${burnDown.length} jevTokens=${report.json.jev_usage?.total_tokens ?? 0} killEvents=${killEvents?.events.length ?? 0} provenance_ok=${report.json.provenance_ok}`,
   );
   console.log(`[render-metrics] wrote ${mdPath} + ${jsonPath}`);
+  if (report.json.no_evidence) {
+    console.error(
+      `[render-metrics] NO EVIDENCE: flow ${flowId} has no envelope events (wrong flow id, attributes not read, or no steps yet) — the report verifies nothing`,
+    );
+  }
   return report.json.provenance_ok ? 0 : 1;
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
-    console.error("[render-metrics] fatal:", err);
-    process.exit(1);
-  });
+if (import.meta.main) {
+  main(process.argv.slice(2))
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      if (err instanceof UsageError) {
+        console.error(`[render-metrics] usage: ${err.message}`);
+        process.exit(2);
+      }
+      console.error("[render-metrics] fatal:", err);
+      process.exit(1);
+    });
+}

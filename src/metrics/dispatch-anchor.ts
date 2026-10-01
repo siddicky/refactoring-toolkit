@@ -111,22 +111,43 @@ function identityFromEvent(event: DispatchHistoryEvent): string | null {
  * `payload.context.stepType` are not step dispatches (flow-level events) and
  * are skipped. A missing finalAttempt defaults to 1 (dex always reports it
  * per 0(h); the default keeps hand-made fixtures honest).
+ *
+ * One step execution emits SEVERAL history events (started / execute
+ * completed / waitFor ...) carrying the same context, so events are deduped
+ * per (stepType, stepExecutionId, finalAttempt): an entry is one execution
+ * ATTEMPT, never one event. Retries stay distinct (different finalAttempt or
+ * execution id). Events without a stepExecutionId cannot be deduped and each
+ * count. When duplicates disagree on identity the one that carries the file
+ * +round input echo wins.
  */
 export function extractDispatchEntries(history: DispatchHistory): DispatchEntry[] {
   const entries: DispatchEntry[] = [];
+  const seen = new Map<string, DispatchEntry>();
   for (const event of history.events) {
     const context = event.payload?.context;
     if (context === undefined || context === null) continue;
     const stepType = context.stepType;
     if (typeof stepType !== "string" || stepType.length === 0) continue;
-    const stepExecutionId = context.stepExecutionId;
+    const stepExecutionId = typeof context.stepExecutionId === "string" ? context.stepExecutionId : "";
     const finalAttempt = context.finalAttempt;
-    entries.push({
-      stepExecutionId: typeof stepExecutionId === "string" ? stepExecutionId : "",
+    const entry: DispatchEntry = {
+      stepExecutionId,
       stepType,
       finalAttempt: typeof finalAttempt === "number" && Number.isInteger(finalAttempt) && finalAttempt >= 1 ? finalAttempt : 1,
       identity: identityFromEvent(event),
-    });
+    };
+    if (stepExecutionId === "") {
+      entries.push(entry);
+      continue;
+    }
+    const key = `${stepType}\u0000${stepExecutionId}\u0000${entry.finalAttempt}`;
+    const existing = seen.get(key);
+    if (existing === undefined) {
+      seen.set(key, entry);
+      entries.push(entry);
+    } else if (existing.identity === null && entry.identity !== null) {
+      existing.identity = entry.identity;
+    }
   }
   return entries;
 }
@@ -257,6 +278,18 @@ export interface AnchorOptions {
    * Default true.
    */
   requireStartMarkers?: boolean;
+  /**
+   * Accept the cx-5e accommodation for PRE-identityOf evidence: a flow-keyed
+   * (identity null) completion envelope of a per-file step anchors ANY
+   * identity-bearing dispatch entry of the same type, and accepts an
+   * identity-bearing start marker. Default false: current flows write
+   * identity-keyed envelopes for every per-file step (ChildLease/ChildRelease/
+   * QueueFix included), and the accommodation is lossy — it collapses every
+   * flow-keyed envelope of a type into one group whose MAX attempt is compared
+   * against every entry, which yields false failures and false passes. Turn it
+   * on only to render old cx-5e-style evidence.
+   */
+  legacyFlowKeyedEnvelopes?: boolean;
 }
 
 export interface DispatchAnchorGroup {
@@ -313,6 +346,9 @@ function identityDisplay(identity: string | null): string {
  * 3. unknown step types fail; non-agent dex kinds are allowed envelope-less;
  * 4. model-calling envelopes must have their attempt-0 start marker (when
  *    requireStartMarkers, default on).
+ *
+ * Envelopes and entries are matched by exact identity; the lossy flow-keyed
+ * join for pre-identityOf evidence is opt-in (`legacyFlowKeyedEnvelopes`).
  */
 export function anchorDispatch(
   envelopes: readonly EnvelopeEvent[],
@@ -320,6 +356,7 @@ export function anchorDispatch(
   options: AnchorOptions = {},
 ): DispatchAnchorResult {
   const requireStartMarkers = options.requireStartMarkers ?? true;
+  const legacyFlowKeyed = options.legacyFlowKeyedEnvelopes ?? false;
   const failures: string[] = [];
 
   // ---- classify + group dispatch entries ---------------------------------
@@ -421,14 +458,15 @@ export function anchorDispatch(
       const markerKey = `${env.stepId}@@${env.identity ?? ""}`;
       if (!markersChecked.has(markerKey)) {
         markersChecked.add(markerKey);
-        // cx-5e: a flow-keyed completion envelope accepts an identity-bearing
-        // marker of the same step (the marker carries the file#round the
-        // envelope lacks).
+        // Legacy (cx-5e, opt-in): a flow-keyed completion envelope accepts an
+        // identity-bearing marker of the same step (the marker carries the
+        // file#round the envelope lacks). Strict: the marker must match the
+        // envelope's own identity exactly.
         const hasMarker = envelopes.some(
           (m) =>
             m.stepId === env.stepId &&
             m.attempt === 0 &&
-            (env.identity === null ? true : m.identity === env.identity),
+            (legacyFlowKeyed && env.identity === null ? true : m.identity === env.identity),
         );
         if (!hasMarker) {
           missingMarkerCount++;
@@ -445,13 +483,13 @@ export function anchorDispatch(
     const exact = entryGroups.get(key);
     const flowLevel =
       envGroup.identity !== null ? entryGroups.get(groupKey(envGroup.spec.stepType, null)) : undefined;
-    // cx-5e accommodation: some per-file steps wrote FLOW-KEYED completion
-    // envelopes (identity null) while their dispatch entries carry file#round
-    // (ChildLease / queue-fix before identityOf was added). A flow-keyed
-    // envelope anchors against ANY dispatch entry of the same type — the
-    // reverse direction below still proves every entry individually.
+    // Legacy cx-5e accommodation (opt-in, see AnchorOptions): some per-file
+    // steps wrote FLOW-KEYED completion envelopes (identity null) while their
+    // dispatch entries carry file#round (ChildLease / queue-fix before
+    // identityOf was added). A flow-keyed envelope then anchors against ANY
+    // dispatch entry of the same type.
     const sameTypeAnyIdentity =
-      envGroup.identity === null && exact === undefined && flowLevel === undefined
+      legacyFlowKeyed && envGroup.identity === null && exact === undefined && flowLevel === undefined
         ? [...entryGroups.values()].find((g) => g.spec.stepType === envGroup.spec.stepType)
         : undefined;
     if (exact === undefined && flowLevel === undefined && sameTypeAnyIdentity === undefined) {
@@ -469,8 +507,8 @@ export function anchorDispatch(
   for (const [key, entryGroup] of entryGroups) {
     const exactEnv = envelopeGroups.get(key);
     let envelopeAttempt = exactEnv?.maxAttempt ?? null;
-    if (envelopeAttempt === null && entryGroup.identity !== null) {
-      // cx-5e accommodation (reverse of the flow-keyed join above): an entry
+    if (legacyFlowKeyed && envelopeAttempt === null && entryGroup.identity !== null) {
+      // Legacy cx-5e accommodation (reverse of the flow-keyed join above): an entry
       // whose completion envelope was written flow-keyed anchors through
       // (a) SUPPORT steps (ChildLease/ChildRelease run once per child flow,
       //     the type-matched flow-keyed envelope proves the execution), or

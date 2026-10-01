@@ -133,3 +133,32 @@ describe("agreementByFileRound (grouping)", () => {
     expect(out[0]?.reason).toContain("found 3");
   });
 });
+
+describe("agreementByFileRound requires two DISTINCT reviewers (C48)", () => {
+  test("two records from the same reviewer are unreviewed (duplicate reviewer), not agree-clean", () => {
+    const out = agreementByFileRound([
+      record("f.php", "reviewer-A", 1, []),
+      record("f.php", "reviewer-A", 1, []),
+    ]);
+    expect(out[0]?.outcome).toBe("unreviewed");
+    expect(out[0]?.reason).toContain("duplicate reviewer");
+    expect(out[0]?.reason).toContain("reviewer-A twice");
+  });
+
+  test("a duplicated reviewer with findings is not a disagree/agree pairing either", () => {
+    const f = finding("F1", "major", "h1", 1, 5);
+    const out = agreementByFileRound([
+      record("f.php", "reviewer-B", 2, [f]),
+      record("f.php", "reviewer-B", 2, [f]),
+    ]);
+    expect(out[0]?.outcome).toBe("unreviewed");
+  });
+
+  test("two distinct reviewers still pair as before", () => {
+    const out = agreementByFileRound([
+      record("f.php", "reviewer-A", 1, []),
+      record("f.php", "reviewer-B", 1, []),
+    ]);
+    expect(out[0]?.outcome).toBe("agree-clean");
+  });
+});
