@@ -288,11 +288,11 @@ async function main(): Promise<number> {
   return result.stillAlive.length === 0 ? CHAOS_KILL_EXIT.ok : CHAOS_KILL_EXIT.survivors;
 }
 
-const isDirectRun =
-  process.argv[1] !== undefined &&
-  import.meta.url === new URL(`file://${process.argv[1]}`).href;
-
-if (isDirectRun) {
+// import.meta.main, like every other script: comparing import.meta.url with
+// `file://${argv[1]}` is false when the checkout's path holds `#`, `%` or `?`
+// (the URL form is percent-encoded and the raw path is not), which made the CLI
+// parse nothing, kill nothing and exit 0, the code the table calls "killed".
+if (import.meta.main) {
   main()
     .then((code) => process.exit(code))
     .catch((err: unknown) => {

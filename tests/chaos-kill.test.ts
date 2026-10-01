@@ -8,7 +8,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -301,4 +301,26 @@ describe("chaos-kill exit codes and --flag=value", () => {
     expect(eq.ok && eq.options.pids).toEqual([123]);
     expect(parseChaosKillArgs(["--pids", "123", "--reason", "--manual kill"]).ok).toBe(false);
   });
+});
+
+describe("B12: the CLI runs from a checkout whose path holds `#` or `%`", () => {
+  // Only the script's own import graph is copied (src + the script); the point is the PATH it runs from.
+  // (A `?` in the path is not tested: bun cannot run a file from such a path at all.)
+  test.each(["pr#12", "100%25-done"])("under %s: usage is printed, not a silent exit 0", async (name) => {
+    dir = await mkdtemp(join(tmpdir(), "chaos-kill-path-"));
+    const root = join(dir, name);
+    await cp(join(REPO_ROOT, "src"), join(root, "src"), { recursive: true });
+    await cp(join(REPO_ROOT, "scripts", "chaos-kill.ts"), join(root, "scripts", "chaos-kill.ts"));
+    await symlink(join(REPO_ROOT, "node_modules"), join(root, "node_modules"));
+
+    const proc = Bun.spawn({
+      cmd: [process.execPath, "run", join(root, "scripts", "chaos-kill.ts"), "--pids", "abc"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    // `--pids abc` is a usage error (64) with a message. Before the fix main() never ran: exit 0, no output.
+    expect(code).toBe(CHAOS_KILL_EXIT.usage);
+    expect(`${stdout}${stderr}`).toContain("--pids");
+  }, 30_000);
 });

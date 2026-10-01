@@ -84,10 +84,11 @@ describe("every CLI script declares its options on the shared layer", () => {
 });
 
 describe("importing a script never runs it", () => {
-  test("every CLI script runs behind import.meta.main (or chaos-kill's direct-run check)", () => {
+  test("every CLI script runs behind import.meta.main (the hand-rolled URL comparison breaks on `#` and `%` in the path)", () => {
     for (const script of CLI_SCRIPTS) {
       const source = read(`scripts/${script}`);
-      expect(source, script).toMatch(/import\.meta\.main|isDirectRun/);
+      expect(source, script).toMatch(/import\.meta\.main/);
+      expect(source, script).not.toMatch(/isDirectRun|import\.meta\.url\s*===/);
     }
   });
 });
