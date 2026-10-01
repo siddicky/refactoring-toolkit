@@ -34,7 +34,7 @@ import { DEFAULT_ESCALATION_THRESHOLD } from "./typesafe/symbol-types.js";
  * the repo's existing calibration for a passing verification noul
  * (DEFAULT_ESCALATION_THRESHOLD in src/typesafe/symbol-types.ts): well under
  * the observed 0.97+ for real citations, well over a coin flip for a
- * paraphrased or invented quote. flows/port-project.ts applies these; the
+ * paraphrased or invented quote. flows/port/lane-b.ts applies these; the
  * registry entry below is derived from them.
  */
 export const CITATION_MIN_P_NAIVE = 1;
@@ -77,7 +77,7 @@ export const JUDGMENT_REGISTRY: readonly JudgmentRegistryEntry[] = [
     failOpen:
       "naive classifier (a mid-batch Jev failure re-runs the whole batch naive; checker 'naive-fallback' + reason recorded on pp-verify.vitestTriage and logged)",
     seamModule:
-      "src/queues/vitest-queue.ts (Jev route: src/typesafe/vitest-triage.ts; wired in flows/port-project.ts classifyVitestRecords)",
+      "src/queues/vitest-queue.ts (Jev route: src/typesafe/vitest-triage.ts; wired in flows/port/lane-b.ts classifyVitestRecords)",
   },
   {
     name: "citation-check",
@@ -89,7 +89,7 @@ export const JUDGMENT_REGISTRY: readonly JudgmentRegistryEntry[] = [
     failOpen:
       "live Jev failure or missing answer -> naive citation check (checker 'naive-fallback' + reason recorded on pp-kept); missing check record -> p_cited defaults to 0 (finding dropped; drop reason recorded)",
     seamModule:
-      "src/typesafe/verdict-check.ts (threshold applied in flows/port-project.ts citationKept / runCitationGate)",
+      "src/typesafe/verdict-check.ts (threshold applied in flows/port/lane-b.ts citationKept / runCitationGate)",
   },
   {
     name: "prep-citation-check",
@@ -99,7 +99,7 @@ export const JUDGMENT_REGISTRY: readonly JudgmentRegistryEntry[] = [
     provenance: "pp-prep-findings gate records: citationGate (checker 'naive') and dropped[].p_cited",
     failOpen: "not applicable: deterministic, never depends on Jev availability",
     seamModule:
-      "src/typesafe/verdict-check.ts (naiveCitationCheck; applied in flows/port-project.ts PrepVerdictCheckStep)",
+      "src/typesafe/verdict-check.ts (naiveCitationCheck; applied in flows/port/prep-steps.ts PrepVerdictCheckStep)",
   },
   {
     name: "prioritize",
@@ -111,7 +111,7 @@ export const JUDGMENT_REGISTRY: readonly JudgmentRegistryEntry[] = [
     failOpen:
       "live Jev failure or missing answer -> naivePrioritize severity order (checker 'naive-fallback' + reason recorded on pp-kept)",
     seamModule:
-      "src/typesafe/prioritize.ts (applied in flows/port-project.ts runPrioritizeGate)",
+      "src/typesafe/prioritize.ts (applied in flows/port/lane-b.ts runPrioritizeGate)",
   },
   {
     name: "symbol-table-selection",
@@ -124,7 +124,7 @@ export const JUDGMENT_REGISTRY: readonly JudgmentRegistryEntry[] = [
     failOpen:
       "NONE: not fail-open. No client configured -> the worker injects the deterministic offline double; a live Jev failure fails the step (dex retry). Flagged rows are the only degradation signal",
     seamModule:
-      "src/typesafe/symbol-types.ts (applied in flows/port-project.ts SymbolTableStep; scripts/jev-spot-check.ts is a diagnostic that routes no content)",
+      "src/typesafe/symbol-types.ts (applied in flows/port/prep-steps.ts SymbolTableStep; scripts/jev-spot-check.ts is a diagnostic that routes no content)",
   },
 ] as const;
 

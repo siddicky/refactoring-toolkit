@@ -1,5 +1,5 @@
 /**
- * INT-6 — flows/port-project.ts consumes T4a's harness semantics.
+ * INT-6 — the port flows (flows/port-project.ts + flows/port/*) consume T4a's harness semantics.
  *
  * 1. The review-lane demotion rule lives in ONE place (isDemotedAttempt,
  *    src/harness/lanes.ts). The flow carried a private `attempt >= 2` copy for
@@ -36,6 +36,7 @@ import { isDemotedAttempt } from "../src/harness/lanes.js";
 import { DIFF_HEADER_LINES, parseUnifiedDiff } from "../src/harness/runtime.js";
 import { buildRetryContextDiagnosis } from "../src/metrics/types.js";
 import type { TurnHealthAssessmentInput } from "../src/metrics/types.js";
+import { portFlowFiles } from "./helpers/port-flow-source.js";
 
 const ROOT = join(import.meta.dir, "..");
 const FILE = "src/Money.php";
@@ -84,13 +85,16 @@ afterEach(() => {
 
 describe("INT-6: one demotion threshold", () => {
   test("the flow and the metrics type use isDemotedAttempt; no inline `attempt >= 2` copies remain", () => {
-    for (const path of ["flows/port-project.ts", "src/metrics/types.ts"]) {
-      const source = code(path);
+    // flows/port-project.ts is only the re-export entry; the flow code is flows/port/*.
+    const flow = portFlowFiles().map(code).join("\n");
+    for (const [path, source] of [
+      ["flows/port-project.ts + flows/port/*", flow],
+      ["src/metrics/types.ts", code("src/metrics/types.ts")],
+    ] as const) {
       expect(source, `${path} still compares an attempt count to 2`).not.toMatch(/\battempt(No)?\)?\s*>=\s*2\b/);
       expect(source, `${path} does not use the shared helper`).toContain("isDemotedAttempt(");
     }
     // the unread `lane` local and its helper import are gone
-    const flow = code("flows/port-project.ts");
     expect(flow).not.toMatch(/\bconst lane\b/);
     expect(flow).not.toContain("demoteReviewerLane");
   });

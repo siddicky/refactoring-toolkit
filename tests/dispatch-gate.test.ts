@@ -6,8 +6,6 @@
  * header promises tests import it; this is that test.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 import {
   GATE_QUERY_TIMEOUT_MS,
@@ -21,6 +19,7 @@ import {
 import type { QueryResult } from "../src/dashboard/queries.js";
 import type { DexHistoryWire } from "../src/dashboard/types.js";
 import { PORT_FLOW_STEPS } from "../src/metrics/dispatch-anchor.js";
+import { portFlowSource } from "./helpers/port-flow-source.js";
 
 const NOW = Date.parse("2026-09-30T12:00:00.000Z");
 const isoAgo = (ms: number): string => new Date(NOW - ms).toISOString();
@@ -319,8 +318,8 @@ describe("REVIEW_STEP_TYPES drift (hand-mirrored list, no flow imports)", () => 
     expect(sorted(REVIEW_STEP_TYPES)).toEqual(sorted(fromTable));
   });
 
-  test("equals the review step types the flow itself registers (flows/port-project.ts)", () => {
-    const source = readFileSync(join(import.meta.dir, "..", "flows", "port-project.ts"), "utf8");
+  test("equals the review step types the flow itself registers (flows/port-project.ts + flows/port/*)", () => {
+    const source = portFlowSource();
     const inFlow = new Set([...source.matchAll(/stepType:\s*"(Pp(?:Prep)?Review[AB])"/g)].map((m) => m[1] ?? ""));
     expect(sorted([...inFlow])).toEqual(sorted(REVIEW_STEP_TYPES));
   });

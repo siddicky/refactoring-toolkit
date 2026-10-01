@@ -29,6 +29,7 @@ import {
   type SymbolTableRow,
 } from "../flows/port-project.js";
 import { configurePortJudgment } from "../flows/runtime-hooks.js";
+import { portFlowFiles } from "./helpers/port-flow-source.js";
 import { envelopeEvents } from "../flows/steps/envelope.js";
 import type { EnvelopeEvent } from "../src/metrics/types.js";
 import * as typesafeClientModule from "../src/typesafe/client.js";
@@ -196,7 +197,7 @@ describe("C21: the symbol cap is shared and its truncation is visible", () => {
   });
 
   test("neither the port flow nor the spot-check hard-codes a different cap", () => {
-    for (const rel of ["flows/port-project.ts", "scripts/jev-spot-check.ts"]) {
+    for (const rel of [...portFlowFiles(), "scripts/jev-spot-check.ts"]) {
       const source = readFileSync(join(ROOT, rel), "utf8");
       expect(source).not.toMatch(/harvestPhpSymbols\([^)]*,[^)]*,\s*\d+\s*\)/);
     }

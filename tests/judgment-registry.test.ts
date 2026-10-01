@@ -134,7 +134,7 @@ describe("AC-R: Lane-B seam construction only in registry-listed modules", () =>
   for (const [seam, entryName] of Object.entries(LANE_B_SEAMS)) {
     test(`${seam}( is called only from modules listed by "${entryName}"`, () => {
       // The flow really consumes every seam (an entry for an unused seam would be stale).
-      expect(seamCallers(seam, productionSources)).toContain("flows/port-project.ts");
+      expect(seamCallers(seam, productionSources).some((path) => path.startsWith("flows/port/"))).toBe(true);
       expect(unregisteredCallers(seam, entryName, productionSources)).toEqual([]);
     });
   }

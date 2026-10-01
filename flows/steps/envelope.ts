@@ -284,7 +284,7 @@ export function requiresTokens(role: EnvelopeRole): boolean {
  * swap-in did not move these steps to the model-calling `judgment` role (an
  * earlier plan said it would). Their live Jev spend — and that of vitest
  * triage — is recorded in the write-only `pp-jev-usage` attribute
- * (flows/port-project.ts recordJevUsage) and is reported separately by
+ * (flows/port/lane-b.ts recordJevUsage) and is reported separately by
  * render-metrics as Jev (judgment) tokens; it is NOT part of the envelope
  * token totals, so `validateProvenance` cannot flag it.
  */
@@ -479,7 +479,7 @@ export function envelopeStep<I, O>(spec: EnvelopeSpec<I, O>): Step<I> {
  */
 /**
  * Annotated type for class-form envelope steps. Flows with routing CYCLES
- * (the per-file loop in flows/port-project.ts) must annotate their step
+ * (the per-file loop in flows/port/file-steps.ts and flows/port/project-steps.ts) must annotate their step
  * constants with this type — circular implicit inference through route
  * closures otherwise fails under noImplicitAny.
  */
