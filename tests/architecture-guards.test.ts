@@ -13,7 +13,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { portFlowSource } from "./support/port-flow-source.js";
-import { productionSources, readSource } from "./support/source-files.js";
+import { productionSources, readSource, walkFiles } from "./support/source-files.js";
 
 describe("architecture: the envelope stream is a projection, never read for correctness (US-007)", () => {
   test("control-flow modules contain no stream reads (readStream/listStreamMessages)", () => {
@@ -59,6 +59,17 @@ describe("architecture: the Jev client reaches every consumer through ONE seam",
     expect(src.match(/let PORT_JEV_LIVE\b/)).toBeNull();
     expect(src.match(/function configurePortJevLive\b/)).toBeNull();
     expect(src.match(/function portJevLiveClient\b/)).toBeNull();
+  });
+});
+
+describe("architecture: source comments carry no build-process names", () => {
+  // Comments such as "owned by worker-1/lead" or "maintained by worker-1b" name a
+  // person on a past build, not anything a reader of the code can find.
+  test("no TypeScript file refers to a numbered build worker", () => {
+    const offenders = walkFiles("", (rel) => rel.endsWith(".ts") && rel !== "tests/architecture-guards.test.ts").filter(
+      (rel) => /\bworker-\d/i.test(readSource(rel)),
+    );
+    expect(offenders).toEqual([]);
   });
 });
 

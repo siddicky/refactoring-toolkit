@@ -176,7 +176,7 @@ export interface PortStepSpec {
   role: EnvelopeRole;
   kind: PortStepKind;
   /**
-   * Live shape (worker-1c, first full-run reconciliation): an M4 start
+   * Live shape (seen in the first full-run reconciliation): an M4 start
    * mini-step ALSO writes its own envelope-factory record under stepId
    * `<targetStepId>:start` (role "record", real attempt) — in addition to the
    * attempt-0 marker it stages for the TARGET step. That self-envelope must
@@ -191,7 +191,7 @@ export interface PortStepSpec {
  * the TARGET step (same stepId/role, attempt 0).
  */
 export const PORT_FLOW_STEPS: readonly PortStepSpec[] = [
-  // Phase 3 (prep-analysis) — maintained by worker-1b per the mirror rule.
+  // Prep analysis, kept in step with the flow's steps (see the mirror rule above).
   { stepType: "PpSymbolStart", stepId: "pp-symbol-table", role: "judgment", kind: "marker", selfStepId: "pp-symbol-table:start" },
   { stepType: "PpSymbolTable", stepId: "pp-symbol-table", role: "judgment", kind: "model" },
   { stepType: "PpPrepGenerateStart", stepId: "pp-prep-generate", role: "agent", kind: "marker", selfStepId: "pp-prep-generate:start" },
@@ -227,12 +227,12 @@ export const PORT_FLOW_STEPS: readonly PortStepSpec[] = [
   // port-project.ts BootstrapStep). Non-model, flow-level ("bootstrap").
   { stepType: "PpBootstrap", stepId: "pp-bootstrap", role: "integration", kind: "support" },
   { stepType: "PpRelease", stepId: "pp-release", role: "record", kind: "support" },
-  // Phase 4 (verification queues + fix rounds) — maintained by worker-1b.
+  // Verification queues and fix rounds, kept in step the same way.
   { stepType: "PpQueueVerify", stepId: "pp-queue-verify", role: "queue", kind: "support" },
   { stepType: "PpQueueFixStart", stepId: "pp-queue-fix", role: "agent", kind: "marker", selfStepId: "pp-queue-fix:start" },
   { stepType: "PpQueueFix", stepId: "pp-queue-fix", role: "agent", kind: "model" },
   { stepType: "PpFinal", stepId: "pp-final", role: "record", kind: "support" },
-  // v1.1 parallel dispatch (worker-1c): the parent runs waves of per-file
+  // Parallel dispatch: the parent runs waves of per-file
   // SubFlow children (port.File). The child reuses the SAME step types
   // (PpLease→…→PpCommit→PpChildRelease) inside its OWN flow, so per-flow
   // anchoring works unchanged; only the wave orchestration + child bookkeeping
@@ -638,7 +638,7 @@ export interface ProvenanceCrossCheck {
  *   (validateProvenance: missing token usage, time order) is not checked here;
  *   runProvenanceCrossCheck in render.ts runs both.
  *
- * Example (worker-1b evidence run):
+ * Example:
  * ```ts
  * const history = JSON.parse(await dexHistoryJson); // dexcli -output json
  * const cross = anchorForRun(history, envelopeEventValues);

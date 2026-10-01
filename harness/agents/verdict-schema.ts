@@ -14,7 +14,7 @@
  *    is deliberately distinct from a missing record (plan v5).
  *
  * Validation is hand-rolled (plain TS guards, NO zod) — zero runtime deps so
- * nothing fights worker-1's package.json.
+ * nothing is added to package.json for it.
  *
  * Contract notes (audit C12/C14): every finding carries a REQUIRED
  * `description` (what is wrong — the fixer and the Jev prioritizer read it),
@@ -25,7 +25,7 @@
  * of discarding the whole verdict.
  *
  * NOTE: this module defines the CONTRACT only. Runtime probe tests for
- * reviewer tool isolation are owned by worker-1/lead (plan: effective
+ * reviewer tool isolation belong to the plugin merge (plan: effective
  * permissions tested after config + plugin merge).
  */
 

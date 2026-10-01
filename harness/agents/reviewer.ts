@@ -6,7 +6,7 @@
  * subagents/task, web fetch, all MCP tools. The diff arrives as prompt state
  * (by value); the reviewer reads nothing and runs nothing. Config tests and
  * runtime probes (zero effective tools post merge, denied-tool invocations
- * refused, no worktree access) are worker-1/lead's.
+ * refused, no worktree access) test the plugin merge, not this config.
  *
  * Verdict: every review yields a completed verdict record matching
  * harness/agents/verdict-schema.ts — an EMPTY findings array is a valid

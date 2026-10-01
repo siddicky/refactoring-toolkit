@@ -134,7 +134,7 @@ describe("identity + step table helpers", () => {
     expect(model?.role).toBe("agent");
     expect(specForStepType("PpImplementStart")?.role).toBe("agent");
     expect(specForStepType("Nope")).toBeNull();
-    // Phase 3/4 (worker-1b mirror): implement, review-a, review-b, fixer,
+    // The model steps: implement, review-a, review-b, fixer,
     // symbol-table, prep-generate, prep-review-a, prep-review-b, prep-revise,
     // queue-fix.
     expect(PORT_FLOW_STEPS.filter((s) => s.kind === "model").length).toBe(10);
@@ -187,7 +187,7 @@ describe("anchorDispatch — clean mappings", () => {
     expect(result.unexplained_dispatch_entries).toBe(0);
   });
 
-  test("live shape (worker-1c): the start mini-step's own ':start' envelope anchors under its marker spec", () => {
+  test("live shape: the start mini-step's own ':start' envelope anchors under its marker spec", () => {
     // Live stream per model step X: X#0 (attempt-0 marker, role = target role),
     // X:start#1 (the mini-step's OWN envelope, role record), X#1 (the model
     // envelope) — plus dispatch entries for the Start and model step types.
@@ -365,7 +365,7 @@ describe("anchorDispatch — failures", () => {
 });
 
 // ---------------------------------------------------------------------------
-// integration entry (worker-1b evidence run)
+// integration entry (an evidence run)
 // ---------------------------------------------------------------------------
 
 describe("anchorForRun (recorded fixtures, end to end)", () => {

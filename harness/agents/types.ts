@@ -5,13 +5,13 @@
  * Tool vocabulary is deliberately CATEGORY-level (bash, git, read, ...), not
  * concrete opencode tool names: mapping categories onto the merged opencode
  * tool surface (including `mcp__*` server tools) happens at plugin merge and
- * is owned by worker-1/lead.
+ * belongs to the plugin merge, not to these configs.
  *
  * ISOLATION NOTE (plan §Reviewer isolation enforcement): these ALLOW/DENY
  * configs are declarative intent. EFFECTIVE permissions must be tested after
  * the config + plugin merge — the merged reviewer agent must have zero
  * effective tools, and runtime probes must show denied-tool invocations are
- * refused. Those tests are worker-1/lead's, not this module's.
+ * refused. Those are runtime tests of the merge, not tests of this module.
  */
 
 /** Tool categories referenced by the plan's isolation requirements. */

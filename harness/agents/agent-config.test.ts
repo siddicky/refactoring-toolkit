@@ -2,7 +2,7 @@
  * Unit tests for harness/agents agent definition configs.
  *
  * These test the DECLARATIVE configs (data only). Effective tool permissions
- * after config + plugin merge are runtime tests owned by worker-1/lead.
+ * after config + plugin merge are runtime tests of the merge, not of these configs.
  */
 
 import { describe, expect, test } from "bun:test";
