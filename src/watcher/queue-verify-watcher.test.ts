@@ -114,34 +114,60 @@ describe("queue-verify kill watcher (US-007): exactly-once, bounded, clean exits
     expect(h.firings.length).toBe(1);
   });
 
-  test("no-duplicate: repeat start events and a poll echo never fire twice", async () => {
-    const h = harness({ events: [START_EVENT, START_EVENT, START_EVENT] });
-    // Even if the watcher kept running, later triggers must be suppressed.
-    const result = await h.run();
+  test("no-duplicate: the watch ENDS at the first trigger, so repeats and a poll echo are never even read", async () => {
+    const reads: string[] = [];
+    const script = [START_EVENT, START_EVENT, START_EVENT];
+    const h = harness({ events: [], polls: [true] });
+    const result = await h.run({
+      nextStreamEvent: async () => {
+        reads.push("stream");
+        return script.shift() ?? null;
+      },
+      poll: async () => {
+        reads.push("poll");
+        return true;
+      },
+    });
     expect(result.firings).toBe(1);
     expect(h.firings.length).toBe(1);
-    // A poll hit AFTER the fire (echo) cannot produce a second kill either.
+    // The watch ends at the first (still active) start: the repeats were read as
+    // ONE follow batch (fake clock: the catch-up budget never runs out), and the
+    // poll lane is never consulted afterwards.
+    expect(reads.every((r) => r === "stream")).toBe(true);
+    expect(script).toEqual([]);
+    // A poll hit that would have echoed the stream trigger cannot produce a second kill: the watch is over.
     const h2 = harness({ events: [START_EVENT], polls: [true] });
     const r2 = await h2.run();
     expect(r2.firings).toBe(1);
     expect(h2.firings.length).toBe(1);
+    expect(h2.logs.some((l) => l.includes("duplicate"))).toBe(false);
   });
 
-  test("stream failure ENGAGES the poll fallback; the kill fires exactly once via poll", async () => {
-    const h = harness({
-      events: [new Error("server restarted; stream token invalidated")],
-      polls: [true],
+  test("stream failure ENGAGES the poll fallback; the kill fires exactly once via poll, and the stream is never touched again", async () => {
+    let streamReads = 0;
+    let polls = 0;
+    const h = harness({ deadlineMs: 10 * 60_000, pollIntervalMs: 60_000 });
+    const result = await h.run({
+      nextStreamEvent: async () => {
+        streamReads += 1;
+        // The first read fails; a later read would hand over a START and fire via the stream.
+        if (streamReads === 1) throw new Error("server restarted; stream token invalidated");
+        return START_EVENT;
+      },
+      // Not hit on the cycle where the stream failed, hit on the next one: if the stream were read
+      // again, the second cycle would fire via the stream instead.
+      poll: async () => {
+        polls += 1;
+        return polls >= 3;
+      },
     });
-    const result = await h.run();
     expect(result.outcome).toBe("fired");
     expect(result.via).toBe("poll");
     expect(result.firings).toBe(1);
     expect(h.logs.some((l) => l.includes("poll fallback ENGAGED"))).toBe(true);
-    // After the stream failed it is never touched again this run.
-    h.queue([START_EVENT]);
-    h.pollQueue([true]);
-    // (no further run needed — the assertion is that the run above already
-    // used only the poll path; a second cycle would have fired via stream)
+    expect(polls).toBe(3);
+    expect(streamReads).toBe(1);
+    expect(h.firings.map((f) => f.via)).toEqual(["poll"]);
   });
 
   test("completion envelopes and other steps do NOT trigger the kill", async () => {

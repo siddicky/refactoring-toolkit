@@ -44,8 +44,9 @@
  *   guard): a [start, done] pair that arrives together post-arm is a
  *   completed attempt, not a kill window, and never fires.
  *
- * Exactly-once: `fire` is called at most ONCE per watcher lifetime; every
- * later trigger (stream repeat, poll echo) is logged and suppressed.
+ * Exactly-once: the watch ENDS at its first trigger (the kill result is
+ * returned at once), so `fire` is called at most ONCE per watcher lifetime by
+ * construction: a repeated start, or a poll echo, is never read.
  *
  * Event semantics: "pp-queue-verify:start" is the START envelope of the
  * queue-verify step — on the stream it is the message whose eventKey begins
@@ -297,26 +298,23 @@ export async function runQueueVerifyWatcher(
     }
   };
 
-  let firstResult: WatcherResult | undefined;
-  const fireOnce = async (via: "stream" | "poll"): Promise<WatcherResult> => {
-    if (fired) {
-      // Reports what the FIRST trigger really did (never a synthetic success).
-      log(`duplicate trigger via ${via} suppressed (already fired)`);
-      return { ...(firstResult ?? { outcome: "no-op", via }), firings: 0 };
-    }
+  // The run ENDS at its first trigger: every call site returns this function's
+  // result, so the kill action is called at most once by construction (a second
+  // trigger is never read), and there is no duplicate-suppression branch to
+  // keep. `fired` only records that the action was called, so a failure of the
+  // action itself (which must propagate) is not mistaken for a stream or drain
+  // failure by the catch blocks below.
+  const fireKill = async (via: "stream" | "poll"): Promise<WatcherResult> => {
     fired = true;
     log(`TRIGGER via ${via} — firing chaos kill`);
-    // A throw from the kill action propagates (see the catch blocks below):
-    // the exactly-once guard is spent, so swallowing it would end the run as a
-    // silent "no kill".
+    // A throw from the kill action propagates: swallowing it would end the run
+    // as a silent "no kill".
     const result = await options.fire({ via, atUtc: new Date().toISOString() });
     if (result !== undefined && !result.killed) {
       log(`trigger via ${via} seen but the kill was a NO-OP: ${result.detail ?? "nothing was killed"}`);
-      firstResult = { outcome: "no-op", via, firings: 0 };
-      return firstResult;
+      return { outcome: "no-op", via, firings: 0 };
     }
-    firstResult = { outcome: "fired", via, firings: 1 };
-    return firstResult;
+    return { outcome: "fired", via, firings: 1 };
   };
 
   /**
@@ -337,7 +335,7 @@ export async function runQueueVerifyWatcher(
         ? `trigger found in drained backlog: ${trigger.eventKey}`
         : `trigger in follow batch: ${trigger.eventKey}`,
     );
-    return await fireOnce("stream");
+    return await fireKill("stream");
   };
 
   log(
@@ -471,7 +469,7 @@ export async function runQueueVerifyWatcher(
         probeFailed("poll", err);
       }
       if (pollHit) {
-        return await fireOnce("poll");
+        return await fireKill("poll");
       }
 
       // 3. Terminal branch — FIXED (r1 finding): the watcher EXITS cleanly when
