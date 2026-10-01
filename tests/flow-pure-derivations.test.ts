@@ -1,6 +1,6 @@
 /**
  * Phase 2 core-loop unit suites: the pure derivations of
- * flows/port-project.ts plus the runtime bridge (src/harness/runtime.ts).
+ * the port flow modules (flows/port/) plus the runtime bridge (src/harness/runtime.ts).
  * All offline — the live trial is the gate, these pin the deterministic
  * parts (diff parsing/rendering, JSON + code extraction, verdict intake and
  * mapping, dispatch derivation, prep source-map parsing).

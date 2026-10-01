@@ -7,7 +7,7 @@
  * implements only the commit-time subset (keyed dedup + C1 reachability),
  * because at commit time the worktree is dirty by design and reconcile's
  * `redone` arm would reset it to the lease base (see the CommitStep comment in
- * flows/port-project.ts and tests/port-flow-core.test.ts "CommitStep"). The
+ * flows/port/file-steps.ts and tests/port-flow-core.test.ts "CommitStep"). The
  * `poisoned` rows below are raised by recovery, not by the flow.
  */
 import { describe, expect, test } from "bun:test";

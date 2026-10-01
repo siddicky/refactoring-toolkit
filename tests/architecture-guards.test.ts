@@ -62,6 +62,37 @@ describe("architecture: the Jev client reaches every consumer through ONE seam",
   });
 });
 
+describe("architecture: pointers to the port flow name the module that holds the code (C6)", () => {
+  // The port flow was split out of flows/port-project.ts into flows/port/*.ts, and that file became the public
+  // re-export entry. A comment that says "flows/port-project.ts runAgentTurn" (or a path:line into it) sends the
+  // reader to a barrel that holds neither. Only these files may name the entry, because they are about the entry.
+  const ABOUT_THE_ENTRY = new Set([
+    "tests/architecture-guards.test.ts",
+    "tests/port-project-exports.test.ts",
+    "tests/support/port-flow-source.ts",
+    "tests/README.md",
+    ".agents/skills/porting-toolkit-migration/references/runner.md",
+    // A historical log of how the runner was built, kept as it was written (its own header says the code wins).
+    "BUILD_NOTES.md",
+  ]);
+
+  test("no other file refers to port-project.ts", () => {
+    const offenders = walkFiles("", (rel) => /\.(?:ts|md|json|html)$/.test(rel) && !ABOUT_THE_ENTRY.has(rel)).filter(
+      (rel) => /\bport-project\.ts\b/.test(readSource(rel)),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  test("every flows/port/<module>.ts a comment names exists", () => {
+    const named = new Set<string>();
+    for (const rel of walkFiles("", (r) => /\.(?:ts|md|json)$/.test(r) && r !== "BUILD_NOTES.md")) {
+      for (const m of readSource(rel).matchAll(/\bflows\/port\/([a-z][a-z-]*\.ts)\b/g)) named.add(m[1] ?? "");
+    }
+    const present = new Set(walkFiles("flows/port").map((rel) => rel.slice("flows/port/".length)));
+    expect([...named].filter((name) => !present.has(name))).toEqual([]);
+  });
+});
+
 describe("architecture: hunk body ranges have one derivation (C5, C11)", () => {
   // suspicion.ts once re-derived the ranges from a 0-based index while the evidence lines are 1-based, which put the
   // `@@` line inside a hunk and the last body line outside it. It asks the parsed diff instead.

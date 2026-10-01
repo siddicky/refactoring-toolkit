@@ -245,7 +245,7 @@ export class OpencodePromptError extends Error {
  * Pure and deliberately NARROW: the ≤8-output-token arm explored in planning
  * is DROPPED — it misclassifies a healthy text-present/output-0 reply.
  * Aborted no-text turns are excluded (they are the recovery path, handled at
- * flows/port-project.ts runAgentTurn).
+ * flows/port/agent-turns.ts runAgentTurn).
  */
 export function degenerateReply(
   usage: TokenUsage | null,

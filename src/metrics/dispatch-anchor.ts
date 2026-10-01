@@ -17,7 +17,7 @@
  *   the mirror of the live factory's durable events, M2 identity keying
  *   `stepId#attempt@file#round` and M4 attempt-0 start markers).
  *
- * The flow step table below mirrors flows/port-project.ts (stepType/stepId/
+ * The flow step table below mirrors the step classes in flows/port/ (stepType/stepId/
  * role triples) — duplicated deliberately so metrics never imports flow code
  * (same pattern as the dashboard's stageLabel/MODEL_ROLES mirrors). If the
  * flow adds or renames a step, update the table: drift is exactly what the
@@ -164,7 +164,7 @@ export function extractDispatchEntries(history: DispatchHistory): DispatchEntry[
 }
 
 // ---------------------------------------------------------------------------
-// Typed step table (mirror of flows/port-project.ts — no flow imports)
+// Typed step table (mirror of the step classes in flows/port/ — no flow imports)
 // ---------------------------------------------------------------------------
 
 /** What kind of envelope a flow step's dispatch MUST anchor to. */
@@ -223,8 +223,8 @@ export const PORT_FLOW_STEPS: readonly PortStepSpec[] = [
   { stepType: "PpFixer", stepId: "pp-fixer", role: "agent", kind: "model" },
   { stepType: "PpCommit", stepId: "pp-commit", role: "commit", kind: "support" },
   { stepType: "PpIntegrate", stepId: "pp-integrate", role: "integration", kind: "support" },
-  // US-010: integration bootstrap (vitest runner provisioning; flows/
-  // port-project.ts BootstrapStep). Non-model, flow-level ("bootstrap").
+  // US-010: integration bootstrap (vitest runner provisioning; BootstrapStep in
+  // flows/port/project-steps.ts). Non-model, flow-level ("bootstrap").
   { stepType: "PpBootstrap", stepId: "pp-bootstrap", role: "integration", kind: "support" },
   { stepType: "PpRelease", stepId: "pp-release", role: "record", kind: "support" },
   // Verification queues and fix rounds, kept in step the same way.

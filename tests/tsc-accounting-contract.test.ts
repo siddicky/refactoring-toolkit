@@ -1,7 +1,7 @@
 /**
  * INT-2 — Contract A (tsc accounting), end to end across three teams.
  *
- *   T1 writes   flows/port-project.ts QueueVerifyStep -> `queue-burndown/tsc-<n>`
+ *   T1 writes   flows/port/project-steps.ts QueueVerifyStep -> `queue-burndown/tsc-<n>`
  *               (file null) with `tsc: {state, reason, exit_code, unlocated}`
  *   T5 renders  src/metrics/collect.ts collectBurnDown -> renderReport
  *   T6 shows    src/dashboard/state.ts feedFromState -> burnDownSeries

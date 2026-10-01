@@ -520,7 +520,7 @@ describe("burnDownSeries plots the aggregate row per iteration (C41)", () => {
     burnDownSeries(samples).find((s) => s.queue === "tsc")?.points ?? [];
 
   test("total + per-file rows for each iteration yield exactly one point: the total", () => {
-    // The two-row shape port-project.ts writes (total file:null + per-file rows).
+    // The two-row shape QueueVerifyStep writes (total file:null + per-file rows).
     const points = tsc([
       row(1, null, 12),
       row(1, "src/a.php", 7),

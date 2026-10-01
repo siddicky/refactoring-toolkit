@@ -486,7 +486,7 @@ export const ENVELOPE_REAL_ATTEMPT: Record<string, unknown> = {
 };
 
 /**
- * Per-iteration burn-down rows exactly as port-project.ts writes them: the
+ * Per-iteration burn-down rows exactly as QueueVerifyStep writes them: the
  * tsc TOTAL row (file null) plus per-file rows, a vitest row with ran
  * accounting, then iteration 2 where vitest did NOT run (error_count 0 plus
  * the not-run marker) and tsc could not produce a count (Contract A).

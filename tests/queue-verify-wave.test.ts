@@ -1,8 +1,8 @@
 /**
  * T1-flow-verify: EXECUTION tests (stub ctx, real git / real tsc where the
  * behaviour lives there) for the verification + wave steps of
- * flows/port-project.ts — QueueVerifyStep, WaveDispatchStep, WaveJoinStep,
- * ChildLeaseStep and the shared QueueFix step. They assert the durable
+ * flows/port/project-steps.ts (QueueVerifyStep, WaveDispatchStep, WaveJoinStep)
+ * and flows/port/file-steps.ts (ChildLeaseStep and the shared QueueFix step). They assert the durable
  * attribute outputs (pp-verify, queue-burndown, pp-queue, pp-wave, pp-lease),
  * not source text.
  *

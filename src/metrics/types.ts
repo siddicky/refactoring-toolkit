@@ -106,7 +106,7 @@ export interface TokenUsage {
 export type TurnShapeClass =
   /** Usage-present, no text, not aborted — the US-002 Tier-0 signature. */
   | "tier0-degenerate"
-  /** Upstream abort — the recovery path (flows/port-project.ts runAgentTurn). */
+  /** Upstream abort — the recovery path (flows/port/agent-turns.ts runAgentTurn). */
   | "aborted"
   /** Completed reply with no provider usage — provenance class, never zero. */
   | "no-usage"

@@ -15,7 +15,7 @@
  *    (wave-5 Sisyphus signature), text-present/output-0 (the case the
  *    deliberately DROPPED ≤8-output-token arm would have misclassified),
  *    aborted-no-text (recovery path: returned as aborted:true, handled by
- *    flows/port-project.ts runAgentTurn).
+ *    flows/port/agent-turns.ts runAgentTurn).
  * 4. Demotion policy = pure function of (attempt): attempt >= 2 on a review
  *    turn demotes OPENCODE_REVIEWER_MODEL to the fallback lane.
  * 5. WriteStream outage cannot fail a durable step (try/catch-swallow).

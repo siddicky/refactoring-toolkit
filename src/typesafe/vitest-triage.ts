@@ -21,7 +21,7 @@
  *
  * Fail-open: this module THROWS on Jev errors (per the seam contract —
  * judgments are never faked silently); the flow-level consumer
- * (flows/port-project.ts classifyVitestRecords) catches and re-runs the
+ * (flows/port/lane-b.ts classifyVitestRecords) catches and re-runs the
  * naive classifier. Token usage is surfaced per call via onUsage so the flow
  * can record it in the pp-jev-usage evidence stream (recordJevUsage pattern).
  */

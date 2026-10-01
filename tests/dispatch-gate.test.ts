@@ -316,7 +316,7 @@ describe("REVIEW_STEP_TYPES (derived from the dispatch-anchor step table, no flo
     expect(REVIEW_STEP_TYPES.every((t) => PORT_FLOW_STEPS.some((s) => s.stepType === t && s.kind === "model"))).toBe(true);
   });
 
-  test("equals the review step types the flow itself registers (flows/port-project.ts + flows/port/*)", () => {
+  test("equals the review step types the flow itself registers (the whole port flow source: flows/port/*)", () => {
     const source = portFlowSource();
     const inFlow = new Set([...source.matchAll(/stepType:\s*"(Pp(?:Prep)?Review[AB])"/g)].map((m) => m[1] ?? ""));
     expect(sorted([...inFlow])).toEqual(sorted(REVIEW_STEP_TYPES));
