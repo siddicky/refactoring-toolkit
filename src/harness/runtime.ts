@@ -556,21 +556,32 @@ function endsInsideFence(text: string): boolean {
 
 /**
  * Structural check of a generated spec map: it must still carry the
- * source-map table. `expectedFiles` (the files the run ports) must each
- * appear in a table row — by full path, or by basename when that basename is
- * unique among the expected files (a planner may shorten `src/Money.php` to
- * `Money.php`). Returns the problems found (empty = acceptable).
+ * source-map table. `expectedFiles` (the files the run ports) must each have a
+ * SOURCE-MAP row: a table row with a cell naming the file — by full path, or by
+ * basename when that basename is unique among the expected files (a planner
+ * may shorten `src/Money.php` to `Money.php`) — and another cell naming a
+ * `.ts` / `.tsx` target. Any table row naming the file is not enough (B9): the
+ * generated spec also carries the per-symbol table, whose rows name every file
+ * too, so a dropped source-map row would pass. Returns the problems found
+ * (empty = acceptable).
  */
 export function specMapProblems(specText: string, expectedFiles: readonly string[] = []): string[] {
-  const rows = specText.split("\n").filter((l) => l.trimStart().startsWith("|"));
+  const rows = specText
+    .split("\n")
+    .filter((l) => l.trimStart().startsWith("|"))
+    .map((l) => l.split("|").slice(1).map((cell) => cell.trim()));
   if (rows.length === 0) return ["no source-map table (no `|` table rows)"];
   const basename = (f: string): string => f.slice(f.lastIndexOf("/") + 1);
-  const mentions = (f: string): boolean => {
+  const tsTarget = /\.tsx?\b/;
+  const hasSourceMapRow = (f: string): boolean => {
     const unique = expectedFiles.filter((g) => basename(g) === basename(f)).length === 1;
-    return rows.some((r) => r.includes(f) || (unique && r.includes(basename(f))));
+    return rows.some((cells) => {
+      const named = cells.findIndex((c) => c.includes(f) || (unique && c.includes(basename(f))));
+      return named >= 0 && cells.some((c, i) => i !== named && tsTarget.test(c));
+    });
   };
-  const missing = expectedFiles.filter((f) => !mentions(f));
-  return missing.length > 0 ? [`source-map table lacks rows for: ${missing.join(", ")}`] : [];
+  const missing = expectedFiles.filter((f) => !hasSourceMapRow(f));
+  return missing.length > 0 ? [`source-map table lacks php → ts rows for: ${missing.join(", ")}`] : [];
 }
 
 /**

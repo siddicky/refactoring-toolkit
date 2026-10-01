@@ -350,6 +350,39 @@ describe("C13: extractSpecMap returns the OUTERMOST markdown block", () => {
     expect(extractSpecMap(partial, { expectedFiles: ["src/Money.php"] })).toContain("src/Money.php");
   });
 
+  test("B9: a per-symbol row naming the file does not stand in for its dropped source-map row", () => {
+    // The generated spec always carries the per-symbol table, whose rows name every file.
+    const symbolTable = [
+      "## Per-symbol table",
+      "| Symbol | Kind | File | Candidates | Selected | Flagged | Judge |",
+      "|---|---|---|---|---|---|---|",
+      "| fromCents | method | src/Invoice.php | number, Money | Money | no | live |",
+      "| total | property | src/Money.php | number | number | no | live |",
+    ].join("\n");
+    const lostInvoiceRow = [
+      "| PHP file | Port target |",
+      "|---|---|",
+      "| `src/Money.php` | `src/money.ts` |",
+      "",
+      symbolTable,
+    ].join("\n");
+    expect(specMapProblems(lostInvoiceRow, ["src/Money.php", "src/Invoice.php"])).toEqual([
+      "source-map table lacks php → ts rows for: src/Invoice.php",
+    ]);
+    expect(() => extractSpecMap(["```markdown", lostInvoiceRow, "```"].join("\n"), { expectedFiles: ["src/Money.php", "src/Invoice.php"] })).toThrow(
+      /src\/Invoice\.php/,
+    );
+    // with the row restored the same spec is accepted
+    const restored = lostInvoiceRow.replace("| `src/Money.php` | `src/money.ts` |", "| `src/Money.php` | `src/money.ts` |\n| `src/Invoice.php` | `src/invoice.ts` |");
+    expect(specMapProblems(restored, ["src/Money.php", "src/Invoice.php"])).toEqual([]);
+  });
+
+  test("B9: a source-map row needs a .ts/.tsx target cell, not just the PHP path", () => {
+    expect(specMapProblems("| `src/Money.php` | TODO |", ["src/Money.php"])).toHaveLength(1);
+    expect(specMapProblems("| `src/Money.php` | `src/money.tsx` | notes |", ["src/Money.php"])).toEqual([]);
+    expect(specMapProblems("| tests dir | `test/money.test.ts` | `tests/MoneyTest.php` |", ["tests/MoneyTest.php"])).toEqual([]);
+  });
+
   test("a planner that shortens a path to its unique basename is tolerated; an ambiguous basename is not", () => {
     const shortened = ["```markdown", "| `Money.php` | `src/money.ts` |", "| `Invoice.php` | `src/invoice.ts` |", "```"].join("\n");
     expect(specMapProblems(extractSpecMap(shortened), ["src/Money.php", "src/Invoice.php"])).toEqual([]);
