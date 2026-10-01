@@ -14,14 +14,14 @@ import { startStreamFeed, type StreamRuntime } from "./stream-feed.js";
 const silent = { log: () => {}, warn: () => {} };
 
 describe("dashboard blob-cache configuration (C61)", () => {
-  test("defaults under the already-gitignored .dex-cache/ directory", () => {
+  test("defaults to the gitignored sibling .dex-cache-dashboard (never inside the worker cache)", () => {
     const cfg = configFromEnv({}, "/w");
-    expect(cfg.blobCacheDir).toBe(".dex-cache/dashboard");
-    expect(cfg.blobCacheDir.startsWith(".dex-cache/")).toBe(true);
+    expect(cfg.blobCacheDir).toBe(".dex-cache-dashboard");
+    expect(cfg.blobCacheDir.startsWith(".dex-cache/")).toBe(false); // a sibling of the worker cache, not inside it
   });
 
   test("ignores the worker's DEX_BLOB_CACHE_DIR (no shared directory); STATUS_BLOB_CACHE_DIR overrides", () => {
-    expect(configFromEnv({ DEX_BLOB_CACHE_DIR: "/shared/worker-cache" }, "/w").blobCacheDir).toBe(".dex-cache/dashboard");
+    expect(configFromEnv({ DEX_BLOB_CACHE_DIR: "/shared/worker-cache" }, "/w").blobCacheDir).toBe(".dex-cache-dashboard");
     expect(configFromEnv({ STATUS_BLOB_CACHE_DIR: " /var/tmp/dash " }, "/w").blobCacheDir).toBe("/var/tmp/dash");
   });
 

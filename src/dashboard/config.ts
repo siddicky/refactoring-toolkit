@@ -10,6 +10,7 @@
  */
 
 import { DEFAULT_KILL_EVENTS_PATH } from "../metrics/kill-events.js";
+import { BLOB_CACHE_DIRS, dexcliFromEnv } from "../dex/defaults.js";
 import { DEFAULT_MAX_CHILD_FLOWS, DEFAULT_MAX_FLOWS } from "./flow-select.js";
 
 /**
@@ -20,8 +21,8 @@ export const CLIENT_POLL_MS = 2_000;
 
 const DEFAULT_PORT = 4646;
 
-/** Under the gitignored `.dex-cache/` (a sibling of the worker's own cache). */
-const DEFAULT_BLOB_CACHE_DIR = ".dex-cache/dashboard";
+/** The dashboard's own cache: a SIBLING of the worker's, never inside it (src/dex/defaults.ts). */
+const DEFAULT_BLOB_CACHE_DIR = BLOB_CACHE_DIRS.dashboard;
 
 /**
  * Kill-event sidecars the dashboard scans by default, relative to the working
@@ -117,6 +118,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env, cwd: string 
     warnings.push("PORT is deprecated for serve-status; use STATUS_PORT");
   }
 
+  const dexcli = dexcliFromEnv(env);
   const host = env.STATUS_HOST?.trim() || "127.0.0.1";
   if (!isLoopbackHost(host)) {
     warnings.push(
@@ -131,8 +133,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env, cwd: string 
     host,
     allowedHosts: csv(env.STATUS_ALLOWED_HOSTS, []),
     repoRoot: env.STATUS_REPO_ROOT?.trim() || cwd,
-    dexcliBin: env.DEXCLI_BIN?.trim() || "dexcli",
-    dexServer: env.DEX_SERVER_ADDRESS?.trim() || "127.0.0.1:8801",
+    dexcliBin: dexcli.bin,
+    dexServer: dexcli.server,
     maxFlows: intEnv(env.STATUS_MAX_FLOWS, "STATUS_MAX_FLOWS", DEFAULT_MAX_FLOWS, 1, 500, warnings),
     maxChildFlows: intEnv(env.STATUS_MAX_CHILD_FLOWS, "STATUS_MAX_CHILD_FLOWS", DEFAULT_MAX_CHILD_FLOWS, 0, 500, warnings),
     killEventFiles: csv(env.KILL_EVENT_FILES, DEFAULT_KILL_EVENT_FILES),

@@ -17,14 +17,14 @@ import {
 } from "@superdurable/dex";
 import type { BlobCache } from "@superdurable/dex";
 
+import { BLOB_CACHE_DIRS, DEFAULT_DEX_SERVER_ADDRESS } from "./defaults.js";
+
 /**
  * Any flow, whatever its start input. `Flow<I>` is invariant in `I`, so a list
  * of different flows has no common `Flow<I>`; this is dex's own element type
  * for a Registry's flows (`Registry["flows"]`).
  */
 export type AnyFlow = Registry["flows"][number];
-
-const DEFAULT_DEX_SERVER_ADDRESS = "127.0.0.1:8801";
 
 export interface DexConfig {
   serverAddress: string;
@@ -53,6 +53,14 @@ export interface DexConfig {
 export const DEFAULT_WORKER_TARGET_ADDRESS = "127.0.0.1:8803";
 
 /**
+ * Which process the config is for. The role picks the blob cache: the worker
+ * and the client commands (`demo`, `round`, ...) run at the same time in the
+ * README flow, and a blob cache is never shared across processes, so each has
+ * its own directory and its own variable (src/dex/defaults.ts).
+ */
+export type DexRole = "worker" | "client";
+
+/**
  * Env -> config. The worker binds DEX_WORKER_BIND when set, else the same
  * address it advertises (DEX_WORKER_TARGET), else the default, so changing
  * DEX_WORKER_TARGET to dodge a busy port moves the listener with it instead of
@@ -60,11 +68,12 @@ export const DEFAULT_WORKER_TARGET_ADDRESS = "127.0.0.1:8803";
  * only when the bind differs from the advertised target (a wildcard bind such
  * as 0.0.0.0:8803 behind a remote target).
  */
-export function dexConfigFromEnv(env: NodeJS.ProcessEnv = process.env): DexConfig {
+export function dexConfigFromEnv(env: NodeJS.ProcessEnv, role: DexRole): DexConfig {
   const target = env.DEX_WORKER_TARGET?.trim() || undefined;
+  const cacheOverride = role === "worker" ? env.DEX_BLOB_CACHE_DIR : env.DEX_CLIENT_BLOB_CACHE_DIR;
   return {
     serverAddress: env.DEX_SERVER_ADDRESS?.trim() || DEFAULT_DEX_SERVER_ADDRESS,
-    blobCacheDir: env.DEX_BLOB_CACHE_DIR?.trim() || ".dex-cache",
+    blobCacheDir: cacheOverride?.trim() || BLOB_CACHE_DIRS[role],
     maxBlobCacheBytes: 64 * 1024 * 1024,
     workerTargetAddress: target ?? DEFAULT_WORKER_TARGET_ADDRESS,
     workerBindAddress: env.DEX_WORKER_BIND?.trim() || target || DEFAULT_WORKER_TARGET_ADDRESS,

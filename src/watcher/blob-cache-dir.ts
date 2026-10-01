@@ -1,20 +1,22 @@
 /**
- * Blob-cache directory for the watcher's read-side stream client (audit C61).
+ * Blob-cache directory for the watcher's read-side stream client (audit C61, C1).
  *
- * The watcher opens its OWN cache (per-process sharing is the guidance — a
- * blob cache is never shared across processes). Two defects fixed here:
+ * The watcher opens its OWN cache (a blob cache is never shared across
+ * processes), and ignores `DEX_BLOB_CACHE_DIR`, the variable the worker's
+ * config reads (src/dex/client.ts): exporting it for the worker must not make
+ * watcher and worker share one directory. `DEX_WATCH_BLOB_CACHE_DIR` is its own
+ * override.
  *
- * - The old default `.dex-cache-watch` escaped .gitignore (only `.dex-cache/`
- *   is ignored), leaving untracked cache files one `git add -A` from a commit.
- *   The default now lives UNDER the ignored `.dex-cache/`.
- * - The old code honoured `DEX_BLOB_CACHE_DIR`, the variable the worker's
- *   config reads (src/dex/client.ts), so exporting it for the worker silently
- *   made watcher and worker share one directory. The watcher now ignores it;
- *   `DEX_WATCH_BLOB_CACHE_DIR` is its own override.
+ * The default is a SIBLING of the worker's `.dex-cache/`, not a directory
+ * inside it: a cache nested in another's directory can be enumerated and
+ * evicted by it. `.dex-cache-watch/` is covered by the `.dex-cache*\/` ignore
+ * rule (src/dex/defaults.ts holds every process's default).
  */
 
-/** Default watcher cache, inside the gitignored `.dex-cache/` (cwd-relative). */
-export const WATCHER_BLOB_CACHE_DIR = ".dex-cache/watch";
+import { BLOB_CACHE_DIRS } from "../dex/defaults.js";
+
+/** Default watcher cache (cwd-relative). */
+export const WATCHER_BLOB_CACHE_DIR = BLOB_CACHE_DIRS.watcher;
 
 export function watcherBlobCacheDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.DEX_WATCH_BLOB_CACHE_DIR?.trim() || WATCHER_BLOB_CACHE_DIR;

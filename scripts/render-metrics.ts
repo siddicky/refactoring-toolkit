@@ -33,7 +33,6 @@
  * adapts wire shapes and writes metrics/report.md + metrics/report.json.
  */
 
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -44,8 +43,10 @@ import {
   exitCodesNote,
   parseOptions,
   reportParseFailure,
+  usageText,
 } from "../src/cli/args.js";
-import { dexConfigFromEnv } from "../src/dex/client.js";
+import { dexcliFromEnv } from "../src/dex/defaults.js";
+import { execTool } from "../src/exec.js";
 import {
   collectBurnDown,
   collectCitationGates,
@@ -124,11 +125,34 @@ export interface RenderMetricsOptions {
   generatedAt: string | undefined;
 }
 
+/**
+ * A UTC ISO-8601 timestamp the way `new Date().toISOString()` writes it
+ * (`2026-09-30T12:00:00Z` or with milliseconds), and a real instant: a date
+ * the calendar does not have (`2026-02-30`, hour 24) is not one, though
+ * `new Date()` would roll it over silently.
+ */
+export function isUtcIsoTimestamp(value: string): boolean {
+  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d{1,3})?Z$/.exec(value);
+  if (m === null) return false;
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.toISOString().startsWith(m[1] ?? "");
+}
+
 /** Strict parse of render-metrics' argv (without the `bun run script` prefix). */
 export function parseRenderMetricsArgs(argv: readonly string[]): CliParse<RenderMetricsOptions> {
   const parsed = parseOptions(RENDER_METRICS_CLI, argv);
   if (!parsed.ok) return parsed;
   const o = parsed.options;
+  // The stamp is printed into the report header as given: a malformed one used to be
+  // written as-is into a report that claims to be reproducible evidence.
+  if (o.generatedAt !== undefined && !isUtcIsoTimestamp(o.generatedAt)) {
+    return {
+      ok: false,
+      help: false,
+      error: `--generated-at must be a UTC ISO-8601 timestamp such as 2026-09-30T12:00:00Z, got ${JSON.stringify(o.generatedAt)}`,
+      usage: usageText(RENDER_METRICS_CLI),
+    };
+  }
   return {
     ok: true,
     options: {
@@ -152,23 +176,30 @@ export function dexcliInvocation(
   args: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
 ): { bin: string; args: string[] } {
-  return {
-    bin: env.DEXCLI_BIN?.trim() || "dexcli",
-    args: [...args, "-server", dexConfigFromEnv(env).serverAddress, "-output", "json"],
-  };
+  const { bin, server } = dexcliFromEnv(env);
+  return { bin, args: [...args, "-server", server, "-output", "json"] };
 }
 
 /** One dexcli read returning the parsed JSON payload (injectable for tests). */
-export type DexRunner = (args: readonly string[]) => unknown;
+export type DexRunner = (args: readonly string[]) => Promise<unknown>;
 
-const runDexcli: DexRunner = (args) => {
-  const call = dexcliInvocation(args);
-  const stdout = execFileSync(call.bin, call.args, {
-    encoding: "utf8",
-    maxBuffer: 256 * 1024 * 1024,
-  });
-  return JSON.parse(stdout);
-};
+/** Bound on ONE dexcli read: a hung dexcli (dex down, a stuck connection) must not hang the report forever. */
+export const DEXCLI_TIMEOUT_MS = 60_000;
+
+/**
+ * A runner over the shared exec helper, so a failure names the command and how
+ * it ended and `timeoutMs` bounds every read (a dexcli that never answers used
+ * to hang the whole report, synchronously).
+ */
+export function dexcliRunner(timeoutMs: number = DEXCLI_TIMEOUT_MS, env: NodeJS.ProcessEnv = process.env): DexRunner {
+  return async (args) => {
+    const call = dexcliInvocation(args, env);
+    const out = await execTool(call.bin, call.args, { timeoutMs, maxBuffer: 256 * 1024 * 1024 });
+    return JSON.parse(out.stdout);
+  };
+}
+
+const runDexcli: DexRunner = dexcliRunner();
 
 /** Upper bound on the runs walked back from the current one (a malformed chain cannot loop). */
 export const MAX_RUN_CHAIN = 256;
@@ -209,13 +240,13 @@ export function previousRunIdOf(events: readonly DispatchHistoryEvent[]): string
  * predecessor), the first run is still fetched, so the result is never smaller
  * than first + current. The parent and every child use this same helper.
  */
-export function mergedHistory(facts: FlowFacts, run: DexRunner = runDexcli): DispatchHistory {
-  const fetchRun = (rid: string | undefined): DispatchHistoryEvent[] => {
+export async function mergedHistory(facts: FlowFacts, run: DexRunner = runDexcli): Promise<DispatchHistory> {
+  const fetchRun = async (rid: string | undefined): Promise<DispatchHistoryEvent[]> => {
     const args =
       rid === undefined
         ? ["flow", "history", facts.flowId, "-all"]
         : ["flow", "history", facts.flowId, "-run-id", rid, "-all"];
-    const h = run(args) as DispatchHistory;
+    const h = (await run(args)) as DispatchHistory;
     // Step execution ids are per flow and run, so the merged list must remember
     // where each event came from or two children's `PpImplement-1` collapse.
     const historySource = `${facts.flowId}@${rid ?? "latest"}`;
@@ -226,25 +257,25 @@ export function mergedHistory(facts: FlowFacts, run: DexRunner = runDexcli): Dis
   // instead of silently fetching nothing.
   const currentRunId = facts.runIds[facts.runIds.length - 1];
   const firstRunId = facts.runIds[0];
-  const newest = fetchRun(currentRunId);
+  const newest = await fetchRun(currentRunId);
   let events = newest;
   const visited = new Set<string>(currentRunId === undefined ? [] : [currentRunId]);
   let previous = previousRunIdOf(newest);
   while (previous !== undefined && !visited.has(previous) && visited.size < MAX_RUN_CHAIN) {
     visited.add(previous);
-    const older = fetchRun(previous);
+    const older = await fetchRun(previous);
     events = [...older, ...events];
     previous = previousRunIdOf(older);
   }
   if (firstRunId !== undefined && !visited.has(firstRunId)) {
-    events = [...fetchRun(firstRunId), ...events];
+    events = [...(await fetchRun(firstRunId)), ...events];
   }
   return { flowId: facts.flowId, runId: facts.runId, events };
 }
 
 /** {@link mergedHistory} for a flow known only by id (fetches its summary first). */
-export function mergedHistoryOf(flowId: string, run: DexRunner = runDexcli): DispatchHistory {
-  const summary = run(["flow", "summary", flowId]) as FlowSummaryWire;
+export async function mergedHistoryOf(flowId: string, run: DexRunner = runDexcli): Promise<DispatchHistory> {
+  const summary = (await run(["flow", "summary", flowId])) as FlowSummaryWire;
   return mergedHistory(flowFactsFromSummary(flowId, summary), run);
 }
 
@@ -260,8 +291,8 @@ async function main(argv: readonly string[]): Promise<number> {
 
   // flowStatus / runId / firstRunId come from ONE `flow summary` call; the
   // `flow state` payload only carries the attribute store.
-  const facts = flowFactsFromSummary(flowId, runDexcli(["flow", "summary", flowId]) as FlowSummaryWire);
-  const state = runDexcli(["flow", "state", flowId]) as FlowState;
+  const facts = flowFactsFromSummary(flowId, (await runDexcli(["flow", "summary", flowId])) as FlowSummaryWire);
+  const state = (await runDexcli(["flow", "state", flowId])) as FlowState;
   const runId = facts.runId;
   const attrs = state.attributes ?? [];
   const flowCompleted = facts.flowCompleted;
@@ -269,7 +300,7 @@ async function main(argv: readonly string[]): Promise<number> {
   // Parallel topology (v1.1): every child's envelope/verdict/burn-down
   // evidence joins the report. Children come from the parent's final state AND
   // every pp-wave-children upsert in its durable history.
-  const history = mergedHistory(facts);
+  const history = await mergedHistory(facts);
   const childIds = discoverChildFlowIds(attrs, history.events);
   const envelopes: EnvelopeEvent[] = [];
   const verdicts: VerdictRecord[] = [];
@@ -278,7 +309,7 @@ async function main(argv: readonly string[]): Promise<number> {
   const jevUsage: JevUsageEntry[] = [];
   const citationGates: CitationGateView[] = [];
   for (const id of [flowId, ...childIds]) {
-    const s = id === flowId ? state : (runDexcli(["flow", "state", id]) as FlowState);
+    const s = id === flowId ? state : ((await runDexcli(["flow", "state", id])) as FlowState);
     envelopes.push(...collectEnvelopes(s.attributes ?? []));
     verdicts.push(...collectVerdicts(s.attributes ?? []));
     tombstones.push(...collectTombstones(s.attributes ?? []));
@@ -288,7 +319,7 @@ async function main(argv: readonly string[]): Promise<number> {
   }
 
   for (const id of childIds) {
-    history.events.push(...mergedHistoryOf(id).events);
+    history.events.push(...(await mergedHistoryOf(id)).events);
   }
   // Contract B: one sidecar parser; only this flow's kills (run id, flow id)
   // are attributed to it; malformed lines are reported, not dropped.

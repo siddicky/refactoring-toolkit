@@ -12,7 +12,9 @@ import { join } from "node:path";
 
 import {
   dexcliInvocation,
+  dexcliRunner,
   type DexRunner,
+  isUtcIsoTimestamp,
   mergedHistory,
   mergedHistoryOf,
   parseRenderMetricsArgs,
@@ -51,6 +53,75 @@ describe("dexcli invocation honours DEXCLI_BIN and DEX_SERVER_ADDRESS (C36)", ()
     const call = dexcliInvocation(["flow", "state", "f1"], { DEXCLI_BIN: "  ", DEX_SERVER_ADDRESS: "" });
     expect(call.bin).toBe("dexcli");
     expect(call.args).toContain("127.0.0.1:8801");
+  });
+});
+
+describe("dexcliRunner: every read goes through the shared exec helper with a timeout (C4)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dexcli-runner-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  function script(name: string, body: string): string {
+    const path = join(dir, name);
+    writeFileSync(path, `#!/bin/sh\n${body}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  }
+
+  test("a dexcli that never answers is killed at the timeout and the error says so (it used to hang the report)", async () => {
+    const hang = script("hang", "exec sleep 30");
+    const started = Date.now();
+    const run = dexcliRunner(300, { DEXCLI_BIN: hang });
+    await expect(run(["flow", "summary", "f1"])).rejects.toThrow(/timed out after 300ms/);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 20_000);
+
+  test("a failing dexcli is reported with its command and stderr, not as a bare exit", async () => {
+    const fail = script("fail", 'echo "flow not found" >&2; exit 3');
+    const run = dexcliRunner(5_000, { DEXCLI_BIN: fail, DEX_SERVER_ADDRESS: "dex.test:1" });
+    const err = await run(["flow", "summary", "f1"]).catch((e: Error) => e);
+    expect((err as Error).message).toContain("flow summary f1 -server dex.test:1 -output json");
+    expect((err as Error).message).toContain("flow not found");
+    expect((err as Error).message).toContain("exit 3");
+  });
+
+  test("a good answer is parsed JSON", async () => {
+    const ok = script("ok", `printf '%s' '{"flowId":"f1","runId":"r1"}'`);
+    expect(await dexcliRunner(5_000, { DEXCLI_BIN: ok })(["flow", "summary", "f1"])).toEqual({ flowId: "f1", runId: "r1" });
+  });
+});
+
+describe("--generated-at is validated (C4)", () => {
+  test("isUtcIsoTimestamp accepts what toISOString writes (with or without milliseconds) and nothing else", () => {
+    for (const good of ["2026-09-30T12:00:00Z", "2026-09-30T12:00:00.5Z", "2026-09-30T12:00:00.123Z", new Date().toISOString()]) {
+      expect([good, isUtcIsoTimestamp(good)]).toEqual([good, true]);
+    }
+    for (const bad of [
+      "yesterday",
+      "2026-09-30",
+      "2026-09-30 12:00:00",
+      "2026-09-30T12:00:00",
+      "2026-09-30T12:00:00+02:00",
+      "2026-13-01T00:00:00Z",
+      "2026-02-30T00:00:00Z", // the calendar has no such day; Date would roll it to 03-02
+      "2026-09-30T24:00:00Z",
+      "2026-09-30T12:00:00.1234Z",
+      "",
+    ]) {
+      expect([bad, isUtcIsoTimestamp(bad)]).toEqual([bad, false]);
+    }
+  });
+
+  test("a malformed --generated-at is a usage error naming the flag, before dex is contacted", async () => {
+    const parsed = parseRenderMetricsArgs(["--flow-id", "f", "--generated-at", "yesterday"]);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.error).toContain('--generated-at must be a UTC ISO-8601 timestamp such as 2026-09-30T12:00:00Z, got "yesterday"');
+      expect(parsed.usage).toContain("usage: render-metrics.ts");
+    }
+    const r = await runDriver(["--flow-id", "f", "--generated-at", "2026-02-30T00:00:00Z"]);
+    expect(r.code).toBe(64);
+    expect(r.stderr).toContain("--generated-at must be a UTC ISO-8601 timestamp");
+    expect(parseRenderMetricsArgs(["--flow-id", "f", "--generated-at", "2026-09-30T00:00:00Z"]).ok).toBe(true);
   });
 });
 
@@ -125,7 +196,7 @@ describe("render-metrics flag parsing (C36, shared layer C69)", () => {
 /** In-memory dexcli: answers `flow <sub> <id> [-run-id r]` from a table and records every call. */
 function fakeDex(table: Record<string, unknown>): { run: DexRunner; calls: string[][] } {
   const calls: string[][] = [];
-  const run: DexRunner = (args) => {
+  const run: DexRunner = async (args) => {
     calls.push([...args]);
     const sub = args[1];
     const id = args[2];
@@ -140,22 +211,22 @@ function fakeDex(table: Record<string, unknown>): { run: DexRunner; calls: strin
 const ev = (eventId: string) => ({ eventId, type: "StepStarted", payload: { context: { stepType: "PpPrep" } } });
 
 describe("mergedHistory: first + current run, one helper for parent and children (C45)", () => {
-  test("fetches the first AND current run and concatenates their events in run order", () => {
+  test("fetches the first AND current run and concatenates their events in run order", async () => {
     const { run, calls } = fakeDex({
       "history:f1:run-1": { events: [ev("a1"), ev("a2")] },
       "history:f1:run-2": { events: [ev("b1")] },
     });
     const facts = flowFactsFromSummary("f1", { runId: "run-2", firstRunId: "run-1" });
-    const h = mergedHistory(facts, run);
+    const h = await mergedHistory(facts, run);
     expect(h.events.map((e) => e.eventId)).toEqual(["a1", "a2", "b1"]);
     expect(h.flowId).toBe("f1");
     expect(h.runId).toBe("run-2");
     expect(calls.map((c) => c[c.indexOf("-run-id") + 1]).sort()).toEqual(["run-1", "run-2"]);
   });
 
-  test("a single-run flow (first == current) is fetched once", () => {
+  test("a single-run flow (first == current) is fetched once", async () => {
     const { run, calls } = fakeDex({ "history:f1:run-1": { events: [ev("a1")] } });
-    mergedHistory(flowFactsFromSummary("f1", { runId: "run-1", firstRunId: "run-1" }), run);
+    await mergedHistory(flowFactsFromSummary("f1", { runId: "run-1", firstRunId: "run-1" }), run);
     expect(calls.length).toBe(1);
   });
 
@@ -166,13 +237,13 @@ describe("mergedHistory: first + current run, one helper for parent and children
   });
   const firstStart = { eventId: "start-1", type: "FlowStartedOrContinued", payload: { initialStart: {} } };
 
-  test("C45: the middle runs of a 3-run flow are walked back from the current run via previousRunId", () => {
+  test("C45: the middle runs of a 3-run flow are walked back from the current run via previousRunId", async () => {
     const { run, calls } = fakeDex({
       "history:f1:run-1": { events: [firstStart, ev("a1")] },
       "history:f1:run-2": { events: [continuedFrom("run-1"), ev("b1")] },
       "history:f1:run-3": { events: [continuedFrom("run-2"), ev("c1")] },
     });
-    const h = mergedHistory(flowFactsFromSummary("f1", { runId: "run-3", firstRunId: "run-1" }), run);
+    const h = await mergedHistory(flowFactsFromSummary("f1", { runId: "run-3", firstRunId: "run-1" }), run);
     // Oldest run first, every run exactly once.
     expect(h.events.map((e) => e.eventId)).toEqual(["start-1", "a1", "start-from-run-1", "b1", "start-from-run-2", "c1"]);
     expect(h.events.map((e) => e.historySource)).toEqual([
@@ -186,54 +257,54 @@ describe("mergedHistory: first + current run, one helper for parent and children
     expect(calls.map((c) => c[c.indexOf("-run-id") + 1]).sort()).toEqual(["run-1", "run-2", "run-3"]);
   });
 
-  test("C45: a 5-run chain is followed all the way back, middle dispatch entries included", () => {
+  test("C45: a 5-run chain is followed all the way back, middle dispatch entries included", async () => {
     const table: Record<string, unknown> = {};
     for (let n = 1; n <= 5; n++) {
       table[`history:f1:run-${n}`] = { events: [n === 1 ? firstStart : continuedFrom(`run-${n - 1}`), ev(`e${n}`)] };
     }
     const { run } = fakeDex(table);
-    const h = mergedHistory(flowFactsFromSummary("f1", { runId: "run-5", firstRunId: "run-1" }), run);
+    const h = await mergedHistory(flowFactsFromSummary("f1", { runId: "run-5", firstRunId: "run-1" }), run);
     expect(h.events.map((e) => e.eventId).filter((id) => /^e\d$/.test(id ?? ""))).toEqual(["e1", "e2", "e3", "e4", "e5"]);
   });
 
-  test("C45: a broken chain (the current run does not name its predecessor) still yields first + current", () => {
+  test("C45: a broken chain (the current run does not name its predecessor) still yields first + current", async () => {
     const { run, calls } = fakeDex({
       "history:f1:run-1": { events: [ev("a1")] },
       "history:f1:run-3": { events: [ev("c1")] },
     });
-    const h = mergedHistory(flowFactsFromSummary("f1", { runId: "run-3", firstRunId: "run-1" }), run);
+    const h = await mergedHistory(flowFactsFromSummary("f1", { runId: "run-3", firstRunId: "run-1" }), run);
     expect(h.events.map((e) => e.eventId)).toEqual(["a1", "c1"]);
     expect(calls.some((c) => c.includes("run-2"))).toBe(false);
   });
 
-  test("C45: a cyclic previousRunId chain terminates", () => {
+  test("C45: a cyclic previousRunId chain terminates", async () => {
     const { run, calls } = fakeDex({
       "history:f1:run-a": { events: [continuedFrom("run-b")] },
       "history:f1:run-b": { events: [continuedFrom("run-a")] },
     });
-    mergedHistory(flowFactsFromSummary("f1", { runId: "run-a", firstRunId: "run-a" }), run);
+    await mergedHistory(flowFactsFromSummary("f1", { runId: "run-a", firstRunId: "run-a" }), run);
     expect(calls.length).toBe(2);
   });
 
-  test("a summary without run ids falls back to the default-run history instead of fetching nothing", () => {
+  test("a summary without run ids falls back to the default-run history instead of fetching nothing", async () => {
     const { run, calls } = fakeDex({ "history:f1:latest": { events: [ev("d1")] } });
-    const h = mergedHistory(flowFactsFromSummary("f1", {}), run);
+    const h = await mergedHistory(flowFactsFromSummary("f1", {}), run);
     expect(h.events.map((e) => e.eventId)).toEqual(["d1"]);
     expect(calls).toEqual([["flow", "history", "f1", "-all"]]);
   });
 
-  test("a child is fetched through the same helper: summary first, then each of its runs", () => {
+  test("a child is fetched through the same helper: summary first, then each of its runs", async () => {
     const { run, calls } = fakeDex({
       "summary:child-1": { flowId: "child-1", runId: "c-run-2", firstRunId: "c-run-1" },
       "history:child-1:c-run-1": { events: [ev("x1")] },
       "history:child-1:c-run-2": { events: [ev("x2")] },
     });
-    const h = mergedHistoryOf("child-1", run);
+    const h = await mergedHistoryOf("child-1", run);
     expect(h.events.map((e) => e.eventId)).toEqual(["x1", "x2"]);
     expect(calls.map((c) => c[1])).toEqual(["summary", "history", "history"]);
   });
 
-  test("B15: events are stamped with their flow and run, so two children's PpImplement-1 stay two dispatch entries", () => {
+  test("B15: events are stamped with their flow and run, so two children's PpImplement-1 stay two dispatch entries", async () => {
     const dispatch = (id: string, file: string) => ({
       eventId: id,
       type: "StepExecuteCompleted",
@@ -249,17 +320,17 @@ describe("mergedHistory: first + current run, one helper for parent and children
       "history:child-b:rb": { events: [dispatch("b", "src/b.php")] },
     });
     // The driver concatenates every child's events into the parent's list.
-    const events = [...mergedHistoryOf("child-a", run).events, ...mergedHistoryOf("child-b", run).events];
+    const events = [...(await mergedHistoryOf("child-a", run)).events, ...(await mergedHistoryOf("child-b", run)).events];
     expect(new Set(events.map((e) => e.historySource)).size).toBe(2);
     expect(extractDispatchEntries({ events }).map((e) => e.identity)).toEqual(["src__a.php#1", "src__b.php#1"]);
   });
 
-  test("B15: the two runs of one continued flow carry distinct sources too", () => {
+  test("B15: the two runs of one continued flow carry distinct sources too", async () => {
     const { run } = fakeDex({
       "history:f1:run-1": { events: [ev("a1")] },
       "history:f1:run-2": { events: [ev("b1")] },
     });
-    const h = mergedHistory(flowFactsFromSummary("f1", { runId: "run-2", firstRunId: "run-1" }), run);
+    const h = await mergedHistory(flowFactsFromSummary("f1", { runId: "run-2", firstRunId: "run-1" }), run);
     expect(h.events.map((e) => e.historySource)).toEqual(["f1@run-1", "f1@run-2"]);
   });
 });

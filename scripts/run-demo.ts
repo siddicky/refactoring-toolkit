@@ -38,6 +38,7 @@ import {
   startDexWorker,
   type AnyFlow,
 } from "../src/dex/client.js";
+import { dexcliFromEnv } from "../src/dex/defaults.js";
 import { waitForFlowTerminal } from "../src/dex/wait-for-terminal.js";
 import {
   CLI_EXIT,
@@ -369,7 +370,7 @@ async function startRound(
   round: number,
   epoch: number,
 ): Promise<number> {
-  const config = dexConfigFromEnv();
+  const config = dexConfigFromEnv(process.env, "client");
   const pool = new WorktreePool(repoDir, join(repoDir, ".worktrees"), new InMemoryLeaseStore(), 2);
   const acquired = await pool.acquire(file, epoch, `run-demo-${epoch}`);
   if (!acquired.acquired) {
@@ -408,12 +409,7 @@ async function startRound(
 // ---------------------------------------------------------------------------
 
 function dispatchGateQueries() {
-  const config = dexConfigFromEnv();
-  return dexCliQueries({
-    bin: process.env.DEXCLI_BIN?.trim() || "dexcli",
-    server: config.serverAddress,
-    timeoutMs: GATE_QUERY_TIMEOUT_MS,
-  });
+  return dexCliQueries({ ...dexcliFromEnv(), timeoutMs: GATE_QUERY_TIMEOUT_MS });
 }
 
 async function runDispatchGate(gateFlowId: string | undefined): Promise<number> {
@@ -1134,7 +1130,7 @@ export async function maybeLaunchDashboard(
 }
 
 async function startDemo(options: DemoOptions): Promise<number> {
-  const config = dexConfigFromEnv();
+  const config = dexConfigFromEnv(process.env, "client");
   const inputs = resolveDemoInputs(options);
   const { dir, files, prepPath, sourceRoot, epoch, maxRounds, waitMinutes } = inputs;
   // Validate before anything is created or contacted.
@@ -1424,7 +1420,8 @@ async function exists(p: string): Promise<boolean> {
 async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const parsed = parseRunDemoArgs(argv);
   if (!parsed.ok) return reportParseFailure("run-demo", parsed);
-  const config = dexConfigFromEnv();
+  // The worker and every client command run at the same time: each has its own blob cache.
+  const config = dexConfigFromEnv(process.env, parsed.command === "worker" ? "worker" : "client");
 
   switch (parsed.command) {
     case "worker": {

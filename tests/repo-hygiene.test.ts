@@ -68,7 +68,7 @@ describe("kill-events fixtures and sidecars", () => {
 });
 
 describe("dex blob-cache dirs", () => {
-  test.each([".dex-cache", ".dex-cache-watch", ".dex-cache-dashboard"])("%s/ is ignored", (dir) => {
+  test.each([".dex-cache", ".dex-cache-client", ".dex-cache-watch", ".dex-cache-dashboard"])("%s/ is ignored", (dir) => {
     expect(isIgnored(`${dir}/blob`)).toBe(true);
   });
 

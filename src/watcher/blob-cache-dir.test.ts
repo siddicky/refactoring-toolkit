@@ -20,10 +20,10 @@ afterEach(async () => {
 });
 
 describe("C61: watcher blob-cache directory", () => {
-  test("the default is nested under .dex-cache/ (not the unignored .dex-cache-watch)", () => {
-    expect(WATCHER_BLOB_CACHE_DIR).toBe(".dex-cache/watch");
-    expect(watcherBlobCacheDir({})).toBe(".dex-cache/watch");
-    expect(watcherBlobCacheDir({})).not.toBe(".dex-cache-watch");
+  test("C1: the default is a SIBLING of the worker's .dex-cache, not a directory inside it", () => {
+    expect(WATCHER_BLOB_CACHE_DIR).toBe(".dex-cache-watch");
+    expect(watcherBlobCacheDir({})).toBe(".dex-cache-watch");
+    expect(watcherBlobCacheDir({}).startsWith(".dex-cache/")).toBe(false);
   });
 
   test("git ignores files the default cache would create (a `git add -A` cannot pick them up)", async () => {
@@ -37,21 +37,21 @@ describe("C61: watcher blob-cache directory", () => {
   });
 
   test("the worker's DEX_BLOB_CACHE_DIR is NOT honoured, so watcher and worker never share a directory", () => {
-    expect(watcherBlobCacheDir({ DEX_BLOB_CACHE_DIR: "/var/cache/worker-blobs" })).toBe(".dex-cache/watch");
+    expect(watcherBlobCacheDir({ DEX_BLOB_CACHE_DIR: "/var/cache/worker-blobs" })).toBe(".dex-cache-watch");
   });
 
   test("DEX_WATCH_BLOB_CACHE_DIR overrides; blank falls back to the default", () => {
     expect(watcherBlobCacheDir({ DEX_WATCH_BLOB_CACHE_DIR: " /tmp/w " })).toBe("/tmp/w");
-    expect(watcherBlobCacheDir({ DEX_WATCH_BLOB_CACHE_DIR: "  " })).toBe(".dex-cache/watch");
+    expect(watcherBlobCacheDir({ DEX_WATCH_BLOB_CACHE_DIR: "  " })).toBe(".dex-cache-watch");
   });
 
-  test("the native blob cache opens the nested default even when .dex-cache/ does not exist yet", async () => {
+  test("the native blob cache opens the default directory even when it does not exist yet", async () => {
     dir = await mkdtemp(join(tmpdir(), "watch-blob-"));
-    const nested = join(dir, WATCHER_BLOB_CACHE_DIR);
-    expect(existsSync(join(dir, ".dex-cache"))).toBe(false);
-    const cache = openBlobCache({ directory: nested, maxBytes: 4 * 1024 * 1024 });
+    const target = join(dir, WATCHER_BLOB_CACHE_DIR);
+    expect(existsSync(target)).toBe(false);
+    const cache = openBlobCache({ directory: target, maxBytes: 4 * 1024 * 1024 });
     try {
-      expect(existsSync(nested)).toBe(true);
+      expect(existsSync(target)).toBe(true);
     } finally {
       cache.close();
     }

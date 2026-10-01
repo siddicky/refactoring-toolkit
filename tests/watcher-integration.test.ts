@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { CHAOS_KILL_EXIT } from "../scripts/chaos-kill.js";
 import { configFromEnv } from "../src/dashboard/config.js";
 import { dexConfigFromEnv } from "../src/dex/client.js";
+import { BLOB_CACHE_DIRS } from "../src/dex/defaults.js";
 import { watcherBlobCacheDir, WATCHER_BLOB_CACHE_DIR } from "../src/watcher/blob-cache-dir.js";
 import { WATCHER_EXIT } from "../src/watcher/cli-args.js";
 import {
@@ -179,17 +180,25 @@ describe("INT-9: chaos-kill and watch-queue-verify share one exit-code table", (
 describe("INT-9: serve-status does not share DEX_BLOB_CACHE_DIR with the worker", () => {
   test("exporting DEX_BLOB_CACHE_DIR moves the worker's cache and neither the dashboard's nor the watcher's", () => {
     const env = { DEX_BLOB_CACHE_DIR: "/srv/worker-cache" };
-    expect(dexConfigFromEnv(env).blobCacheDir).toBe("/srv/worker-cache");
+    expect(dexConfigFromEnv(env, "worker").blobCacheDir).toBe("/srv/worker-cache");
+    expect(dexConfigFromEnv(env, "client").blobCacheDir).not.toBe("/srv/worker-cache");
     expect(configFromEnv(env, "/cwd").blobCacheDir).not.toBe("/srv/worker-cache");
     expect(watcherBlobCacheDir(env)).toBe(WATCHER_BLOB_CACHE_DIR);
   });
 
-  test("each process has its own default directory, all under the ignored .dex-cache family", () => {
-    const worker = dexConfigFromEnv({}).blobCacheDir;
+  test("each process has its own default directory, all siblings under the ignored .dex-cache* family (none inside another)", () => {
+    const worker = dexConfigFromEnv({}, "worker").blobCacheDir;
+    const client = dexConfigFromEnv({}, "client").blobCacheDir;
     const dashboard = configFromEnv({}, "/cwd").blobCacheDir;
     const watcher = watcherBlobCacheDir({});
-    expect(new Set([worker, dashboard, watcher]).size).toBe(3);
-    for (const dirName of [worker, dashboard, watcher]) {
+    expect([worker, client, dashboard, watcher]).toEqual(Object.values(BLOB_CACHE_DIRS));
+    const all = [worker, client, dashboard, watcher];
+    expect(new Set(all).size).toBe(4);
+    // C1: a cache nested in another's directory can be enumerated or evicted by it.
+    for (const a of all) {
+      for (const b of all) if (a !== b) expect(`${a}/`.startsWith(`${b}/`), `${a} is inside ${b}`).toBe(false);
+    }
+    for (const dirName of all) {
       expect(dirName.startsWith(".dex-cache")).toBe(true);
       const ignored = (() => {
         try {
@@ -210,7 +219,7 @@ describe("INT-9: serve-status does not share DEX_BLOB_CACHE_DIR with the worker"
 
   test("scripts/serve-status.ts overrides the spread dexConfigFromEnv() cache with its own directory", () => {
     const source = readFileSync(join(REPO_ROOT, "scripts", "serve-status.ts"), "utf8");
-    expect(source).toMatch(/\{\s*\.\.\.dexConfigFromEnv\(\),\s*blobCacheDir\s*\}/);
+    expect(source).toMatch(/\{\s*\.\.\.dexConfigFromEnv\(process\.env, "client"\),\s*blobCacheDir\s*\}/);
     expect(source).not.toMatch(/process\.env\.DEX_BLOB_CACHE_DIR/);
   });
 });

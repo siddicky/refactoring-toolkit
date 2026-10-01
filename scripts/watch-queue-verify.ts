@@ -67,8 +67,8 @@
  * are logged (first, then every 10th) instead of swallowed.
  *
  * Env: DEX_SERVER_ADDRESS; DEXCLI_BIN (default `dexcli`);
- * DEX_WATCH_BLOB_CACHE_DIR (default `.dex-cache/watch`, under the gitignored
- * `.dex-cache/`). The watcher deliberately does NOT read DEX_BLOB_CACHE_DIR:
+ * DEX_WATCH_BLOB_CACHE_DIR (default `.dex-cache-watch`, a gitignored sibling of
+ * the worker's `.dex-cache`). The watcher deliberately does NOT read DEX_BLOB_CACHE_DIR:
  * that is the worker's variable, and cross-process BlobCache sharing is not
  * the guidance (audit C61).
  */
@@ -78,6 +78,7 @@ import {
 } from "@superdurable/dex";
 import { describeExecFailure, ExecError, execTool, execToolResult } from "../src/exec.js";
 import { openDexClient, dexConfigFromEnv } from "../src/dex/client.js";
+import { dexcliFromEnv } from "../src/dex/defaults.js";
 import { dexCliQueries } from "../src/dashboard/queries.js";
 import { envelopeStream } from "../flows/steps/envelope.js";
 import { PortProjectFlow } from "../flows/port-project.js";
@@ -167,7 +168,7 @@ async function main(): Promise<number> {
   // envelopeStream (port.Project — one-flow stream ownership, dex Registry
   // rule), over its own blob-cache directory (per-process sharing).
   const config = {
-    ...dexConfigFromEnv(),
+    ...dexConfigFromEnv(process.env, "client"),
     blobCacheDir: watcherBlobCacheDir(),
   };
   let runtime: Awaited<ReturnType<typeof openDexClient>> | undefined;
@@ -179,10 +180,11 @@ async function main(): Promise<number> {
     log(`stream client unavailable (${(err as Error).message}) — poll fallback only`);
   }
 
-  const dexcliBin = process.env.DEXCLI_BIN?.trim() || "dexcli";
+  const dexcli = dexcliFromEnv();
+  const dexcliBin = dexcli.bin;
   const cli = dexCliQueries({
     bin: dexcliBin,
-    server: config.serverAddress,
+    server: dexcli.server,
     timeoutMs: 10_000,
   });
 

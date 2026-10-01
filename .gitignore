@@ -18,7 +18,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# dex local dev state (blob caches: .dex-cache, .dex-cache-watch, .dex-cache-dashboard)
+# dex local dev state (blob caches, one sibling per process: .dex-cache, .dex-cache-client, .dex-cache-watch, .dex-cache-dashboard)
 .dex/
 .dex-cache*/
 

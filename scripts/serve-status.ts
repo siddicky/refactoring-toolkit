@@ -47,10 +47,10 @@
  *                         that budget)
  *   STATUS_STREAM_SUBSCRIBE (default on; 0 = dexcli polling only, no SDK
  *                         client and no blob cache)
- *   STATUS_BLOB_CACHE_DIR (default .dex-cache/dashboard — the stream
- *                         subscriber's OWN blob cache, under the gitignored
- *                         .dex-cache/; the worker's DEX_BLOB_CACHE_DIR is
- *                         deliberately not read)
+ *   STATUS_BLOB_CACHE_DIR (default .dex-cache-dashboard — the stream
+ *                         subscriber's OWN blob cache, a gitignored sibling
+ *                         of the worker's .dex-cache; the worker's
+ *                         DEX_BLOB_CACHE_DIR is deliberately not read)
  *   KILL_EVENT_FILES     (default metrics/kill-events.jsonl,
  *                         metrics/kill-events.json,kill-events.json — paths
  *                         relative to the working directory; the first is the
@@ -93,14 +93,14 @@ export function main(): void {
   // US-007 (Stage 2d): ReadStream event source for port/<flowId>/events.
   // The read-side client registers EXACTLY the flow type that owns the
   // envelope stream (port.Project — one-flow stream ownership) and uses its
-  // OWN blob-cache directory under .dex-cache/ (STATUS_BLOB_CACHE_DIR; never
+  // OWN blob-cache directory, a .dex-cache-dashboard sibling (STATUS_BLOB_CACHE_DIR; never
   // the worker's DEX_BLOB_CACHE_DIR). Fail-open: when the client cannot open,
   // the dashboard runs on dexcli polling alone (the poll fallback that stays
   // ENGAGED on any subscriber failure anyway). See src/dashboard/stream-feed.ts.
   const feed = startStreamFeed({
     cfg,
     open: async (blobCacheDir) => {
-      const runtime = await openDexClient([new PortProjectFlow()], { ...dexConfigFromEnv(), blobCacheDir });
+      const runtime = await openDexClient([new PortProjectFlow()], { ...dexConfigFromEnv(process.env, "client"), blobCacheDir });
       return {
         read: (flowId, resumeToken, timeoutMs) =>
           runtime.client.readStream(flowId, envelopeStream, resumeToken, timeoutMs),

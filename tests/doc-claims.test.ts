@@ -158,10 +158,11 @@ describe("doc claims: .env.example", () => {
       if (entry === undefined) throw new Error(`${key} is not in .env.example`);
       return entry.value;
     };
-    const dex = dexConfigFromEnv({});
+    const dex = dexConfigFromEnv({}, "worker");
     expect(value("DEX_SERVER_ADDRESS")).toBe(dex.serverAddress);
     expect(value("DEX_WORKER_TARGET")).toBe(DEFAULT_WORKER_TARGET_ADDRESS);
     expect(value("DEX_BLOB_CACHE_DIR")).toBe(dex.blobCacheDir);
+    expect(value("DEX_CLIENT_BLOB_CACHE_DIR")).toBe(dexConfigFromEnv({}, "client").blobCacheDir);
     expect(value("DEXCLI_BIN")).toBe(configFromEnv({}, "/x").dexcliBin);
     expect(value("OPENCODE_BASE_URL")).toBe("http://127.0.0.1:4096");
     expect(value("OPENCODE_PROMPT_WAIT_MS")).toBe(String(DEFAULT_PROMPT_WAIT_MS));
