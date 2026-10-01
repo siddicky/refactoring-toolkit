@@ -150,6 +150,14 @@ describe("writeOutFile stays inside the lease worktree (B4)", () => {
     }
   });
 
+  test("a file whose name merely starts with two dots is inside the worktree, not an escape", async () => {
+    const wt = await tmp("wt-dots-");
+    await writeOutFile(wt, "src/..cache.ts", "export {};\n");
+    await writeOutFile(wt, "..hidden.ts", "export {};\n");
+    expect(await readFile(join(wt, "src", "..cache.ts"), "utf8")).toBe("export {};\n");
+    expect(await readFile(join(wt, "..hidden.ts"), "utf8")).toBe("export {};\n");
+  });
+
   test("the worktree root itself is not a file target", async () => {
     const wt = await tmp("wt-root-");
     await expect(writeOutFile(wt, ".", "x")).rejects.toThrow(/outside the lease worktree/);

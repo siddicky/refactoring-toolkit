@@ -45,8 +45,9 @@
  *                         the newest port.Project parent(s) are always kept)
  *   STATUS_MAX_CHILD_FLOWS (default 8 — SubFlow port.File children within
  *                         that budget)
- *   STATUS_STREAM_SUBSCRIBE (default on; 0 = dexcli polling only, no SDK
- *                         client and no blob cache)
+ *   STATUS_STREAM_SUBSCRIBE (a switch, default on; 0/false/no/off = dexcli
+ *                         polling only, no SDK client and no blob cache; an
+ *                         unrecognised value warns and keeps it on)
  *   STATUS_BLOB_CACHE_DIR (default .dex-cache-dashboard — the stream
  *                         subscriber's OWN blob cache, a gitignored sibling
  *                         of the worker's .dex-cache; the worker's

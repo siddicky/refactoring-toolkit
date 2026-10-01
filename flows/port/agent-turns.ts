@@ -5,7 +5,7 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Context } from "@superdurable/dex";
 
 import {
@@ -83,7 +83,8 @@ export async function writeOutFile(worktreePath: string, outPath: string, conten
   const root = resolve(worktreePath);
   const target = resolve(root, outPath);
   const within = relative(root, target);
-  if (within === "" || within.startsWith("..") || isAbsolute(within)) {
+  // A segment named `..`, not a name that merely starts with two dots (`..cache.ts` is a legal file).
+  if (within === "" || within === ".." || within.startsWith(`..${sep}`) || isAbsolute(within)) {
     throw new Error(`refusing to write ${JSON.stringify(outPath)}: it resolves outside the lease worktree ${root}`);
   }
   await mkdir(dirname(target), { recursive: true });
