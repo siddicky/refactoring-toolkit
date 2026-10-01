@@ -4,11 +4,14 @@
  * worktree operations, session fencing) against a live dex server; they are
  * retained as upgrade regression suites when the wider toolkit lands.
  *
- * Deterministic fault injection (exit 0d): set PORTING_KIT_FAULT to one of
+ * Deterministic fault injection (exit 0d): set PORTING_KIT_FAULT (or pass
+ * `worker --fault`) to one of
  *   commit:post-commit:<file>#<round>   — crash the worker AFTER the keyed
  *                                         git commit lands, BEFORE the
  *                                         completion marker decision persists
  *   agent-write:mid:<file>#<round>      — crash the worker mid agent write
+ * The full table of faults (also the port flows') and the validation of the
+ * spec is FAULT_KINDS in flows/runtime-hooks.ts.
  *
  * The `agent` role steps call the harness injected via configureProbe(). With
  * a reachable opencode server (OPENCODE_BASE_URL, or the default
@@ -49,6 +52,7 @@ import {
   operationId,
   type CompletionMarker,
 } from "../src/git/worktree.js";
+import { crashPortWorker, faultMatches } from "../flows/runtime-hooks.js";
 import type { AnyFlow } from "../src/dex/client.js";
 import { git } from "../src/git/exec.js";
 import { identityKeyOf } from "../src/file-keys.js";
@@ -120,25 +124,13 @@ export function probePersistenceSchema(): {
 // Deterministic fault injection
 // ---------------------------------------------------------------------------
 
-export type FaultSpec = string | undefined;
-
-let FAULT: FaultSpec;
+// The armed fault is the one the port flows use (flows/runtime-hooks.ts:
+// configurePortFault / faultMatches / crashPortWorker, and the FAULT_KINDS
+// table that validates the spec): one mechanism, one process-wide spec.
 let HARNESS: AgentSessionClient | undefined;
 
-export function configureProbe(harness: AgentSessionClient, fault: FaultSpec): void {
+export function configureProbe(harness: AgentSessionClient): void {
   HARNESS = harness;
-  FAULT = fault;
-}
-
-export function faultMatches(kind: string, opId: string): boolean {
-  return FAULT === `${kind}:${opId}`;
-}
-
-/** Deterministic crash point: SIGKILL this worker process. */
-export function crashSelf(where: string): never {
-  console.error(`[fault-injection] deterministic SIGKILL at ${where} (pid ${process.pid})`);
-  process.kill(process.pid, "SIGKILL");
-  throw new Error(`unreachable after SIGKILL at ${where}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +254,7 @@ const ProbeAgentWriteStep = envelopeStepClass<RoundInput, { tokensTotal: number 
       const target = `${input.worktreePath}/${input.file}`;
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, input.writtenContent.slice(0, Math.max(1, input.writtenContent.length >> 1)));
-      crashSelf(`agent-write:mid:${opId}`);
+      crashPortWorker(`agent-write:mid:${opId}`);
     }
 
     const promptResult = await HARNESS.prompt(
@@ -328,7 +320,7 @@ const ProbeCommitStep = envelopeStepClass<RoundInput, { opId: string; dedup: boo
     // a side effect; the marker decision has NOT persisted. The retry (next
     // worker) must dedup via the op-ID lookup above, never re-commit.
     if (res.sha !== null && faultMatches("commit:post-commit", opId)) {
-      crashSelf(`commit:post-commit:${opId}`);
+      crashPortWorker(`commit:post-commit:${opId}`);
     }
 
     completionMarkers.set(ctx, key, {

@@ -281,21 +281,22 @@ describe("recover-port", () => {
   test("the flags echoed into the printed demo command are all accepted, --max-rounds as a typed number", () => {
     const o = okOf(
       "recover-port",
-      "--dir", "/r", "--source-root", "/src", "--prep", "/p.md", "--flow-id", "new-1", "--max-rounds", "2", "--harness", "opencode",
+      "--dir", "/r", "--files", "src/A.php", "--source-root", "/src", "--prep", "/p.md", "--flow-id", "new-1", "--max-rounds", "2", "--harness", "opencode",
     );
     expect(o).toMatchObject({ sourceRoot: "/src", prep: "/p.md", flowId: "new-1", maxRounds: 2, harness: "opencode" });
   });
 
   test("missing value / flag as value / trailing flag", () => {
-    expect(errorOf(["recover-port"])).toBe("--dir is required");
+    expect(errorOf(["recover-port"])).toBe("--dir is required\n--files is required");
+    expect(errorOf(["recover-port", "--dir", "/r"])).toBe("--files is required");
     expect(errorOf(["recover-port", "--dir", "/r", "--files"])).toBe("--files requires a value");
     expect(errorOf(["recover-port", "--dir", "/r", "--prep", "--files", "x"])).toContain("--prep requires a value");
   });
 
   test("bad enum and NaN", () => {
-    expect(errorOf(["recover-port", "--dir", "/r", "--harness", "real"])).toContain("--harness must be one of stub, opencode, auto");
-    expect(errorOf(["recover-port", "--dir", "/r", "--epoch", "abc"])).toContain("--epoch must be a whole number >= 1");
-    expect(errorOf(["recover-port", "--dir", "/r", "--max-rounds", "many"])).toContain("--max-rounds must be a whole number >= 1");
+    expect(errorOf(["recover-port", "--dir", "/r", "--files", "x", "--harness", "real"])).toContain("--harness must be one of stub, opencode, auto");
+    expect(errorOf(["recover-port", "--dir", "/r", "--files", "x", "--epoch", "abc"])).toContain("--epoch must be a whole number >= 1");
+    expect(errorOf(["recover-port", "--dir", "/r", "--files", "x", "--max-rounds", "many"])).toContain("--max-rounds must be a whole number >= 1");
   });
 });
 

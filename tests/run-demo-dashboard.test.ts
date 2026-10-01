@@ -160,6 +160,38 @@ describe("launchDashboard", () => {
     const res = await launchDashboard("/some/repo", { serveStatusPath: "/nonexistent/serve-status.ts" });
     expect(res.status).toBe("missing");
   });
+
+  test("B10: a bad STATUS_PORT is an `error` result, never a rejection (the flow is already running by then)", async () => {
+    const serveStatus = await fakeServeStatus(LISTENING_SCRIPT);
+    for (const bad of ["abc", "70000"]) {
+      const res = await launchDashboard("/some/repo", {
+        serveStatusPath: serveStatus,
+        env: { ...process.env, STATUS_PORT: bad },
+      });
+      expect(res.status).toBe("error");
+      expect(res.message).toContain("dashboard not started");
+      expect(res.message).toContain("STATUS_PORT must be a port number 1-65535");
+    }
+  });
+
+  test("B10: an unwritable log location is an `error` result, and nothing is left listening", async () => {
+    const port = await freePort();
+    const serveStatus = await fakeServeStatus(LISTENING_SCRIPT);
+    const before = process.env.TMPDIR;
+    process.env.TMPDIR = join(await tmp("no-such-tmp-"), "missing", "dir");
+    try {
+      const res = await launchDashboard("/some/repo", {
+        serveStatusPath: serveStatus,
+        env: { ...process.env, STATUS_PORT: String(port) },
+      });
+      expect(res.status).toBe("error");
+      expect(res.message).toContain("dashboard not started");
+      expect(await probePortInUse(port)).toBe(false);
+    } finally {
+      if (before === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = before;
+    }
+  });
 });
 
 describe("demo only launches the dashboard on request", () => {

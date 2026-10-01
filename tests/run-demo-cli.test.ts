@@ -144,6 +144,17 @@ describe("preflightDemoInputs", () => {
     expect(msg).toContain("/definitely/missing/src is not a directory");
   });
 
+  test("B10: STATUS_PORT is validated only when --dashboard asks for the dashboard", async () => {
+    const inputs = inputsFor("--dir", "/p");
+    await preflightDemoInputs(inputs, { env: { STATUS_PORT: "abc" } });
+    await preflightDemoInputs(inputs, { dashboard: false, env: { STATUS_PORT: "70000" } });
+    await preflightDemoInputs(inputs, { dashboard: true, env: { STATUS_PORT: "5055" } });
+    for (const bad of ["abc", "70000", "0"]) {
+      const err = await preflightDemoInputs(inputs, { dashboard: true, env: { STATUS_PORT: bad } }).catch((e: Error) => e);
+      expect((err as Error).message).toContain(`--dashboard: STATUS_PORT must be a port number 1-65535 (got "${bad}")`);
+    }
+  });
+
   test("a file with a prep row but absent on disk is named", async () => {
     const dir = await tmp("demo-preflight-");
     await mkdir(join(dir, "src"), { recursive: true });
@@ -227,6 +238,28 @@ describe("demo CLI fails before contacting dex or creating anything", () => {
     expect(stderr).toContain("--init-fixture");
     expect(stderr).not.toContain("ECONNREFUSED");
     expect(await exists(dir)).toBe(false);
+  });
+
+  test("B10: `--dashboard` with a bad STATUS_PORT fails in the preflight, before dex is contacted and before any flow is started", async () => {
+    const parent = await tmp("demo-cli-dashboard-port-");
+    const dir = join(parent, "proj");
+    const proc = Bun.spawn({
+      cmd: [process.execPath, "run", RUN_DEMO, "demo", "--dir", dir, "--init-fixture", "--dashboard"],
+      env: { ...process.env, DEX_SERVER_ADDRESS: "127.0.0.1:1", STATUS_PORT: "abc" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    expect(stderr).toContain("demo preflight failed");
+    expect(stderr).toContain("--dashboard: STATUS_PORT must be a port number 1-65535");
+    expect(stderr).not.toContain("ECONNREFUSED");
+    expect(stdout).not.toContain("started flowId");
+    expect(await exists(dir)).toBe(false); // nothing created either
   });
 
   test("a prep/source-root mismatch is reported by the preflight (no dex, no repo creation)", async () => {

@@ -47,6 +47,7 @@ import {
   reportParseFailure,
   type ParsedOptions,
 } from "../src/cli/args.js";
+import { EnvError, envInt, envString } from "../src/env.js";
 import { DexServiceError, LongPollTimeoutError } from "@superdurable/dex";
 import type { FlowResult, StepCompletion } from "@superdurable/dex";
 import {
@@ -96,6 +97,8 @@ import {
   configurePortFault,
   configurePortJudgment,
   configureTurnHealthAssessor,
+  faultKindsUsage,
+  faultSpecProblem,
 } from "../flows/runtime-hooks.js";
 import { createOfflineJevClient, judgmentLaneSummary } from "../src/harness/runtime.js";
 import { createRealJevClient, isTypesafeOffline } from "../src/typesafe/client.js";
@@ -310,15 +313,21 @@ async function countOpIdCommits(repoRoot: string, opId: string): Promise<number>
 // Ordered recovery (plan §Session fencing) — used by `recover`
 // ---------------------------------------------------------------------------
 
-async function orderedRecover(repoDir: string, epoch: number): Promise<number> {
-  const file = process.env.RECOVER_FILE ?? "src/a.php";
-  const round = Number.parseInt(process.env.RECOVER_ROUND ?? "1", 10);
+async function orderedRecover(options: CommandOptions<"recover">): Promise<number> {
+  // The pool builds worktree paths from this, and git runs with those paths as
+  // arguments from other directories: it must be absolute (B11).
+  const repoDir = resolve(options.dir);
+  const { epoch } = options;
+  // Flag, else environment, else default. A malformed RECOVER_ROUND is a usage
+  // error (it used to become NaN, and the op-ID "<file>#NaN").
+  const file = options.file ?? envString("RECOVER_FILE") ?? "src/a.php";
+  const round = options.round ?? envInt("RECOVER_ROUND", { min: 1 }) ?? 1;
   console.log(`[recover] epoch bump → ${epoch}; target ${file} round ${round}`);
 
   // 1-2. Abort + confirm persisted sessions; enumeration fallback when the
   // persisted fence is unavailable (attribute reads need a live flow context,
   // so Phase 0 uses the enumeration path against the surviving server).
-  const harness = await pickHarness(process.env.HARNESS, { requireReal: true });
+  const harness = await pickHarness(options.harness ?? envString("HARNESS"), { requireReal: true });
   const aborted = await harness.abortSessionsNotTagged(epoch);
   console.log(`[recover] aborted ${aborted.length} foreign session(s): ${aborted.join(",") || "none"}`);
 
@@ -644,8 +653,7 @@ export const RUN_DEMO_CLI = defineProgram({
         fault: {
           kind: "string",
           metavar: "spec",
-          description:
-            "deterministic fault injection: commit:post-commit:<file>#<round> or agent-write:mid:<file>#<round> (default: $PORTING_KIT_FAULT)",
+          description: `deterministic fault injection, validated against the flows chosen by --flows (default: $PORTING_KIT_FAULT). One of: ${faultKindsUsage()}`,
         },
       },
     },
@@ -685,10 +693,17 @@ export const RUN_DEMO_CLI = defineProgram({
     },
     recover: {
       summary:
-        "ordered recovery: abort/confirm sessions (enumeration fallback), lease reclaim, reconcile, re-dispatch (env: HARNESS, RECOVER_FILE, RECOVER_ROUND)",
+        "ordered recovery: abort/confirm sessions (enumeration fallback), lease reclaim, reconcile, re-dispatch (env defaults: HARNESS, RECOVER_FILE, RECOVER_ROUND)",
       options: {
-        dir: { kind: "string", metavar: "repoDir", required: true, description: "git repository of the interrupted round" },
+        dir: { kind: "string", metavar: "repoDir", required: true, description: "git repository of the interrupted round (relative paths are resolved against the current directory)" },
         epoch: { kind: "int", min: 1, default: 2, description: "the bumped epoch to recover to" },
+        file: { kind: "string", metavar: "path", description: "the interrupted file to re-dispatch (default: $RECOVER_FILE, else src/a.php)" },
+        round: { kind: "int", min: 1, metavar: "n", description: "the interrupted round (default: $RECOVER_ROUND, else 1)" },
+        harness: {
+          kind: "enum",
+          choices: HARNESS_CHOICES,
+          description: "recovery must reach the real server, so auto fails like opencode when it is unreachable (default: $HARNESS, else auto)",
+        },
       },
     },
     "recover-port": {
@@ -700,7 +715,9 @@ export const RUN_DEMO_CLI = defineProgram({
         files: {
           kind: "string",
           metavar: "files",
-          description: "the run's files (comma-separated, or `creatorex`); same expansion as demo",
+          required: true,
+          description:
+            "the run's files (comma-separated, or `creatorex`); same expansion as demo. Required: each one's lease worktree is what gets reconciled, so no files would mean nothing inspected",
         },
         sourceRoot: { kind: "string", metavar: "dir", description: "echoed into the printed demo command" },
         prep: { kind: "string", metavar: "path", description: "echoed into the printed demo command" },
@@ -850,9 +867,19 @@ export function resolveDemoInputs(options: DemoOptions, fixturesDir: string = FI
  */
 export async function preflightDemoInputs(
   inputs: Pick<DemoInputs, "files" | "prepPath" | "sourceRoot">,
+  options: { dashboard?: boolean; env?: NodeJS.ProcessEnv } = {},
 ): Promise<void> {
   const problems: string[] = [];
   if (inputs.files.length === 0) problems.push("--files names no files");
+  // B10: `--dashboard` reads STATUS_PORT only after the flow has started, where a
+  // bad value could no longer fail the command cleanly. Say so now instead.
+  if (options.dashboard === true) {
+    try {
+      dashboardPort(options.env ?? process.env);
+    } catch (err) {
+      problems.push(`--dashboard: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   let prep: string | undefined;
   try {
@@ -967,17 +994,35 @@ export type DashboardLaunch =
   | { status: "started"; pid: number; port: number; logPath: string; message: string }
   | { status: "in-use"; port: number; message: string }
   | { status: "failed"; port: number; logPath: string; message: string }
-  | { status: "missing"; message: string };
+  | { status: "missing"; message: string }
+  /** Something other than the dashboard went wrong (bad STATUS_PORT, an unwritable log, a spawn failure). */
+  | { status: "error"; message: string };
 
 /**
  * Starts serve-status.ts for `dir` on STATUS_PORT and confirms it is really
  * listening. If the port is already taken it does NOT start a second copy (whatever
  * listens there keeps serving ITS OWN STATUS_REPO_ROOT, not `dir`) and says so.
  * The child is detached (it outlives the demo); its stdout/stderr go to a log file.
+ *
+ * The dashboard is a convenience next to a durable flow: this never throws. A
+ * bad STATUS_PORT, an unwritable log or a spawn failure is the `error` result
+ * (B10), because by the time it runs the flow is already started and a thrown
+ * error would exit 1 ("flow failed") over a flow that is still running.
  */
 export async function launchDashboard(
   dir: string,
   opts: { serveStatusPath?: string; env?: NodeJS.ProcessEnv; readyTimeoutMs?: number } = {},
+): Promise<DashboardLaunch> {
+  try {
+    return await startDashboardChild(dir, opts);
+  } catch (err) {
+    return { status: "error", message: `dashboard not started: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+async function startDashboardChild(
+  dir: string,
+  opts: { serveStatusPath?: string; env?: NodeJS.ProcessEnv; readyTimeoutMs?: number },
 ): Promise<DashboardLaunch> {
   const env = opts.env ?? process.env;
   const serveStatus = opts.serveStatusPath ?? join(import.meta.dir, "serve-status.ts");
@@ -1002,15 +1047,20 @@ export async function launchDashboard(
   });
   closeSync(logFd);
   let exitCode: number | null | undefined;
+  let spawnError: Error | undefined;
   child.once("exit", (code) => {
     exitCode = code;
+  });
+  // An 'error' event with no listener is thrown as an uncaught exception.
+  child.once("error", (err) => {
+    spawnError = err;
   });
   child.unref();
   // Wait for the bind: a child that dies (EADDRINUSE race, bad config) must not be
   // reported as a live dashboard.
   const deadline = Date.now() + (opts.readyTimeoutMs ?? 8_000);
   while (Date.now() < deadline) {
-    if (exitCode !== undefined) break;
+    if (exitCode !== undefined || spawnError !== undefined) break;
     if (await probePortInUse(port, host)) {
       return {
         status: "started",
@@ -1027,9 +1077,11 @@ export async function launchDashboard(
     port,
     logPath,
     message:
-      exitCode !== undefined
-        ? `serve-status exited (code ${exitCode}) before listening on ${host}:${port}; see ${logPath}`
-        : `serve-status is not listening on ${host}:${port} yet (pid ${child.pid}); see ${logPath}`,
+      spawnError !== undefined
+        ? `serve-status could not be started (${spawnError.message}); see ${logPath}`
+        : exitCode !== undefined
+          ? `serve-status exited (code ${exitCode}) before listening on ${host}:${port}; see ${logPath}`
+          : `serve-status is not listening on ${host}:${port} yet (pid ${child.pid}); see ${logPath}`,
   };
 }
 
@@ -1038,7 +1090,7 @@ async function startDemo(options: DemoOptions): Promise<number> {
   const inputs = resolveDemoInputs(options);
   const { dir, files, prepPath, sourceRoot, epoch, maxRounds, waitMinutes } = inputs;
   // Validate before anything is created or contacted.
-  await preflightDemoInputs(inputs);
+  await preflightDemoInputs(inputs, { dashboard: options.dashboard });
   if ((await ensureProjectRepo(dir, { initFixture: inputs.initFixture })) === "created") {
     console.log(`[demo] --init-fixture: created throwaway fixture repository at ${dir}`);
   }
@@ -1247,9 +1299,16 @@ export function redispatchCommand(o: {
 }
 
 async function recoverPort(options: CommandOptions<"recover-port">): Promise<number> {
-  const { dir, epoch, files: filesArg } = options;
+  const { epoch, files: filesArg } = options;
+  const dir = resolve(options.dir);
   // Same expansion as `demo` (`--files creatorex` is the 10-file fixture set).
-  const files = expandFilesArg(filesArg ?? "");
+  const files = expandFilesArg(filesArg);
+  // `--files ,` passes the parse but names nothing: reconciling zero files and
+  // reporting success would read as "every lease worktree was checked" (B14).
+  if (files.length === 0) {
+    console.error("[recover-port] --files names no files; nothing would be reconciled");
+    return CLI_EXIT.usage;
+  }
 
   console.log(`[recover-port] epoch bump → ${epoch}; repo=${dir}`);
 
@@ -1324,10 +1383,17 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
   switch (parsed.command) {
     case "worker": {
       const { options } = parsed;
+      // A fault spec nothing matches arms nothing and a kill rehearsal passes
+      // vacuously: refuse one that can never fire for these flows, up front (B13).
+      const fault = options.fault ?? envString("PORTING_KIT_FAULT");
+      const faultProblem = fault === undefined ? null : faultSpecProblem(fault, options.flows);
+      if (faultProblem !== null) {
+        console.error(`[run-demo] ${options.fault !== undefined ? "--fault" : "PORTING_KIT_FAULT"}: ${faultProblem}`);
+        return CLI_EXIT.usage;
+      }
       const harness = await pickHarness(options.harness);
       const flows = options.flows === "port" ? portFlows(harness) : probeFlows();
-      const fault = options.fault ?? process.env.PORTING_KIT_FAULT;
-      configureProbe(harness, fault);
+      configureProbe(harness);
       const judgment = await resolveJudgment();
       configurePortJudgment(judgment);
       configurePortFault(fault);
@@ -1420,7 +1486,7 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<nu
       return await startRound(dir, options.file, options.round, options.epoch);
     }
     case "recover":
-      return await orderedRecover(parsed.options.dir, parsed.options.epoch);
+      return await orderedRecover(parsed.options);
     case "agent-roundtrip": {
       const baseUrl = process.env.OPENCODE_BASE_URL?.trim() || undefined;
       const harness = await OpencodeHarness.connect(
@@ -1457,6 +1523,11 @@ if (import.meta.main) {
   main()
     .then((code) => process.exit(code))
     .catch((err: unknown) => {
+      // An environment value the toolkit cannot use is a usage error, like a bad flag.
+      if (err instanceof EnvError) {
+        console.error(`[run-demo] ${err.message}`);
+        process.exit(CLI_EXIT.usage);
+      }
       console.error("[run-demo] fatal:", err);
       process.exit(1);
     });

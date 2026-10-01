@@ -97,9 +97,9 @@ function envVarsRead(): Set<string> {
     const source = readSource(file);
     // process.env.X, env.X, proc?.env?.X
     for (const m of source.matchAll(/\benv\??\.([A-Z][A-Z0-9_]+)\b/g)) names.add(m[1] as string);
-    // env["X"], readEnvVar("X"), env("X")
+    // env["X"], readEnvVar("X"), env("X"), and the shared readers in src/env.ts: envString("X"), envInt("X", ...)
     for (const m of source.matchAll(/\benv\[\s*["']([A-Z][A-Z0-9_]+)["']\s*\]/g)) names.add(m[1] as string);
-    for (const m of source.matchAll(/\b(?:readEnvVar|env)\(\s*["']([A-Z][A-Z0-9_]+)["']\s*\)/g)) names.add(m[1] as string);
+    for (const m of source.matchAll(/\b(?:readEnvVar|env|envString|envInt)\(\s*["']([A-Z][A-Z0-9_]+)["']\s*[,)]/g)) names.add(m[1] as string);
     // OPENCODE_${lane.toUpperCase()}_MODEL / _VARIANT: one variable per lane.
     for (const m of source.matchAll(/`(OPENCODE_)\$\{[^}]+\}(_[A-Z_]+)`/g)) {
       for (const lane of LANES) names.add(`${m[1]}${lane}${m[2]}`);
