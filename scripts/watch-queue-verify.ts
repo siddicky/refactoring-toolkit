@@ -96,10 +96,14 @@ import {
 } from "../src/watcher/drain-backlog.js";
 import { watcherBlobCacheDir } from "../src/watcher/blob-cache-dir.js";
 import {
+  awaitArmTimeSummary,
   flowStatusFromWire,
   parseFlowSummary,
   resolveFlowRunId,
 } from "../src/watcher/flow-summary.js";
+
+/** How long arming waits for the arm-time `flow summary` (the run id for the sidecar's flow_run_id). */
+const ARM_SUMMARY_BUDGET_MS = 3_000;
 
 /**
  * cx6b live finding: the readStream long-poll wake-up ("nothing arrived in
@@ -210,10 +214,12 @@ async function main(): Promise<number> {
       throw new Error(`dexcli flow summary failed: ${oneLine(cause)}`);
     }
   };
-  // Not awaited: a slow/unreachable dexcli must not delay arming the watcher.
-  void fetchFlowSummary().catch((err: unknown) => {
-    log(`${(err as Error).message} (at arm) — flow_run_id stays unknown until a probe succeeds`);
-  });
+  // The run id is learned BEFORE arming, within a bound (C2): the kill window
+  // cannot afford a fetch of its own and its status gate has a 500 ms budget, so
+  // arming without the answer wrote flow_run_id-less sidecar records whenever
+  // dexcli was slow at start. A slow or unreachable dexcli still cannot delay
+  // arming past the budget; the id it eventually returns is remembered either way.
+  await awaitArmTimeSummary(fetchFlowSummary, ARM_SUMMARY_BUDGET_MS, log);
 
   try {
     // Resume token for the subscription (empty = retained head on first read).

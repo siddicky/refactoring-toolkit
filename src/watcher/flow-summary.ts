@@ -45,6 +45,46 @@ export function resolveFlowRunId(
 }
 
 /**
+ * Waits for the arm-time `dexcli flow summary` for at most `budgetMs`, so the
+ * run id the kill sidecar must carry as `flow_run_id` is known BEFORE the
+ * watcher arms (C2). The kill window is ~1.5 s and the status probe that gates
+ * the kill has a 500 ms budget of its own, so a watcher that armed without
+ * waiting wrote sidecar records with no flow_run_id whenever dexcli was slow at
+ * start: the first fetch had not returned, and the gate probe missed too.
+ *
+ * Never throws and never waits longer than the budget: a failed or slow fetch
+ * is logged and the watcher arms anyway (an unknown run id is a gap in the
+ * record, never a reason to miss the kill). A fetch still in flight when the
+ * budget ends keeps running, and whatever it learns is remembered by the caller.
+ */
+export async function awaitArmTimeSummary(
+  fetch: () => Promise<unknown>,
+  budgetMs: number,
+  log: (line: string) => void,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), budgetMs);
+  });
+  const settled = Promise.resolve()
+    .then(fetch)
+    .then(
+      () => "ok" as const,
+      (err: unknown) => (err instanceof Error ? err : new Error(String(err))),
+    );
+  try {
+    const outcome = await Promise.race([settled, budget]);
+    if (outcome === "timeout") {
+      log(`arm-time flow summary did not answer within ${budgetMs}ms — arming anyway; flow_run_id stays unknown until a probe succeeds`);
+    } else if (outcome !== "ok") {
+      log(`${outcome.message} (at arm) — flow_run_id stays unknown until a probe succeeds`);
+    }
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * Maps the wire `flowStatus` (the SDK's FlowStatus enum names) to the
  * watcher's status. Completed, failed, terminated, canceled and the
  * server-side timeout are terminal (audit C34: only the first two used to
