@@ -14,6 +14,7 @@ import { join } from "node:path";
 import {
   envelopeStartMarker,
   envelopeStepClass,
+  type EnvelopeSpec,
   type EnvelopeStepClass,
 } from "../steps/envelope.js";
 import { crashPortWorker, faultMatches, requirePortJudgment } from "../runtime-hooks.js";
@@ -32,21 +33,14 @@ import {
   renderSymbolTable,
   DIFF_HEADER_LINES,
 } from "../../src/harness/runtime.js";
-import type { JudgmentClient } from "../../src/typesafe/client.js";
-import {
-  isVerdictTombstone,
-  type DiffDocument,
-  type Finding as MetricsFinding,
-} from "../../src/metrics/types.js";
+import type { DiffDocument } from "../../src/metrics/types.js";
 import { naiveCitationCheck } from "../../src/typesafe/verdict-check.js";
 import { requireHarness, runAgentTurn } from "./agent-turns.js";
-import { citationKept } from "./lane-b.js";
+import { countingJevClient, keepFindings } from "./lane-b.js";
 import { parsePrepSourceMap, verdictKeyOf } from "./queue-logic.js";
 import { runReviewTurn } from "./review-turn.js";
 import { DispatchStep } from "./project-steps.js";
 import {
-  type CitationGateRecord,
-  type KeptFindings,
   type PortRunInput,
   type SymbolTableRow,
   ppConfig,
@@ -126,23 +120,15 @@ export const SymbolTableStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
 
     // Usage accumulator: selectSymbolType consumes the client internally, so
     // wrap it to capture System One usage for the envelope (never zero-null).
-    let usageTokens = 0;
-    const wrapped: JudgmentClient = {
-      kind: client.kind,
-      systemOne: async (request) => {
-        const result = await client.systemOne(request);
-        usageTokens += result.usage.input_tokens + result.usage.output_tokens;
-        return result;
-      },
-    };
+    const counting = countingJevClient(client);
 
     const rows: SymbolTableRow[] = [];
     for (const symbol of seed.symbols) {
-      const decision = await selectSymbolType(wrapped, symbol);
+      const decision = await selectSymbolType(counting.client, symbol);
       rows.push({
         file: decision.file,
         symbol: decision.symbol,
-        kind: kindOfSymbol(symbol),
+        kind: symbol.kind,
         signature: symbol.signature,
         candidates: decision.candidates.map((c) => c.type),
         selected: decision.selected,
@@ -162,14 +148,10 @@ export const SymbolTableStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
     // Real usage only: the scripted double's synthetic counts must not land in
     // the judgment-role totals, and "no calls were made" is an honest 0, not an
     // invented 1.
-    return { output: input, tokens: scripted ? 0 : usageTokens };
+    return { output: input, tokens: scripted ? 0 : counting.tokens() };
   },
   route: (_ctx, _input, out) => goTo(PrepStart, out),
 });
-
-function kindOfSymbol(symbol: PhpSymbol): string {
-  return symbol.kind;
-}
 
 export const PrepStart: EnvelopeStepClass<PortRunInput> = envelopeStartMarker<PortRunInput>({
   stepType: "PpPrepGenerateStart",
@@ -200,7 +182,7 @@ export const PrepGenerateStep: EnvelopeStepClass<PortRunInput> = envelopeStepCla
       symbolTableText,
       stubPrepBaseline: seed.stubRaw,
     });
-    const result = await runAgentTurn({ def: IMPLEMENTER, sessionId: await prepSessionId(input.epoch), turn, file: PREP_SPEC_FILE, round: 0, ...plannerPromptOpts() });
+    const result = await runPrepTurn(input.epoch, turn);
     // Outermost ```markdown block + structural check (a truncated or
     // table-less spec throws, so dex retries instead of adopting it).
     const specText = extractSpecMap(result.text, { expectedFiles: input.files });
@@ -227,6 +209,43 @@ async function prepSessionId(epoch: number): Promise<string> {
   const label = fenceLabel(PREP_SPEC_FILE, 0, epoch);
   const session = await harness.createSession(label);
   return session.id;
+}
+
+/** One planner turn on the prep spec session (spec generation and every revision). */
+async function runPrepTurn(epoch: number, turn: string): ReturnType<typeof runAgentTurn> {
+  return runAgentTurn({
+    def: IMPLEMENTER,
+    sessionId: await prepSessionId(epoch),
+    turn,
+    file: PREP_SPEC_FILE,
+    round: 0,
+    ...plannerPromptOpts(),
+  });
+}
+
+/** Inner body shared by the two prep reviewer steps: review the prep diff, store the verdict by value. */
+function prepReviewInner(
+  reviewerId: "reviewer-A" | "reviewer-B",
+  stepId: string,
+): EnvelopeSpec<PortRunInput, PortRunInput>["inner"] {
+  return async (ctx, input) => {
+    const diff = ppPrepDiff.get(ctx, "diff");
+    const state = ppPrepState.get(ctx, "state");
+    if (diff === undefined || state === undefined) throw new Error("prep diff/state missing");
+    // Fix-wave (reviewer finding 4): forward the successor-attempt diagnosis.
+    const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
+      ctx,
+      reviewerId,
+      stepId,
+      file: PREP_SPEC_FILE,
+      round: state.prepIteration,
+      epoch: input.epoch,
+      diff,
+      attempt: ctx.attempt,
+    });
+    ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, reviewerId), verdict);
+    return { output: input, tokens, turnDiagnosis };
+  };
 }
 
 export const PrepDiffCaptureStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
@@ -300,24 +319,7 @@ export const PrepReviewAStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
   // (by stepId+identity) cannot see it.
   identityOf: prepIdentityOf,
   stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppPrepDiff, ppPrepState] },
-  inner: async (ctx, input) => {
-    const diff = ppPrepDiff.get(ctx, "diff");
-    const state = ppPrepState.get(ctx, "state");
-    if (diff === undefined || state === undefined) throw new Error("prep diff/state missing");
-    // Fix-wave (reviewer finding 4): forward the successor-attempt diagnosis.
-    const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
-      ctx,
-      reviewerId: "reviewer-A",
-      stepId: "pp-prep-review-a",
-      file: PREP_SPEC_FILE,
-      round: state.prepIteration,
-      epoch: input.epoch,
-      diff,
-      attempt: ctx.attempt,
-    });
-    ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-A"), verdict);
-    return { output: input, tokens, turnDiagnosis };
-  },
+  inner: prepReviewInner("reviewer-A", "pp-prep-review-a"),
   route: (_ctx, _input, input) => goTo(PrepReviewBStart, input),
 });
 
@@ -337,24 +339,7 @@ export const PrepReviewBStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
   // M2/M4 join identity — same rationale as PrepReviewAStep.
   identityOf: prepIdentityOf,
   stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppPrepDiff, ppPrepState] },
-  inner: async (ctx, input) => {
-    const diff = ppPrepDiff.get(ctx, "diff");
-    const state = ppPrepState.get(ctx, "state");
-    if (diff === undefined || state === undefined) throw new Error("prep diff/state missing");
-    // Fix-wave (reviewer finding 4): forward the successor-attempt diagnosis.
-    const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
-      ctx,
-      reviewerId: "reviewer-B",
-      stepId: "pp-prep-review-b",
-      file: PREP_SPEC_FILE,
-      round: state.prepIteration,
-      epoch: input.epoch,
-      diff,
-      attempt: ctx.attempt,
-    });
-    ppPrepVerdict.set(ctx, verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, "reviewer-B"), verdict);
-    return { output: input, tokens, turnDiagnosis };
-  },
+  inner: prepReviewInner("reviewer-B", "pp-prep-review-b"),
   route: (_ctx, _input, input) => goTo(PrepVerdictCheckStep, input),
 });
 
@@ -370,65 +355,33 @@ export const PrepVerdictCheckStep: EnvelopeStepClass<PortRunInput> = envelopeSte
     if (diff === undefined || state === undefined || config === undefined) {
       throw new Error("prep diff/state/config missing");
     }
-    const kept: MetricsFinding[] = [];
-    const dropped: KeptFindings["dropped"] = [];
-    const gate: CitationGateRecord[] = [];
-    for (const reviewerId of ["reviewer-A", "reviewer-B"] as const) {
-      const key = verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, reviewerId);
-      const verdict = ppPrepVerdict.get(ctx, key);
-      if (verdict === undefined) throw new Error(`prep verdict missing for ${key}`);
-      // US-006 tombstone: a discarded prep reviewer contributes ZERO kept
-      // findings; with both discarded the findings list stays empty and
-      // PrepLoopDecisionStep finalizes (revise requires findings > 0) — the
-      // prep loop TERMINATES on a degraded, unreviewed iteration.
-      if (isVerdictTombstone(verdict)) {
-        dropped.push({
-          finding_id: `tombstoned:${reviewerId}`,
-          reviewer: reviewerId,
-          reason: `reviewer discarded (attempt ${verdict.attempt}): ${verdict.reason}`,
-        });
-        continue;
-      }
+    // US-006 tombstone: a discarded prep reviewer contributes ZERO kept
+    // findings; with both discarded the findings list stays empty and
+    // PrepLoopDecisionStep finalizes (revise requires findings > 0) — the
+    // prep loop TERMINATES on a degraded, unreviewed iteration.
+    const kept = await keepFindings({
+      verdictOf: (reviewerId) => {
+        const key = verdictKeyOf(PREP_SPEC_FILE, state.prepIteration, reviewerId);
+        const verdict = ppPrepVerdict.get(ctx, key);
+        if (verdict === undefined) throw new Error(`prep verdict missing for ${key}`);
+        return verdict;
+      },
       // The prep gate is deliberately NAIVE-only (registry "prep-citation-check"):
       // the spec-map diff is reviewed against a deterministic baseline and
       // never consults a judgment client.
-      const citations = naiveCitationCheck(verdict.metrics, diff.doc);
-      gate.push({
-        reviewer: reviewerId,
-        checker: "naive",
-        fallbackReason: null,
-        scores: citations.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
-      });
-      for (const check of citations) {
-        const agentFinding = verdict.agent.findings.find((f) => f.finding_id === check.finding_id);
-        const metricsFinding = verdict.metrics.findings.find((f) => f.finding_id === check.finding_id);
-        if (agentFinding === undefined || metricsFinding === undefined) continue;
-        if (!citationKept(check.p_cited, "naive")) {
-          dropped.push({
-            finding_id: check.finding_id,
-            reviewer: reviewerId,
-            reason: `citation check failed (p_cited=${check.p_cited})`,
-            p_cited: check.p_cited,
-          });
-          continue;
-        }
-        if (agentFinding.disposition !== "fix") {
-          dropped.push({
-            finding_id: check.finding_id,
-            reviewer: reviewerId,
-            reason: `disposition "${agentFinding.disposition}"`,
-          });
-          continue;
-        }
-        kept.push(metricsFinding);
-      }
-    }
-    ppPrepFindings.set(ctx, "findings", { findings: kept, dropped, citationGate: gate });
+      scoreCitations: (_reviewerId, verdict) =>
+        Promise.resolve({
+          checks: naiveCitationCheck(verdict.metrics, diff.doc),
+          checker: "naive" as const,
+          fallbackReason: null,
+        }),
+    });
+    ppPrepFindings.set(ctx, "findings", kept);
     // Counter ownership lives in PrepLoopDecision (single place decides a
     // revision; the increment rides with that decision — no double-count).
     void state;
     void config;
-    return { output: input, tokens: null, outcome: kept.length > 0 ? "completed" : "skipped" };
+    return { output: input, tokens: null, outcome: kept.findings.length > 0 ? "completed" : "skipped" };
   },
   route: (_ctx, _input, input) => goTo(PrepLoopDecisionStep, input),
 });
@@ -494,14 +447,7 @@ export const PrepReviseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass
         evidence: f.evidence?.quote ?? "(uncited)",
       })),
     });
-    const result = await runAgentTurn({
-      def: IMPLEMENTER,
-      sessionId: await prepSessionId(input.epoch),
-      turn,
-      file: PREP_SPEC_FILE,
-      round: 0,
-      ...plannerPromptOpts(),
-    });
+    const result = await runPrepTurn(input.epoch, turn);
     const specText = extractSpecMap(result.text, { expectedFiles: input.files });
     ppPrepDraft.set(ctx, "draft", { specText, iteration: draft.iteration + 1 });
     return { output: input, tokens: result.usage ?? result.tokens };

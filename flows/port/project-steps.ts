@@ -23,7 +23,6 @@ import {
   keyedCommitIntegrated,
   mergeLeaseIntoIntegration,
   operationId,
-  WorktreePool,
 } from "../../src/git/worktree.js";
 import {
   buildTscQueueState,
@@ -31,13 +30,14 @@ import {
   tscOutcomeFromRun,
 } from "../../src/queues/tsc-queue.js";
 import { classifyVitestRecords, liveJevClient, recordJevUsage } from "./lane-b.js";
-import { bindLeaseStore } from "./leases.js";
+import { leasePool } from "./leases.js";
 import {
   baseInput,
   baseInputOf,
   childInputOf,
   deriveNext,
   errorCountsByOutput,
+  fileRoundIdentity,
   markerKeyOf,
   portedRootsFromSourceMap,
   selectFixableFiles,
@@ -167,35 +167,8 @@ export const LeaseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
         outcome: "skipped" as EnvelopeOutcome,
       };
     }
-    const pool = new WorktreePool(
-      input.repoRoot,
-      input.worktreeRoot,
-      bindLeaseStore(ctx, ppLease),
-      LEASE_SLOT_CAP,
-    );
-    // Idempotent per (file, epoch): a lease surviving a kill is reused.
-    const existing = pool.store().get(current.file);
-    if (existing !== undefined && !pool.isStale(existing, current.epoch)) {
-      return {
-        output: {
-          kind: "lease",
-          fri: {
-            ...input,
-            file: current.file,
-            round: current.round,
-            epoch: current.epoch,
-            worktreePath: existing.worktreePath,
-            branch: existing.branch,
-          },
-        },
-        tokens: null,
-      };
-    }
-    const acquired = await pool.acquire(current.file, current.epoch, `pp-${current.epoch}`);
-    if (!acquired.acquired) {
-      throw new Error(`lease failed for ${current.file}: ${acquired.reason}`);
-    }
-    return {
+    const pool = leasePool(ctx, input);
+    const leased = (lease: { worktreePath: string; branch: string }): { output: LeaseOutcome; tokens: null } => ({
       output: {
         kind: "lease",
         fri: {
@@ -203,12 +176,20 @@ export const LeaseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
           file: current.file,
           round: current.round,
           epoch: current.epoch,
-          worktreePath: acquired.lease.worktreePath,
-          branch: acquired.lease.branch,
+          worktreePath: lease.worktreePath,
+          branch: lease.branch,
         },
       },
       tokens: null,
-    };
+    });
+    // Idempotent per (file, epoch): a lease surviving a kill is reused.
+    const existing = pool.store().get(current.file);
+    if (existing !== undefined && !pool.isStale(existing, current.epoch)) return leased(existing);
+    const acquired = await pool.acquire(current.file, current.epoch, `pp-${current.epoch}`);
+    if (!acquired.acquired) {
+      throw new Error(`lease failed for ${current.file}: ${acquired.reason}`);
+    }
+    return leased(acquired.lease);
   },
   route: (_ctx, _input, out) =>
     out.kind === "lease" ? goTo(FenceStep, out.fri) : goTo(FinalStep, out.input),
@@ -218,8 +199,8 @@ export const ReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<
   stepType: "PpRelease",
   stepId: "pp-release",
   role: "record",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
-  // ppLease: the lease is READ and removed through bindLeaseStore below.
+  identityOf: fileRoundIdentity,
+  // ppLease: the lease is READ and removed through the lease pool below.
   stepOptions: { executeLoadAttributeMaps: [ppQueue, ppMarker, ppLease] },
   inner: async (ctx, fri) => {
     const queue = ppQueue.get(ctx, "queue");
@@ -231,12 +212,7 @@ export const ReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<
     // epoch and the third file failed "worktree cap (2) reached". The merge
     // into integration happened in IntegrateStep, so dropping the worktree
     // here is safe; the lease branch stays for keyed-commit reachability.
-    await new WorktreePool(
-      fri.repoRoot,
-      fri.worktreeRoot,
-      bindLeaseStore(ctx, ppLease),
-      LEASE_SLOT_CAP,
-    ).release(fri.file);
+    await leasePool(ctx, fri).release(fri.file);
     const marker = ppMarker.get(ctx, markerKeyOf(fri.file, fri.round));
     ppQueue.set(ctx, "queue", {
       ...queue,
@@ -391,9 +367,7 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
       },
     }, roots);
     const vitestJevTokens = jevUsageSink.reduce((sum, t) => sum + t, 0);
-    if (vitestJevTokens > 0) {
-      await recordJevUsage(ctx, "pp-queue-verify:vitest-triage", vitestJevTokens);
-    }
+    await recordJevUsage(ctx, "pp-queue-verify:vitest-triage", vitestJevTokens);
     const vitestTotal = vitestState.total;
 
     // Burn-down upserts (dashboard renders queue-burndown/*).

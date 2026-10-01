@@ -8,7 +8,7 @@
 import type { Context } from "@superdurable/dex";
 
 import { portTurnHealthAssessor } from "../runtime-hooks.js";
-import { fenceLabel, OpencodePromptError, sessionFenceMap } from "../../src/harness/opencode.js";
+import { fenceLabel, OpencodePromptError } from "../../src/harness/opencode.js";
 import { REVIEWER } from "../../harness/agents/reviewer.js";
 import { isDemotedAttempt, reviewLaneRouting } from "../../src/harness/lanes.js";
 import {
@@ -36,7 +36,7 @@ import {
   toEnvelopeUsage,
 } from "../../src/harness/runtime.js";
 import { publishTurnDiagnosisEvent } from "../steps/envelope.js";
-import { requireHarness, runAgentTurn } from "./agent-turns.js";
+import { openFencedSession, runAgentTurn } from "./agent-turns.js";
 import { markerKeyOf } from "./queue-logic.js";
 import type { ReviewVerdict } from "./state.js";
 
@@ -251,18 +251,13 @@ async function runReviewTurnOnce(input: {
   tokens: number | TokenUsage | null;
   turnDiagnosis: TurnDiagnosis | null;
 }> {
-  const harness = requireHarness();
   // The envelope step this turn runs inside — the fence owner, the memo key
   // and every diagnosis turn label name the SAME id as the step's envelope.
   const stepId = input.stepId ?? reviewStepIdOf(input.reviewerId);
-  const label = fenceLabel(input.file, input.round, input.epoch);
-  const session = await harness.createSession(label);
-  sessionFenceMap.set(input.ctx, label, {
-    sessionId: session.id,
+  const session = await openFencedSession(input.ctx, {
+    label: fenceLabel(input.file, input.round, input.epoch),
     stepId,
     epoch: input.epoch,
-    label,
-    persistedAtUtc: new Date().toISOString(),
   });
 
   const attemptNo = input.attempt ?? 1;

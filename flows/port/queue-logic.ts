@@ -8,6 +8,7 @@
 import type { ClassifiedVitestFailure } from "../../src/queues/vitest-queue.js";
 import type {
   FileRoundInput,
+  OutPathRef,
   PortFileInput,
   PortQueueState,
   PortRunInput,
@@ -31,6 +32,23 @@ export const keptKeyOf = markerKeyOf;
 export const outKeyOf = markerKeyOf;
 export const verdictKeyOf = (file: string, round: number, reviewerId: string): string =>
   `${safe(file)}#${round}#${reviewerId}`;
+
+/** Envelope identity of every per-file step: the sanitized `file#round` attribute key. */
+export const fileRoundIdentity = (_ctx: unknown, target: { file: string; round: number }): string =>
+  markerKeyOf(target.file, target.round);
+
+/**
+ * The ported output path of a file-round: the pp-out record the implement step
+ * wrote, else the prep source map. Fix rounds enter via the queue-fix path, which
+ * never runs the implement step, so only the fallback exists for them.
+ */
+export function outPathOf(
+  out: OutPathRef | undefined,
+  prep: Pick<PrepArtifact, "sourceMap"> | undefined,
+  file: string,
+): string | undefined {
+  return out?.outPath ?? prep?.sourceMap[file]?.outPath;
+}
 
 /**
  * Parses the stub-prep source-map table: rows of the form

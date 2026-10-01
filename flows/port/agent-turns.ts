@@ -6,16 +6,20 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { Context } from "@superdurable/dex";
 
 import {
+  sessionFenceMap,
   tokenTotal,
   type AgentSessionClient,
+  type SessionRef,
 } from "../../src/harness/opencode.js";
 import { git } from "../../src/git/exec.js";
 import type { AgentDefinition } from "../../harness/agents/types.js";
 import type { TokenUsage } from "../../src/metrics/types.js";
 import { toEnvelopeUsage, toolOverridesAllOff, toolPolicyBlock } from "../../src/harness/runtime.js";
 
+// ---------------------------------------------------------------------------
 // Harness injection (worker calls configurePortHarness at startup)
 // ---------------------------------------------------------------------------
 
@@ -30,6 +34,28 @@ export function requireHarness(): AgentSessionClient {
     throw new Error("configurePortHarness() was not called by the worker");
   }
   return PORT_HARNESS;
+}
+
+/**
+ * Opens a fresh session for `fence.label` and stages its session fence on the
+ * calling step's decision (0(g): the fence lands durably with THIS step, which is
+ * what kill-replay and the enumeration fallback read back). `fence.stepId` names
+ * the envelope step that owns the session (it is not always the caller: the
+ * fence step opens the implementer's session).
+ */
+export async function openFencedSession(
+  ctx: Context,
+  fence: { label: string; stepId: string; epoch: number },
+): Promise<SessionRef> {
+  const session = await requireHarness().createSession(fence.label);
+  sessionFenceMap.set(ctx, fence.label, {
+    sessionId: session.id,
+    stepId: fence.stepId,
+    epoch: fence.epoch,
+    label: fence.label,
+    persistedAtUtc: new Date().toISOString(),
+  });
+  return session;
 }
 
 /** One agent turn: definition prompt + enforced tool policy + turn text. */

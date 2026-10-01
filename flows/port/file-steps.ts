@@ -17,6 +17,7 @@ import {
   envelopeStartMarker,
   envelopeStepClass,
   type EnvelopeOutcome,
+  type EnvelopeSpec,
   type EnvelopeStepClass,
 } from "../steps/envelope.js";
 import { fenceLabel, sessionFenceMap } from "../../src/harness/opencode.js";
@@ -29,7 +30,6 @@ import {
   makeCommitReachable,
   mergeLeaseIntoIntegration,
   operationId,
-  WorktreePool,
 } from "../../src/git/worktree.js";
 import { IMPLEMENTER } from "../../harness/agents/implementer.js";
 import { FIXER } from "../../harness/agents/fixer.js";
@@ -44,19 +44,17 @@ import {
   testPortScopeNote,
   DIFF_HEADER_LINES,
 } from "../../src/harness/runtime.js";
-import {
-  isVerdictTombstone,
-  type DiffDocument,
-  type Finding as MetricsFinding,
-} from "../../src/metrics/types.js";
-import { gitDiffStaged, requireHarness, runAgentTurn, writeOutFile } from "./agent-turns.js";
-import { citationKept, liveJevClient, recordJevUsage, runCitationGate, runPrioritizeGate } from "./lane-b.js";
-import { bindLeaseStore } from "./leases.js";
+import type { DiffDocument } from "../../src/metrics/types.js";
+import { gitDiffStaged, openFencedSession, runAgentTurn, writeOutFile } from "./agent-turns.js";
+import { keepFindings, liveJevClient, recordJevUsage, runCitationGate, runPrioritizeGate } from "./lane-b.js";
+import { leasePool } from "./leases.js";
 import {
   diffKeyOf,
+  fileRoundIdentity,
   keptKeyOf,
   markerKeyOf,
   outKeyOf,
+  outPathOf,
   queueFixFeedForFile,
   safe,
   verdictKeyOf,
@@ -64,12 +62,9 @@ import {
 import { runReviewTurn } from "./review-turn.js";
 import { releaseStepLink } from "./links.js";
 import {
-  type CitationGateRecord,
   type ChildFileResult,
   type FileRoundInput,
-  type KeptFindings,
   type PortFileInput,
-  LEASE_SLOT_CAP,
   ppDiff,
   ppJevUsage,
   ppKept,
@@ -87,19 +82,14 @@ export const FenceStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
   stepType: "PpFence",
   stepId: "pp-fence",
   role: "record",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   inner: async (ctx, fri) => {
-    const harness = requireHarness();
-    const label = fenceLabel(fri.file, fri.round, fri.epoch);
     // 0(g) mini-step semantics: the session exists and the fence lands
     // durably with this step's decision BEFORE the implementer prompts.
-    const session = await harness.createSession(label);
-    sessionFenceMap.set(ctx, label, {
-      sessionId: session.id,
+    await openFencedSession(ctx, {
+      label: fenceLabel(fri.file, fri.round, fri.epoch),
       stepId: "pp-implement",
       epoch: fri.epoch,
-      label,
-      persistedAtUtc: new Date().toISOString(),
     });
     return { output: fri, tokens: null };
   },
@@ -118,7 +108,7 @@ export const ImplementStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMa
   stepType: "PpImplementStart",
   targetStepId: "pp-implement",
   role: "agent",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(ImplementStep, fri),
 });
@@ -127,7 +117,7 @@ export const ImplementStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClas
   stepType: "PpImplement",
   stepId: "pp-implement",
   role: "agent",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: {
     ...MODEL_STEP_OPTIONS,
     executeLoadAttributeMaps: [sessionFenceMap, ppPrep, ppQueue],
@@ -175,7 +165,7 @@ export const CaptureDiffStep: EnvelopeStepClass<FileRoundInput> = envelopeStepCl
   stepType: "PpCaptureDiff",
   stepId: "pp-capture-diff",
   role: "diff-capture",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   inner: async (ctx, fri) => {
     const raw = await gitDiffStaged(fri.worktreePath);
     const diffId = `diff-${safe(fri.file)}-r${fri.round}`;
@@ -196,11 +186,38 @@ export const CaptureDiffStep: EnvelopeStepClass<FileRoundInput> = envelopeStepCl
   route: (_ctx, _input, fri) => goTo(ReviewAStart, fri),
 });
 
+/**
+ * Inner body shared by the two reviewer steps: review the captured diff and store
+ * the verdict by value. turnDiagnosis (US-003 successor-attempt re-record) is
+ * forwarded onto the step's completion envelope.
+ */
+function reviewInner(
+  reviewerId: "reviewer-A" | "reviewer-B",
+  stepId: string,
+): EnvelopeSpec<FileRoundInput, FileRoundInput>["inner"] {
+  return async (ctx, fri) => {
+    const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
+    if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
+    const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
+      ctx,
+      reviewerId,
+      stepId,
+      file: fri.file,
+      round: fri.round,
+      epoch: fri.epoch,
+      diff,
+      attempt: ctx.attempt,
+    });
+    ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, reviewerId), verdict);
+    return { output: fri, tokens, turnDiagnosis };
+  };
+}
+
 export const ReviewAStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<FileRoundInput>({
   stepType: "PpReviewAStart",
   targetStepId: "pp-review-a",
   role: "review",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(ReviewAStep, fri),
 });
@@ -209,27 +226,9 @@ export const ReviewAStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<
   stepType: "PpReviewA",
   stepId: "pp-review-a",
   role: "review",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppDiff] },
-  inner: async (ctx, fri) => {
-    const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
-    if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
-    // Fix-wave (reviewer finding 4): turnDiagnosis (US-003 successor-attempt
-    // re-record) is forwarded onto the step's completion envelope — it was
-    // destructured away here, so the envelope never carried it.
-    const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
-      ctx,
-      reviewerId: "reviewer-A",
-      stepId: "pp-review-a",
-      file: fri.file,
-      round: fri.round,
-      epoch: fri.epoch,
-      diff,
-      attempt: ctx.attempt,
-    });
-    ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-A"), verdict);
-    return { output: fri, tokens, turnDiagnosis };
-  },
+  inner: reviewInner("reviewer-A", "pp-review-a"),
   route: (_ctx, _input, fri) => goTo(ReviewBStart, fri),
 });
 
@@ -237,7 +236,7 @@ export const ReviewBStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMark
   stepType: "PpReviewBStart",
   targetStepId: "pp-review-b",
   role: "review",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(ReviewBStep, fri),
 });
@@ -246,25 +245,9 @@ export const ReviewBStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<
   stepType: "PpReviewB",
   stepId: "pp-review-b",
   role: "review",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: { ...MODEL_STEP_OPTIONS, executeLoadAttributeMaps: [ppDiff] },
-  inner: async (ctx, fri) => {
-    const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
-    if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
-    // Fix-wave (reviewer finding 4): forward the successor-attempt diagnosis.
-    const { verdict, tokens, turnDiagnosis } = await runReviewTurn({
-      ctx,
-      reviewerId: "reviewer-B",
-      stepId: "pp-review-b",
-      file: fri.file,
-      round: fri.round,
-      epoch: fri.epoch,
-      diff,
-      attempt: ctx.attempt,
-    });
-    ppVerdict.set(ctx, verdictKeyOf(fri.file, fri.round, "reviewer-B"), verdict);
-    return { output: fri, tokens, turnDiagnosis };
-  },
+  inner: reviewInner("reviewer-B", "pp-review-b"),
   route: (_ctx, _input, fri) => goTo(VerdictCheckStep, fri),
 });
 
@@ -272,7 +255,7 @@ export const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepC
   stepType: "PpVerdictCheck",
   stepId: "pp-verdict-check",
   role: "verdict-check",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   // cx6 live finding: recordJevUsage READS pp-jev-usage when the live Jev
   // citation loop spent tokens — an undeclared read throws (retried 46x,
   // each retry re-billing the citation batch). Writes need no declaration
@@ -281,72 +264,36 @@ export const VerdictCheckStep: EnvelopeStepClass<FileRoundInput> = envelopeStepC
   inner: async (ctx, fri) => {
     const diff = ppDiff.get(ctx, diffKeyOf(fri.file, fri.round));
     if (diff === undefined) throw new Error(`captured diff missing for ${fri.file}#${fri.round}`);
-    const kept: MetricsFinding[] = [];
-    const dropped: KeptFindings["dropped"] = [];
-    const gate: CitationGateRecord[] = [];
-    for (const reviewerId of ["reviewer-A", "reviewer-B"] as const) {
-      const key = verdictKeyOf(fri.file, fri.round, reviewerId);
-      const verdict = ppVerdict.get(ctx, key);
-      if (verdict === undefined) {
-        throw new Error(`verdict record missing for ${key}`);
-      }
-      // US-006 tombstone: a discarded reviewer contributes ZERO kept findings
-      // — the discard rides the existing dropped-findings semantics. With
-      // both reviewers tombstoned keptCount stays 0 and the keptCount-0
-      // route below proceeds (degraded, unreviewed round — never a failure).
-      if (isVerdictTombstone(verdict)) {
-        dropped.push({
-          finding_id: `tombstoned:${reviewerId}`,
-          reviewer: reviewerId,
-          reason: `reviewer discarded (attempt ${verdict.attempt}): ${verdict.reason}`,
-        });
-        continue;
-      }
+    // US-006 tombstone: a discarded reviewer contributes ZERO kept findings —
+    // the discard rides the existing dropped-findings semantics. With both
+    // reviewers tombstoned keptCount stays 0 and the keptCount-0 route below
+    // proceeds (degraded, unreviewed round — never a failure).
+    const kept = await keepFindings({
+      verdictOf: (reviewerId) => {
+        const key = verdictKeyOf(fri.file, fri.round, reviewerId);
+        const verdict = ppVerdict.get(ctx, key);
+        if (verdict === undefined) {
+          throw new Error(`verdict record missing for ${key}`);
+        }
+        return verdict;
+      },
       // Citation check (Lane-B "citation-check"): LIVE Jev nouls when
       // configured (Phase 3 swap-in, createCitationChecker seam), else the
       // naive code-only default; a Jev failure fails OPEN to the naive check
       // (never a thrown, re-billed step). A finding survives iff its cited
       // evidence scores at least the checker's threshold (citationKept) and
       // its disposition asks for a fix.
-      const outcome = await runCitationGate(verdict.metrics, diff.doc, liveJevClient());
-      if (outcome.jevTokens > 0) {
+      scoreCitations: async (_reviewerId, verdict) => {
+        const outcome = await runCitationGate(verdict.metrics, diff.doc, liveJevClient());
         await recordJevUsage(ctx, `pp-verdict-check:${fri.file}#${fri.round}`, outcome.jevTokens);
-      }
-      gate.push({
-        reviewer: reviewerId,
-        checker: outcome.checker,
-        fallbackReason: outcome.fallbackReason,
-        scores: outcome.value.map((c) => ({ finding_id: c.finding_id, p_cited: c.p_cited })),
-      });
-      for (const check of outcome.value) {
-        const agentFinding = verdict.agent.findings.find((f) => f.finding_id === check.finding_id);
-        const metricsFinding = verdict.metrics.findings.find((f) => f.finding_id === check.finding_id);
-        if (agentFinding === undefined || metricsFinding === undefined) continue;
-        if (!citationKept(check.p_cited, outcome.checker)) {
-          dropped.push({
-            finding_id: check.finding_id,
-            reviewer: reviewerId,
-            reason: `citation check failed (p_cited=${check.p_cited})`,
-            p_cited: check.p_cited,
-          });
-          continue;
-        }
-        if (agentFinding.disposition !== "fix") {
-          dropped.push({
-            finding_id: check.finding_id,
-            reviewer: reviewerId,
-            reason: `disposition "${agentFinding.disposition}"`,
-          });
-          continue;
-        }
-        kept.push(metricsFinding);
-      }
-    }
-    ppKept.set(ctx, keptKeyOf(fri.file, fri.round), { findings: kept, dropped, citationGate: gate });
+        return { checks: outcome.value, checker: outcome.checker, fallbackReason: outcome.fallbackReason };
+      },
+    });
+    ppKept.set(ctx, keptKeyOf(fri.file, fri.round), kept);
     return {
-      output: { ...fri, keptCount: kept.length },
+      output: { ...fri, keptCount: kept.findings.length },
       tokens: null,
-      outcome: kept.length > 0 ? "completed" : "skipped",
+      outcome: kept.findings.length > 0 ? "completed" : "skipped",
     };
   },
   route: (_ctx, _input, fri) =>
@@ -357,7 +304,7 @@ export const PrioritizeStep: EnvelopeStepClass<FileRoundInput> = envelopeStepCla
   stepType: "PpPrioritize",
   stepId: "pp-prioritize",
   role: "prioritize",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   // cx6 live finding: ppJevUsage read via recordJevUsage (see pp-verdict-check).
   stepOptions: { executeLoadAttributeMaps: [ppKept, ppJevUsage] },
   inner: async (ctx, fri) => {
@@ -367,9 +314,7 @@ export const PrioritizeStep: EnvelopeStepClass<FileRoundInput> = envelopeStepCla
     // order otherwise; a Jev failure fails OPEN to the naive order and the
     // degradation rides the pp-kept record (never a thrown, re-billed step).
     const outcome = await runPrioritizeGate(kept.findings, liveJevClient());
-    if (outcome.jevTokens > 0) {
-      await recordJevUsage(ctx, `pp-prioritize:${fri.file}#${fri.round}`, outcome.jevTokens);
-    }
+    await recordJevUsage(ctx, `pp-prioritize:${fri.file}#${fri.round}`, outcome.jevTokens);
     ppKept.set(ctx, keptKeyOf(fri.file, fri.round), {
       ...kept,
       findings: outcome.value,
@@ -384,7 +329,7 @@ export const FixerStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker
   stepType: "PpFixerStart",
   targetStepId: "pp-fixer",
   role: "agent",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(FixerStep, fri),
 });
@@ -393,7 +338,7 @@ export const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
   stepType: "PpFixer",
   stepId: "pp-fixer",
   role: "agent",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: {
     ...MODEL_STEP_OPTIONS,
     executeLoadAttributeMaps: [ppKept, ppOut, ppPrep],
@@ -409,26 +354,20 @@ export const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<Fi
     // run the implement step, so ppOut is never set for them — resolve the
     // output path with the prep source-map fallback exactly like the
     // queue-fix and integrate steps (live finding cx-5d fix wave).
-    const out = ppOut.get(ctx, outKeyOf(fri.file, fri.round));
-    const outPath =
-      out?.outPath ?? ppPrep.get(ctx, "prep")?.sourceMap[fri.file]?.outPath;
+    const prep = ppPrep.get(ctx, "prep");
+    const outPath = outPathOf(ppOut.get(ctx, outKeyOf(fri.file, fri.round)), prep, fri.file);
     if (outPath === undefined) throw new Error(`output path missing for ${fri.file}#${fri.round}`);
     const current = await readFile(join(fri.worktreePath, outPath), "utf8");
 
     // Fresh fenced session for the fixer turn (fence staged with this
     // step's decision; enumeration fallback covers a mid-fix kill).
-    const harness = requireHarness();
-    const label = fenceLabel(`${fri.file}:fixer`, fri.round, fri.epoch);
-    const session = await harness.createSession(label);
-    sessionFenceMap.set(ctx, label, {
-      sessionId: session.id,
+    const session = await openFencedSession(ctx, {
+      label: fenceLabel(`${fri.file}:fixer`, fri.round, fri.epoch),
       stepId: "pp-fixer",
       epoch: fri.epoch,
-      label,
-      persistedAtUtc: new Date().toISOString(),
     });
 
-    const userContract = ppPrep.get(ctx, "prep")?.userContract;
+    const userContract = prep?.userContract;
     const turn = composeFixerTurn({
       currentContent: current,
       findings: kept.findings,
@@ -454,7 +393,7 @@ export const CommitStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<F
   stepType: "PpCommit",
   stepId: "pp-commit",
   role: "commit",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   // This step is the COMMIT-TIME subset of the recovery decision table: keyed
   // dedup (op-ID scan across ALL branches) plus the C1 cross-branch
   // reachability fix. It deliberately does NOT call reconcile()/applyReconcile()
@@ -516,7 +455,7 @@ export const IntegrateStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClas
   stepType: "PpIntegrate",
   stepId: "pp-integrate",
   role: "integration",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: { executeLoadAttributeMaps: [ppMarker, ppOut, ppPrep] },
   inner: async (ctx, fri) => {
     const result = await mergeLeaseIntoIntegration(
@@ -541,9 +480,11 @@ export const IntegrateStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClas
     // prep map / pp-out), never the PHP source path this round ported FROM.
     const marker = ppMarker.get(ctx, markerKeyOf(fri.file, fri.round));
     if (marker !== undefined && marker.disposition === "no-op-empty-diff") {
-      const out = ppOut.get(ctx, outKeyOf(fri.file, fri.round));
-      const prep = ppPrep.get(ctx, "prep");
-      const outPath = out?.outPath ?? prep?.sourceMap[fri.file]?.outPath;
+      const outPath = outPathOf(
+        ppOut.get(ctx, outKeyOf(fri.file, fri.round)),
+        ppPrep.get(ctx, "prep"),
+        fri.file,
+      );
       if (
         outPath === undefined ||
         !(await integratedContentExists(fri.integrationWorktreePath, outPath))
@@ -563,7 +504,7 @@ export const QueueFixStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMar
   stepType: "PpQueueFixStart",
   targetStepId: "pp-queue-fix",
   role: "agent",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: MARKER_STEP_OPTIONS,
   route: (fri) => goTo(QueueFixStep, fri),
 });
@@ -580,7 +521,7 @@ export const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass
   stepId: "pp-queue-fix",
   role: "agent",
   // cx-5e: identity-keyed envelope (see ChildLeaseStep note).
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: {
     ...MODEL_STEP_OPTIONS,
     executeLoadAttributeMaps: [ppVerify, ppOut, ppPrep],
@@ -588,8 +529,7 @@ export const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass
   inner: async (ctx, fri) => {
     const verify = ppVerify.get(ctx, "verify");
     const prep = ppPrep.get(ctx, "prep");
-    const out = ppOut.get(ctx, outKeyOf(fri.file, fri.round));
-    const outPath = out?.outPath ?? prep?.sourceMap[fri.file]?.outPath;
+    const outPath = outPathOf(ppOut.get(ctx, outKeyOf(fri.file, fri.round)), prep, fri.file);
     if (outPath === undefined) throw new Error(`output path missing for ${fri.file}#${fri.round}`);
     const rel = outPath.replace(/^\.\//, "");
     // Fix-round feed: tsc errors + vitest failures triaged to this file
@@ -605,15 +545,10 @@ export const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass
     const current = await readFile(join(fri.worktreePath, outPath), "utf8");
 
     // Fresh fenced session (0(g): fence staged with this step's decision).
-    const harness = requireHarness();
-    const label = fenceLabel(`${fri.file}:queuefix`, fri.round, fri.epoch);
-    const session = await harness.createSession(label);
-    sessionFenceMap.set(ctx, label, {
-      sessionId: session.id,
+    const session = await openFencedSession(ctx, {
+      label: fenceLabel(`${fri.file}:queuefix`, fri.round, fri.epoch),
       stepId: "pp-queue-fix",
       epoch: fri.epoch,
-      label,
-      persistedAtUtc: new Date().toISOString(),
     });
 
     const turn = composeQueueFixTurn({
@@ -650,7 +585,7 @@ export const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClas
   // while its dispatch entry carries file#round — the AC2 anchor then reports
   // it (and the queue-fix steps below) as unanchored. Per-file steps MUST key
   // their envelopes by the sanitized file#round identity.
-  identityOf: (_ctx, input) => markerKeyOf(input.file, input.round),
+  identityOf: fileRoundIdentity,
   stepOptions: {
     // ppLease is READ through bindLeaseStore (lease reclaim/put); live
     // finding cx-5c: the child's first step failed 3 attempts with
@@ -687,12 +622,7 @@ export const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClas
       // By-value feed (not a run record): no ran/not-run claim here.
       vitestRun: null,
     });
-    const pool = new WorktreePool(
-      input.repoRoot,
-      input.worktreeRoot,
-      bindLeaseStore(ctx, ppLease),
-      LEASE_SLOT_CAP,
-    );
+    const pool = leasePool(ctx, input);
     // The fix feed travels through the child's pp-verify seeded above (read by
     // queueFixFeedForFile), so the FileRoundInput carries no error copies.
     const childInput = (lease: { worktreePath: string; branch: string }): FileRoundInput => ({
@@ -730,16 +660,10 @@ export const ChildReleaseStep: EnvelopeStepClass<FileRoundInput> = envelopeStepC
   stepType: "PpChildRelease",
   stepId: "pp-child-release",
   role: "record",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
+  identityOf: fileRoundIdentity,
   stepOptions: { executeLoadAttributeMaps: [ppLease, ppMarker] },
   inner: async (ctx, fri) => {
-    const pool = new WorktreePool(
-      fri.repoRoot,
-      fri.worktreeRoot,
-      bindLeaseStore(ctx, ppLease),
-      LEASE_SLOT_CAP,
-    );
-    await pool.release(fri.file);
+    await leasePool(ctx, fri).release(fri.file);
     const marker = ppMarker.get(ctx, markerKeyOf(fri.file, fri.round));
     return {
       output: {
