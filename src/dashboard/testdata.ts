@@ -87,11 +87,11 @@ export const STATE_TRIAL: DexStateWire = {
   ],
   attributes: [
     {
-      key: "envelope-event/pp-implement%231",
+      key: "envelope-event/pp-implement#1",
       value: envelope("pp-implement", "agent", 1, "2026-09-25T21:23:36.693Z", "2026-09-25T21:26:38.981Z", "completed", 60921, 182288),
     },
     {
-      key: "envelope-event/pp-commit%231",
+      key: "envelope-event/pp-commit#1",
       value: envelope("pp-commit", "commit", 1, "2026-09-25T21:27:00.100Z", "2026-09-25T21:27:00.220Z", "completed", null, 120),
     },
     {
@@ -189,7 +189,7 @@ export const HISTORY_TRIAL: DexHistoryWire = {
         output: {
           upsertAttributes: [
             {
-              key: "envelope-event/pp-prep%231",
+              key: "envelope-event/pp-prep#1",
               value: envelope("pp-prep", "record", 1, "2026-09-25T21:23:36.500Z", "2026-09-25T21:23:36.502Z", "completed", null, 2),
             },
           ],
@@ -219,7 +219,7 @@ export const HISTORY_TRIAL: DexHistoryWire = {
           },
           upsertAttributes: [
             {
-              key: "envelope-event/pp-lease%231",
+              key: "envelope-event/pp-lease#1",
               value: envelope("pp-lease", "record", 1, "2026-09-25T21:23:36.578Z", "2026-09-25T21:23:36.609Z", "completed", null, 31),
             },
           ],
@@ -235,7 +235,7 @@ export const HISTORY_TRIAL: DexHistoryWire = {
         output: {
           upsertAttributes: [
             {
-              key: "envelope-event/pp-implement%231",
+              key: "envelope-event/pp-implement#1",
               value: envelope("pp-implement", "agent", 1, "2026-09-25T21:23:36.693Z", "2026-09-25T21:26:38.981Z", "completed", 60921, 182288),
             },
             {
@@ -255,7 +255,7 @@ export const HISTORY_TRIAL: DexHistoryWire = {
         output: {
           upsertAttributes: [
             {
-              key: "envelope-event/pp-review-a%231",
+              key: "envelope-event/pp-review-a#1",
               value: envelope("pp-review-a", "review", 1, "2026-09-25T21:26:39.300Z", null, "interrupted", null, null),
             },
           ],
@@ -283,7 +283,7 @@ export const HISTORY_TRIAL: DexHistoryWire = {
           },
           upsertAttributes: [
             {
-              key: "envelope-event/pp-commit%231",
+              key: "envelope-event/pp-commit#1",
               value: envelope("pp-commit", "commit", 1, "2026-09-25T21:27:00.100Z", "2026-09-25T21:27:00.220Z", "completed", null, 120),
             },
           ],
@@ -307,7 +307,7 @@ export const HISTORY_PROBE: DexHistoryWire = {
         output: {
           upsertAttributes: [
             {
-              key: "envelope-event/probe-commit%237",
+              key: "envelope-event/probe-commit#7",
               value: envelope("probe-commit", "commit", 7, "2026-09-25T19:55:00.000Z", "2026-09-25T19:55:00.100Z", "skipped", null, 100),
             },
           ],
@@ -407,3 +407,122 @@ export const BURN_DOWN_FILE_SAMPLES: BurnDownSample[] = [
   { queue: "tsc", file: "src/Money.php", iteration: 3, error_count: 0, recorded_at: "2026-09-25T21:35:00.000Z" },
   { queue: "vitest", file: "src/Money.php", iteration: 1, error_count: 2, recorded_at: "2026-09-25T21:26:50.000Z" },
 ];
+
+// ---------------------------------------------------------------------------
+// Shapes the live flow really emits: every fixture below models a
+// dashboard defect that the original fixtures could not express.
+// ---------------------------------------------------------------------------
+
+/**
+ * Default parallel mode: one RUNNING port.Project parent plus `childCount`
+ * COMPLETED SubFlow port.File children, all started AFTER the parent
+ * (`SubFlow:<parent>-<stepExecutionId>-<index>`, as dex names them).
+ */
+export function parallelRunFlows(parentId: string, childCount: number): DexFlowSummaryWire[] {
+  const base = Date.parse("2026-09-30T10:00:00.000Z");
+  const parent: DexFlowSummaryWire = {
+    flowId: parentId,
+    flowType: "port.Project",
+    flowStatus: "FLOW_STATUS_RUNNING",
+    flowStatusCode: 1,
+    runId: `run-${parentId}`,
+    startTime: new Date(base).toISOString(),
+  };
+  const children = Array.from({ length: childCount }, (_, i): DexFlowSummaryWire => ({
+    flowId: `SubFlow:${parentId}-PpWaveJoin-1-${i}`,
+    flowType: "port.File",
+    flowStatus: "FLOW_STATUS_COMPLETED",
+    flowStatusCode: 2,
+    runId: `run-child-${i}`,
+    startTime: new Date(base + (i + 1) * 60_000).toISOString(),
+  }));
+  return [parent, ...children];
+}
+
+export const FLOW_TERMINATED_PORT: DexFlowSummaryWire = {
+  flowId: "cx-term",
+  flowType: "port.Project",
+  flowStatus: "FLOW_STATUS_TERMINATED",
+  flowStatusCode: 5,
+  runId: "run-cx-term",
+  startTime: "2026-09-29T09:00:00.000Z",
+  closeTime: "2026-09-29T09:30:00.000Z",
+};
+
+export const FLOW_CANCELED_PORT: DexFlowSummaryWire = {
+  ...FLOW_TERMINATED_PORT,
+  flowId: "cx-cancel",
+  flowStatus: "FLOW_STATUS_CANCELED",
+  flowStatusCode: 6,
+  runId: "run-cx-cancel",
+};
+
+/**
+ * envelopeStartMarker (attempt 0, ended_at null, tokens null) and the real
+ * attempt of the SAME model step: the marker must never read as a provenance
+ * failure, only the real attempt carries the token requirement.
+ */
+export const ENVELOPE_START_MARKER: Record<string, unknown> = {
+  stepId: "pp-implement",
+  role: "agent",
+  file: null,
+  round: null,
+  attempt: 0,
+  started_at: "2026-09-30T10:05:00.000Z",
+  ended_at: null,
+  outcome: "interrupted",
+  tokens: null,
+  wall_clock_ms: null,
+};
+
+export const ENVELOPE_REAL_ATTEMPT: Record<string, unknown> = {
+  ...ENVELOPE_START_MARKER,
+  attempt: 1,
+  started_at: "2026-09-30T10:05:01.000Z",
+  ended_at: "2026-09-30T10:08:01.000Z",
+  outcome: "completed",
+  tokens: 60921,
+  wall_clock_ms: 180000,
+};
+
+/**
+ * Per-iteration burn-down rows exactly as port-project.ts writes them: the
+ * tsc TOTAL row (file null) plus per-file rows, a vitest row with ran
+ * accounting, then iteration 2 where vitest did NOT run (error_count 0 plus
+ * the not-run marker) and tsc could not produce a count (Contract A).
+ */
+export const BURN_DOWN_FLOW_ROWS: BurnDownSample[] = [
+  { queue: "tsc", file: null, iteration: 1, error_count: 12, recorded_at: "2026-09-30T10:10:00.000Z", tsc: { state: "ran", reason: null, exit_code: 2, unlocated: 0 } },
+  { queue: "tsc", file: "src/a.php", iteration: 1, error_count: 7, recorded_at: "2026-09-30T10:10:00.000Z" },
+  { queue: "tsc", file: "src/b.php", iteration: 1, error_count: 5, recorded_at: "2026-09-30T10:10:00.000Z" },
+  { queue: "vitest", file: null, iteration: 1, error_count: 2, recorded_at: "2026-09-30T10:10:00.000Z", vitest: { state: "ran", reason: null, passed: 8, failed: 2, total: 10 } },
+  { queue: "tsc", file: null, iteration: 2, error_count: 0, recorded_at: "2026-09-30T10:20:00.000Z", tsc: { state: "not-run", reason: "tsc exited 2 with no located diagnostics: error TS18003: No inputs were found", exit_code: 2, unlocated: 1 } },
+  { queue: "vitest", file: null, iteration: 2, error_count: 0, recorded_at: "2026-09-30T10:20:00.000Z", vitest: { state: "not-run", reason: "runner unavailable", passed: null, failed: null, total: null } },
+];
+
+/** A review step's start and completion stream messages: one eventKey, one started_at. */
+export const STREAM_REVIEW_START_AND_DONE: Array<{ flowId: string; eventKey: string; event: Record<string, unknown> }> = (() => {
+  const start = {
+    stepId: "pp-review-a",
+    role: "review",
+    file: null,
+    round: null,
+    attempt: 1,
+    started_at: "2026-09-30T10:12:00.000Z",
+    ended_at: null,
+    outcome: "interrupted",
+    tokens: null,
+    wall_clock_ms: null,
+  };
+  const done = {
+    ...start,
+    ended_at: "2026-09-30T10:14:00.000Z",
+    outcome: "completed",
+    tokens: { input_tokens: 329000, output_tokens: 4000, reasoning_tokens: 0, cache_read_tokens: 576000, cache_write_tokens: 0, cost_usd: 0 },
+    wall_clock_ms: 120000,
+  };
+  return [
+    { flowId: "cx-5", eventKey: "pp-review-a#1", event: start },
+    { flowId: "cx-5", eventKey: "pp-review-a#1", event: done },
+  ];
+})();

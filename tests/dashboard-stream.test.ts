@@ -112,6 +112,27 @@ function deferredReader(): {
   };
 }
 
+/** Manually released backoff sleeps, so retry timing is deterministic. */
+function controllableSleep(): {
+  sleep: (ms: number) => Promise<void>;
+  waits: Array<{ ms: number; resolve: () => void }>;
+  /** Every requested duration, in order (released or not). */
+  waitLog: number[];
+  releaseNext: () => void;
+} {
+  const waits: Array<{ ms: number; resolve: () => void }> = [];
+  const waitLog: number[] = [];
+  return {
+    sleep: (ms) => {
+      waitLog.push(ms);
+      return new Promise<void>((resolve) => waits.push({ ms, resolve }));
+    },
+    waits,
+    waitLog,
+    releaseNext: () => waits.shift()?.resolve(),
+  };
+}
+
 /** Yields once on the MACROtask queue so pending loop continuations settle. */
 const tick = (): Promise<void> => Bun.sleep(1);
 
@@ -154,12 +175,14 @@ describe("envelope stream subscriber (US-007): receipt, fallback, resilience", (
     subscriber.stop();
   });
 
-  test("forced stream failure ENGAGES the poll fallback once and ends the stream loop", async () => {
+  test("forced stream failure ENGAGES the poll fallback once and backs off instead of hot-looping", async () => {
     const reader = deferredReader();
+    const sleeper = controllableSleep();
     const fallbacks: Array<{ flowId: string; error: string }> = [];
     const subscriber = startEnvelopeStreamSubscriber({
       read: reader.read,
       longPollMs: 50,
+      sleep: sleeper.sleep,
       onFallback: (flowId, error) => fallbacks.push({ flowId, error }),
     });
     subscriber.follow(["cx-7"]);
@@ -168,8 +191,107 @@ describe("envelope stream subscriber (US-007): receipt, fallback, resilience", (
     await tick();
     expect(subscriber.mode("cx-7")).toBe("poll-fallback");
     expect(fallbacks).toEqual([{ flowId: "cx-7", error: "server unreachable (forced failure)" }]);
-    expect(reader.pendingCount()).toBe(0); // the loop ENDED (poll serves the feed now)
+    // No re-read while backing off (poll serves the feed meanwhile).
+    expect(reader.pendingCount()).toBe(0);
+    expect(sleeper.waits).toHaveLength(1);
     subscriber.stop();
+  });
+
+  test("C57: after a failure the subscriber retries and flips back to stream on a successful read", async () => {
+    const reader = deferredReader();
+    const sleeper = controllableSleep();
+    const fallbacks: string[] = [];
+    const recovered: string[] = [];
+    const subscriber = startEnvelopeStreamSubscriber({
+      read: reader.read,
+      longPollMs: 50,
+      retryBaseMs: 100,
+      retryMaxMs: 800,
+      sleep: sleeper.sleep,
+      onFallback: (flowId) => fallbacks.push(flowId),
+      onRecover: (flowId) => recovered.push(flowId),
+    });
+    subscriber.follow(["cx-7"]);
+    await tick();
+    reader.failNext("cx-7", new Error("UNAVAILABLE: dex restarting"));
+    await tick();
+    expect(subscriber.mode("cx-7")).toBe("poll-fallback");
+    expect(sleeper.waits.map((w) => w.ms)).toEqual([100]);
+
+    sleeper.releaseNext(); // dex is back: the backoff elapses
+    await tick();
+    expect(reader.pendingCount()).toBe(1); // the loop re-armed its long-poll
+    reader.resolveNext("cx-7", streamMessage());
+    await tick();
+    expect(subscriber.mode("cx-7")).toBe("stream");
+    expect(recovered).toEqual(["cx-7"]);
+    expect(subscriber.size("cx-7")).toBe(1);
+    expect(subscriber.modes()).toEqual({ "cx-7": "stream" });
+
+    // A NEW failure streak announces the fallback again.
+    reader.failNext("cx-7", new Error("UNAVAILABLE again"));
+    await tick();
+    expect(fallbacks).toEqual(["cx-7", "cx-7"]);
+    subscriber.stop();
+  });
+
+  test("C57: backoff is bounded and onFallback fires once per failure streak, not per retry", async () => {
+    const reader = deferredReader();
+    const sleeper = controllableSleep();
+    const fallbacks: string[] = [];
+    const subscriber = startEnvelopeStreamSubscriber({
+      read: reader.read,
+      retryBaseMs: 100,
+      retryMaxMs: 800,
+      sleep: sleeper.sleep,
+      onFallback: (flowId) => fallbacks.push(flowId),
+    });
+    subscriber.follow(["cx-7"]);
+    await tick();
+    for (let i = 0; i < 5; i += 1) {
+      reader.failNext("cx-7", new Error(`still down ${i}`));
+      await tick();
+      sleeper.releaseNext();
+      await tick();
+    }
+    expect(sleeper.waitLog).toEqual([100, 200, 400, 800, 800]);
+    expect(fallbacks).toEqual(["cx-7"]);
+    expect(subscriber.mode("cx-7")).toBe("poll-fallback");
+    subscriber.stop();
+  });
+
+  test("C57: a long-poll wake-up after a failure also counts as recovered (the connection works)", async () => {
+    const reader = deferredReader();
+    const sleeper = controllableSleep();
+    const subscriber = startEnvelopeStreamSubscriber({ read: reader.read, sleep: sleeper.sleep });
+    subscriber.follow(["cx-7"]);
+    await tick();
+    reader.failNext("cx-7", new Error("down"));
+    await tick();
+    sleeper.releaseNext();
+    await tick();
+    reader.failNext("cx-7", Object.assign(new Error("idle"), { subStatus: "longPollTimeout" }));
+    await tick();
+    expect(subscriber.mode("cx-7")).toBe("stream");
+    subscriber.stop();
+  });
+
+  test("C57: stop() or dropping the flow while backing off ends the loop (no read afterwards)", async () => {
+    const reader = deferredReader();
+    const sleeper = controllableSleep();
+    const subscriber = startEnvelopeStreamSubscriber({ read: reader.read, sleep: sleeper.sleep });
+    subscriber.follow(["cx-7", "cx-6"]);
+    await tick();
+    reader.failNext("cx-7", new Error("down"));
+    reader.failNext("cx-6", new Error("down"));
+    await tick();
+    expect(sleeper.waits).toHaveLength(2);
+    subscriber.follow(["cx-7"]); // cx-6 leaves the selection while backing off
+    subscriber.stop(); // and everything stops
+    sleeper.releaseNext();
+    sleeper.releaseNext();
+    await tick();
+    expect(reader.pendingCount()).toBe(0);
   });
 
   test("the per-flow ring buffer is bounded (oldest dropped)", async () => {
@@ -313,6 +435,117 @@ describe("stream feed conversion + AC-D end-to-end (/api/state payload)", () => 
 });
 
 // ---------------------------------------------------------------------------
+// C52: stream messages are UPSERTS (start row -> completion row)
+// ---------------------------------------------------------------------------
+
+describe("C52: stream start + completion upsert (the feed never sticks on the in-flight row)", () => {
+  const reviewStart = {
+    stepId: "pp-review-a",
+    role: "review",
+    file: null,
+    round: null,
+    attempt: 1,
+    started_at: "2026-09-27T01:10:00.000Z",
+    ended_at: null,
+    outcome: "interrupted",
+    tokens: null,
+    wall_clock_ms: null,
+    identity: null,
+  };
+  const reviewDone = {
+    ...reviewStart,
+    ended_at: "2026-09-27T01:12:00.000Z",
+    outcome: "completed",
+    tokens: 4_321,
+    wall_clock_ms: 120_000,
+  };
+  const message = (event: Record<string, unknown>): StreamEventMessage =>
+    streamMessage({ eventKey: "pp-review-a#1", event });
+
+  function feedFor(input: {
+    states?: Record<string, { activeStepExecutions: []; attributes: Array<{ key: string; value: unknown }> }>;
+    histories?: Record<string, import("../src/dashboard/types.js").DexHistoryWire>;
+    streamFeed: StreamEventMessage[];
+  }) {
+    return buildDashboardState({
+      now: "2026-09-27T01:13:00.000Z",
+      dex: {
+        available: true,
+        error: null,
+        detail: "dexcli@test",
+        flows: [flowSummary("cx-7")],
+        states: input.states ?? {},
+        histories: input.histories ?? {},
+      },
+      git: { available: false, error: null, repoRoot: "/tmp/pk-cx7", commits: [], worktrees: [] },
+      killEvents: { available: false, error: null, filesScanned: [], events: [] },
+      burnDownFiles: [],
+      streamFeed: input.streamFeed,
+      feedLimit: 80,
+      commitLimit: 40,
+    }).feed;
+  }
+
+  test("a stream start followed by its completion yields ONE completed row", () => {
+    const feed = feedFor({ streamFeed: [message(reviewStart), message(reviewDone)] });
+    expect(feed).toHaveLength(1);
+    expect(feed[0]).toMatchObject({ outcome: "completed", tokens: 4_321, wallClockMs: 120_000 });
+    expect(feed[0]?.endedAt).toBe("2026-09-27T01:12:00.000Z");
+  });
+
+  test("a polled in-flight row is replaced by the stream completion (file/round from the poll survive)", () => {
+    const feed = feedFor({
+      states: { "cx-7": { activeStepExecutions: [], attributes: [{ key: "envelope-event/pp-review-a#1", value: reviewStart }] } },
+      histories: {
+        "cx-7": {
+          flowId: "cx-7",
+          runId: "run-cx-7",
+          events: [
+            {
+              eventId: "1",
+              eventTime: "2026-09-27T01:09:00.000Z",
+              type: "StepExecuteCompleted",
+              payload: {
+                output: {
+                  stepDecision: {
+                    nextSteps: [{ stepType: "PpReviewA", stepInput: { file: "src/A.php", round: 2, epoch: 1 } }],
+                  },
+                  upsertAttributes: [],
+                },
+              },
+            },
+            {
+              eventId: "2",
+              eventTime: "2026-09-27T01:10:01.000Z",
+              type: "StepExecuteCompleted",
+              payload: { output: { upsertAttributes: [{ key: "envelope-event/pp-review-a#1", value: reviewStart }] } },
+            },
+          ],
+        },
+      },
+      streamFeed: [message(reviewDone)],
+    });
+    expect(feed).toHaveLength(1);
+    expect(feed[0]).toMatchObject({ outcome: "completed", tokens: 4_321, file: "src/A.php", round: 2 });
+  });
+
+  test("a polled completed row is never overwritten by a late stream start", () => {
+    const feed = feedFor({
+      states: { "cx-7": { activeStepExecutions: [], attributes: [{ key: "envelope-event/pp-review-a#1", value: reviewDone }] } },
+      streamFeed: [message(reviewStart)],
+    });
+    expect(feed).toHaveLength(1);
+    expect(feed[0]).toMatchObject({ outcome: "completed", tokens: 4_321 });
+  });
+
+  test("a completion is not downgraded by a later-delivered start in the same stream buffer", () => {
+    const feed = feedFor({ streamFeed: [message(reviewDone), message(reviewStart)] });
+    expect(feed).toHaveLength(1);
+    expect(feed[0]?.outcome).toBe("completed");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Projection-only boundary (streams are never read by control flow)
 // ---------------------------------------------------------------------------
 
@@ -334,9 +567,19 @@ describe("US-007 projection-only boundary: streams are never read for correctnes
     expect(offenders).toEqual([]);
   });
 
-  test("the durable envelope attribute remains the only correctness source (comment contract intact)", () => {
+  test("the durable envelope attribute remains the only correctness source (structural check, not comment text)", () => {
     const envelope = readFileSync(join(ROOT, "flows", "steps", "envelope.ts"), "utf8");
-    expect(envelope).toContain("the durable envelope-event attribute remains the only");
+    // The durable store exists under the key prefix every consumer matches on...
+    expect(envelope).toMatch(/new AttributeMap<EnvelopeEvent>\(\s*"envelope-event"/);
+    // ...and every durable write is immediately MIRRORED to the stream with the
+    // same arguments (the stream copy follows the write; it never replaces it).
+    const durableWrites = envelope.match(/envelopeEvents\.set\(/g) ?? [];
+    const mirroredWrites =
+      envelope.match(/envelopeEvents\.set\((\w+), (\w+), (\w+)\);\s*\n\s*publishEnvelopeEvent\(\1, \2, \3\);/g) ?? [];
+    expect(durableWrites.length).toBeGreaterThan(0);
+    expect(mirroredWrites.length).toBe(durableWrites.length);
+    // The envelope module itself never READS a stream.
+    expect(envelope).not.toMatch(/readStream|listStreamMessages/);
     // Stream consumers exist ONLY in the projection layer.
     for (const allowed of [
       join("src", "dashboard", "queries.ts"),

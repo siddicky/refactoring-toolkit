@@ -22,6 +22,7 @@ import { execFile } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { promisify } from "node:util";
 
+import { burnDownFromUnknown } from "./state.js";
 import type {
   BurnDownSample,
   DexHistoryWire,
@@ -31,6 +32,7 @@ import type {
   GitWorktreeRow,
   NormalizedKillEvent,
   StreamEventMessage,
+  StreamMode,
 } from "./types.js";
 
 const execFileP = promisify(execFile);
@@ -175,28 +177,7 @@ export function gitQueries(gitBin = "git"): GitQueries {
           ],
           10_000,
         );
-        const commits: GitCommitRow[] = [];
-        for (const record of out.split(LOG_REC)) {
-          const trimmed = record.replace(/^\n+/, "").trimEnd();
-          if (trimmed.length === 0) continue;
-          const fields = trimmed.split(LOG_SEP);
-          const sha = fields[0] ?? "";
-          if (!/^[0-9a-f]{7,40}$/i.test(sha)) continue;
-          const body = fields[6] ?? "";
-          const opId = findTrailer(body, "Operation-ID:");
-          const contentHash = findTrailer(body, "Content-Hash:");
-          commits.push({
-            sha,
-            shortSha: fields[1] ?? sha.slice(0, 7),
-            author: fields[2] ?? "",
-            date: fields[3] ?? "",
-            subject: fields[4] ?? "",
-            refs: fields[5] ?? "",
-            opId,
-            contentHash,
-          });
-        }
-        return ok(commits);
+        return ok(parseGitLog(out));
       } catch (e) {
         return err(describeError(e));
       }
@@ -209,22 +190,7 @@ export function gitQueries(gitBin = "git"): GitQueries {
           ["-C", repoRoot, "worktree", "list", "--porcelain"],
           10_000,
         );
-        const rows: GitWorktreeRow[] = [];
-        let current: { path: string; head: string; branch: string } | null = null;
-        const flush = () => {
-          if (current !== null) rows.push({ ...current, clean: null });
-        };
-        for (const line of out.split("\n")) {
-          if (line.startsWith("worktree ")) {
-            flush();
-            current = { path: line.slice("worktree ".length).trim(), head: "", branch: "" };
-          } else if (current !== null && line.startsWith("HEAD ")) {
-            current.head = line.slice("HEAD ".length).trim();
-          } else if (current !== null && line.startsWith("branch ")) {
-            current.branch = line.slice("branch ".length).trim();
-          }
-        }
-        flush();
+        const rows: GitWorktreeRow[] = parseWorktreePorcelain(out).map((w) => ({ ...w, clean: null }));
         // Cleanliness: one status call per worktree (a handful of paths at most).
         await Promise.all(
           rows.map(async (row) => {
@@ -242,6 +208,64 @@ export function gitQueries(gitBin = "git"): GitQueries {
       }
     },
   };
+}
+
+/** Parses the `log --pretty=<LOG_SEP/LOG_REC format>` output into commit rows. */
+export function parseGitLog(out: string): GitCommitRow[] {
+  const commits: GitCommitRow[] = [];
+  for (const record of out.split(LOG_REC)) {
+    const trimmed = record.replace(/^\n+/, "").trimEnd();
+    if (trimmed.length === 0) continue;
+    const fields = trimmed.split(LOG_SEP);
+    const sha = fields[0] ?? "";
+    if (!/^[0-9a-f]{7,40}$/i.test(sha)) continue;
+    const body = fields[6] ?? "";
+    commits.push({
+      sha,
+      shortSha: fields[1] ?? sha.slice(0, 7),
+      author: fields[2] ?? "",
+      date: fields[3] ?? "",
+      subject: fields[4] ?? "",
+      refs: fields[5] ?? "",
+      opId: findTrailer(body, "Operation-ID:"),
+      contentHash: findTrailer(body, "Content-Hash:"),
+    });
+  }
+  return commits;
+}
+
+/**
+ * Parses `worktree list --porcelain`: blank-line separated records of
+ * `worktree <path>`, `HEAD <sha>`, then `branch <ref>` | `detached` | `bare`
+ * plus optional `locked` / `prunable <reason>` lines (ignored: a prunable
+ * worktree keeps its row, and its cleanliness later resolves to unknown).
+ * A detached HEAD reports branch "(detached)" (the GitWorktreeRow contract).
+ */
+export function parseWorktreePorcelain(out: string): Array<{ path: string; head: string; branch: string }> {
+  const rows: Array<{ path: string; head: string; branch: string }> = [];
+  let current: { path: string; head: string; branch: string } | null = null;
+  const flush = () => {
+    if (current !== null) rows.push(current);
+    current = null;
+  };
+  for (const line of out.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      flush();
+      current = { path: line.slice("worktree ".length).trim(), head: "", branch: "" };
+    } else if (current !== null && line.startsWith("HEAD ")) {
+      current.head = line.slice("HEAD ".length).trim();
+    } else if (current !== null && line.startsWith("branch ")) {
+      current.branch = line.slice("branch ".length).trim();
+    } else if (current !== null && line.trim() === "detached") {
+      current.branch = "(detached)";
+    } else if (current !== null && line.trim() === "bare") {
+      current.branch = "(bare)";
+    } else if (line.trim() === "") {
+      flush();
+    }
+  }
+  flush();
+  return rows;
 }
 
 /** Extracts a `Key: value` trailer line from a commit body. */
@@ -330,6 +354,17 @@ function normalizeKillEvent(obj: unknown, source: string): NormalizedKillEvent |
     : Array.isArray(rec.killed_pids)
       ? rec.killed_pids
       : [];
+  // Data contract B: `fired` = killed_pids.length > 0 on a completion. Older
+  // writers omit it: derive it from an explicit killed_pids list, else unknown.
+  const fired =
+    kind !== "completed"
+      ? null
+      : typeof rec.fired === "boolean"
+        ? rec.fired
+        : Array.isArray(rec.killed_pids)
+          ? rec.killed_pids.length > 0
+          : null;
+  const flowRunRaw = rec.flow_run_id ?? rec.flowRunId;
   return {
     source,
     kind,
@@ -341,6 +376,8 @@ function normalizeKillEvent(obj: unknown, source: string): NormalizedKillEvent |
     reason: typeof rec.reason === "string" ? rec.reason : null,
     note: typeof rec.note === "string" ? rec.note : typeof rec.notes === "string" ? rec.notes : null,
     resumed: typeof rec.resumed === "boolean" ? rec.resumed : null,
+    fired,
+    flowRunId: typeof flowRunRaw === "string" && flowRunRaw.length > 0 ? flowRunRaw : null,
   };
 }
 
@@ -411,22 +448,14 @@ export async function readBurnDownFile(path: string): Promise<QueryResult<BurnDo
   return ok(samples);
 }
 
-/** Shape check (not a cast): queue must be a known kind, counts numeric. */
+/**
+ * Shape check (not a cast): queue must be a known kind, counts numeric. The
+ * parser is shared with the history-attribute path (state.ts) so the ran/
+ * not-run accounting fields cannot be dropped by one adapter and kept by the
+ * other.
+ */
 export function normalizeBurnDown(obj: unknown, _source: string): BurnDownSample | null {
-  if (obj === null || typeof obj !== "object") return null;
-  const rec = obj as Record<string, unknown>;
-  const queue = rec.queue;
-  if (typeof queue !== "string" || (queue !== "tsc" && queue !== "vitest")) return null;
-  const iteration = rec.iteration;
-  const errorCount = rec.error_count;
-  if (typeof iteration !== "number" || typeof errorCount !== "number") return null;
-  return {
-    queue,
-    file: typeof rec.file === "string" ? rec.file : null,
-    iteration,
-    error_count: errorCount,
-    recorded_at: typeof rec.recorded_at === "string" ? rec.recorded_at : null,
-  };
+  return burnDownFromUnknown(obj);
 }
 
 /** Reads every existing burn-down file; absent files are optional. */
@@ -480,16 +509,15 @@ export type EnvelopeStreamReader = (
   timeoutMs: number,
 ) => Promise<StreamRead>;
 
-/** Per-flow subscriber mode: live stream, or poll fallback after a failure. */
-export type SubscriberMode = "stream" | "poll-fallback";
-
 export interface EnvelopeStreamSubscriber {
   /** Follow the given flow ids (starts loops; stops loops for removed ids). */
   follow(flowIds: readonly string[]): void;
   /** Buffered stream events for one flow, in arrival order (bounded). */
   recentEvents(flowId: string): StreamEventMessage[];
   /** Current mode of one flow's source ("poll-fallback" once it has failed). */
-  mode(flowId: string): SubscriberMode;
+  mode(flowId: string): StreamMode;
+  /** Mode of every FOLLOWED flow (surfaced per flow in /api/state). */
+  modes(): Record<string, StreamMode>;
   /** Count of buffered events per flow (render/test convenience). */
   size(flowId: string): number;
   /** Stops every loop; the buffered events remain readable. */
@@ -503,10 +531,18 @@ export interface EnvelopeStreamSubscriberOptions {
   longPollMs?: number;
   /** Per-flow ring-buffer cap (oldest dropped). Default 200. */
   bufferLimit?: number;
-  /** Called ONCE per flow when the stream fails and poll fallback engages. */
+  /** Called ONCE per failure streak (not per retry) when poll fallback engages. */
   onFallback?: (flowId: string, error: string) => void;
+  /** Called when a flow's stream source recovers after a failure streak. */
+  onRecover?: (flowId: string) => void;
   /** Called after each message lands in the buffer (observability/tests). */
   onEvent?: (message: StreamEventMessage) => void;
+  /** First retry delay after a failed read; doubles per failure. Default 1 s. */
+  retryBaseMs?: number;
+  /** Upper bound of the retry delay. Default 30 s. */
+  retryMaxMs?: number;
+  /** Injected delay (tests); default is an unref'd setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -526,13 +562,23 @@ function describeStreamError(err: unknown): string {
   return String(err);
 }
 
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms).unref();
+  });
+}
+
 /**
  * Starts a ReadStream-based event source for `port/<flowId>/events` — one
  * long-poll loop per followed flow with resumable tokens. ANY non-wake-up
- * read failure (server down, unregistered stream, decode defect) flips that
- * flow to `poll-fallback`, notifies `onFallback` once, and ENDS the loop:
- * the retained dexcli polling path keeps serving the feed (ENGAGED fallback
- * — asserted by tests), and the buffered events stay available.
+ * read failure (server down or restarting, unregistered stream, decode
+ * defect) flips that flow to `poll-fallback` and notifies `onFallback` once
+ * per failure streak; the retained dexcli polling path keeps serving the feed
+ * meanwhile (ENGAGED fallback — asserted by tests). The loop then retries
+ * with bounded exponential backoff from the same resume token, and the first
+ * successful read (or long-poll wake-up) flips the flow back to `stream`, so
+ * a dex restart does not silently end the live feed for the life of the
+ * process.
  */
 export function startEnvelopeStreamSubscriber(
   options: EnvelopeStreamSubscriberOptions,
@@ -540,35 +586,49 @@ export function startEnvelopeStreamSubscriber(
   const read = options.read;
   const longPollMs = options.longPollMs ?? 25_000;
   const bufferLimit = Math.max(1, options.bufferLimit ?? 200);
+  const retryBaseMs = Math.max(1, options.retryBaseMs ?? 1_000);
+  const retryMaxMs = Math.max(retryBaseMs, options.retryMaxMs ?? 30_000);
+  const sleep = options.sleep ?? defaultSleep;
 
   interface LoopState {
     token: string;
     buffer: StreamEventMessage[];
-    mode: SubscriberMode;
+    mode: StreamMode;
+    /** Cleared by follow() dropping the flow and by stop(): ends the loop. */
     active: boolean;
-    seq: number; // guards stale loops after follow()/stop() races
   }
   const loops = new Map<string, LoopState>();
 
   function loop(flowId: string, state: LoopState): void {
-    const seq = state.seq;
     void (async () => {
-      while (state.active && state.seq === seq) {
+      let failures = 0;
+      const markHealthy = () => {
+        if (state.mode === "stream") return;
+        state.mode = "stream";
+        failures = 0;
+        options.onRecover?.(flowId);
+      };
+      while (state.active) {
         try {
           const res = await read(flowId, state.token, longPollMs);
-          if (!state.active || state.seq !== seq) return;
+          if (!state.active) return;
+          markHealthy();
           state.token = res.resumeToken;
           state.buffer.push(res.value);
           if (state.buffer.length > bufferLimit) state.buffer.shift();
           options.onEvent?.(res.value);
         } catch (err) {
-          if (!state.active || state.seq !== seq) return;
-          if (isLongPollWakeUp(err)) continue; // nothing new within the window
-          // REAL failure: engage the poll fallback for this flow and stop.
-          state.mode = "poll-fallback";
-          state.active = false;
-          options.onFallback?.(flowId, describeStreamError(err));
-          return;
+          if (!state.active) return;
+          if (isLongPollWakeUp(err)) {
+            markHealthy(); // nothing new within the window, but the source is reachable
+            continue;
+          }
+          failures += 1;
+          if (failures === 1) {
+            state.mode = "poll-fallback";
+            options.onFallback?.(flowId, describeStreamError(err));
+          }
+          await sleep(Math.min(retryMaxMs, retryBaseMs * 2 ** (failures - 1)));
         }
       }
     })();
@@ -585,7 +645,7 @@ export function startEnvelopeStreamSubscriber(
       }
       for (const flowId of flowIds) {
         if (loops.has(flowId)) continue;
-        const state: LoopState = { token: "", buffer: [], mode: "stream", active: true, seq: 0 };
+        const state: LoopState = { token: "", buffer: [], mode: "stream", active: true };
         loops.set(flowId, state);
         loop(flowId, state);
       }
@@ -595,6 +655,11 @@ export function startEnvelopeStreamSubscriber(
     },
     mode(flowId) {
       return loops.get(flowId)?.mode ?? "poll-fallback";
+    },
+    modes() {
+      const out: Record<string, StreamMode> = {};
+      for (const [flowId, state] of loops) out[flowId] = state.mode;
+      return out;
     },
     size(flowId) {
       return loops.get(flowId)?.buffer.length ?? 0;

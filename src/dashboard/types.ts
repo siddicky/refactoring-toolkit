@@ -4,8 +4,11 @@
  * Wire types mirror the JSON shapes returned by the read-only `dexcli` surface
  * (`flow search` / `flow state` / `flow history -output json`) as observed
  * against dex 0.13.5 (see BUILD_NOTES.md, exit 0(h)). The dashboard queries dex
- * only through the CLI (read-only); it never starts flows and never opens a
- * blob cache.
+ * through the CLI (read-only) and never starts flows; the query layer itself
+ * opens no blob cache. The one exception is the optional stream subscriber
+ * composed in src/dashboard/stream-feed.ts (STATUS_STREAM_SUBSCRIBE=0 opts
+ * out): its read-side SDK client opens its OWN blob cache under
+ * .dex-cache/dashboard.
  *
  * View types are what /api/state returns and the static page renders. All
  * aggregation lives in state.ts as pure functions over these shapes.
@@ -150,11 +153,54 @@ export interface NormalizedKillEvent {
   reason: string | null;
   note: string | null;
   resumed: boolean | null;
+  /**
+   * Data contract B: `fired` on a completion = killed_pids.length > 0. false
+   * means the kill was a NO-OP (nothing was killed): never a successful
+   * kill-and-resume. Derived from killed_pids when the writer predates the
+   * field; null when unknown (legacy metrics-spelling rows, intents).
+   */
+  fired?: boolean | null;
+  /**
+   * The real Dex RUN id the kill targeted (`flow_run_id`), when the writer
+   * knew it. Legacy sidecars may carry the flow id here instead.
+   */
+  flowRunId?: string | null;
 }
 
 // ---------------------------------------------------------------------------
 // burn-down samples (QueueBurnDownEvent-compatible, src/metrics/types.ts)
 // ---------------------------------------------------------------------------
+
+/**
+ * Mirror of metrics VitestRunAccounting (src/metrics/types.ts, US-010). The
+ * dashboard does not import the metrics module (same rationale as the envelope
+ * mirror in state.ts). When `state` is "not-run" the row's error_count is
+ * vacuous and must never be plotted or read as zero failures.
+ */
+export interface VitestAccountingSample {
+  state: "ran" | "not-run";
+  reason: string | null;
+  passed: number | null;
+  failed: number | null;
+  total: number | null;
+}
+
+/**
+ * Mirror of Contract A TscRunAccounting (snake_case, same as vitest's). Only
+ * present on the tsc TOTAL row (file: null); absent on legacy rows and on
+ * per-file rows. state "not-run" means tsc could not produce a trustworthy
+ * count (spawn error/ENOENT, timeout/kill, or non-zero exit with no located
+ * diagnostics): the row's error_count is vacuous, never "0 errors".
+ */
+export interface TscAccountingSample {
+  state: "ran" | "not-run";
+  /** Explicit reason when not-run (e.g. "tsc timed out after 180s"); null when ran. */
+  reason: string | null;
+  /** Process exit code; null when killed / not spawned. */
+  exit_code: number | null;
+  /** Count of global (file-less) `error TSnnnn:` diagnostics seen. */
+  unlocated: number;
+}
 
 /** Minimal shape check target; matches metrics QueueBurnDownEvent fields. */
 export interface BurnDownSample {
@@ -163,6 +209,10 @@ export interface BurnDownSample {
   iteration: number;
   error_count: number;
   recorded_at: string | null;
+  /** Vitest rows only; absent on legacy rows (pre-US-010 runs). */
+  vitest?: VitestAccountingSample;
+  /** tsc TOTAL row only (Contract A); absent on legacy rows and per-file rows. */
+  tsc?: TscAccountingSample;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +225,9 @@ export interface SourceStatus {
   detail: string | null;
 }
 
+/** Per-flow live-feed source: the telemetry stream, or dexcli polling after a failure. */
+export type StreamMode = "stream" | "poll-fallback";
+
 export interface FlowView {
   flowId: string;
   flowType: string;
@@ -182,6 +235,11 @@ export interface FlowView {
   startTime: string;
   closeTime: string | null;
   runId: string;
+  /**
+   * Live-feed source for this flow. Omitted when the stream subscriber is not
+   * running or does not follow the flow (dexcli polling only).
+   */
+  streamMode?: StreamMode;
 }
 
 export interface GridRow {
@@ -253,6 +311,14 @@ export interface AgentUsageView {
   calls: number;
   /** Sum over envelopes carrying the full split; null when none do. */
   input: number | null;
+  /**
+   * Fresh (non-cached) input tokens, computed server-side. Provider usage
+   * reports cache reads/writes DISJOINT from `input` (tokenTotal and
+   * normalizeTokens both sum them additively), so `input` already IS the
+   * fresh count: subtracting cacheRead under-reports it and clamps to 0 for
+   * cache-heavy roles. Null when no envelope carried the split.
+   */
+  freshInput: number | null;
   cacheRead: number | null;
   output: number | null;
   reasoning: number | null;
@@ -261,9 +327,20 @@ export interface AgentUsageView {
   estimated: boolean;
 }
 
+export interface BurnDownPointView {
+  iteration: number;
+  /** null when state is "not-run": the count is vacuous and must not be plotted. */
+  errorCount: number | null;
+  recordedAt: string | null;
+  /** "not-run": the queue could not produce a trustworthy count this iteration. */
+  state: "ran" | "not-run";
+  /** Explicit not-run reason; null when ran. */
+  reason: string | null;
+}
+
 export interface BurnDownSeriesView {
   queue: string;
-  points: Array<{ iteration: number; errorCount: number; recordedAt: string | null }>;
+  points: BurnDownPointView[];
 }
 
 export interface CommitView {
@@ -286,6 +363,8 @@ export interface KillTimelineEntryView {
   reason: string | null;
   note: string | null;
   resumed: boolean | null;
+  /** Contract B: false = the kill was a no-op (nothing killed); null = unknown. */
+  fired: boolean | null;
   source: string;
 }
 
@@ -308,16 +387,39 @@ export interface DegradedRoundView {
   reasons: string[];
 }
 
+/**
+ * Structured lifecycle state behind the headline text. The client styles the
+ * headline from this (and `headlineDegraded`), never by parsing display text.
+ * `other-terminal` covers every remaining non-running dex status
+ * (continued-as-new, timed-out, ...); `awaiting-resume` is a kill observed
+ * with the flow still RUNNING and no post-kill activity yet.
+ */
+export type HeadlineState =
+  | "none"
+  | "running"
+  | "awaiting-resume"
+  | "resumed"
+  | "killed"
+  | "completed"
+  | "failed"
+  | "terminated"
+  | "canceled"
+  | "other-terminal";
+
 export interface DashboardStateView {
   generatedAt: string;
   /**
    * Wave-5 lifecycle headline (takeaways-synthesis #3): one-line run status
-   * for the newest port flow with the live running → killed → resumed →
-   * completed flip (derived from flow status + kill sidecar ordering).
-   * US-006: carries a `DEGRADED (N unreviewed)` marker when the headline
-   * flow has degraded rounds.
+   * for the newest port.Project flow with the live running → killed → resumed
+   * → completed flip (derived from flow status + kill sidecar ordering).
+   * US-006: carries a `DEGRADED (N unreviewed)` marker when the headline run
+   * (the flow or its SubFlow children) has degraded rounds.
    */
   headline: string;
+  /** Structured state of `headline` (style from this, never from the text). */
+  headlineState: HeadlineState;
+  /** True when the headline run has degraded rounds: must never read as clean. */
+  headlineDegraded: boolean;
   sources: {
     dex: SourceStatus;
     git: SourceStatus & { repoRoot: string };

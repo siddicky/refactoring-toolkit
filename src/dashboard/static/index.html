@@ -62,9 +62,13 @@
   .runhead { padding: 6px 12px 2px; color: var(--violet); }
   svg text { font-family: var(--mono); }
   #headline { margin-top: 10px; padding: 7px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 3px; font-size: 13px; color: var(--amber); }
-  #headline.completed { color: var(--green); }
-  #headline.killed { color: var(--red); }
-  #headline.resumed { color: var(--cyan); }
+  /* Styled from the structured headlineState / headlineDegraded (never from the text). */
+  #headline.state-completed { color: var(--green); }
+  #headline.state-killed, #headline.state-failed, #headline.state-terminated { color: var(--red); }
+  #headline.state-resumed { color: var(--cyan); }
+  #headline.state-canceled, #headline.state-other-terminal, #headline.state-none { color: var(--dim); }
+  /* A degraded round must never read as clean: overrides the green/cyan states. */
+  #headline.degraded { color: var(--amber); border-color: #574527; box-shadow: inset 3px 0 0 var(--red); }
 </style>
 </head>
 <body>
@@ -104,7 +108,7 @@
     <div>
       <h2><span class="n">04</span>flows</h2>
       <div class="panel"><table id="flows"><thead>
-        <tr><th>flow id</th><th>type</th><th>status</th><th>started</th><th>closed</th></tr>
+        <tr><th>flow id</th><th>type</th><th>status</th><th>feed</th><th>started</th><th>closed</th></tr>
       </thead><tbody></tbody></table><div class="empty" id="flows-empty" hidden></div></div>
     </div>
   </section>
@@ -118,7 +122,7 @@
     </div>
     <div>
       <h2><span class="n">06</span>kill / resume timeline</h2>
-      <div class="panel" id="kills"><div class="empty">no kill sidecars found — chaos evidence appears here (metrics/kill-events.json|jsonl)</div></div>
+      <div class="panel" id="kills"><div class="empty">no kill sidecars found — chaos evidence appears here (metrics/kill-events.jsonl)</div></div>
     </div>
   </section>
 
@@ -127,6 +131,13 @@
     <div class="panel"><table id="usage"><thead>
       <tr><th>role</th><th>calls</th><th>input (fresh)</th><th>cache-read</th><th>output</th><th>reasoning</th><th>cost usd</th></tr>
     </thead><tbody></tbody></table><div class="empty" id="usage-empty" hidden></div></div>
+  </section>
+
+  <section>
+    <h2><span class="n">08</span>degraded rounds (unreviewed)</h2>
+    <div class="panel"><table id="degraded"><thead>
+      <tr><th>flow</th><th>file</th><th>round</th><th>reviewers</th><th>reasons</th></tr>
+    </thead><tbody></tbody></table><div class="empty" id="degraded-empty" hidden></div></div>
   </section>
 
   <footer id="footer"></footer>
@@ -195,7 +206,7 @@ function renderFeed(entries) {
       ? ` — in ${e.usage.input.toLocaleString("en-US")} (cache ${e.usage.cacheRead.toLocaleString("en-US")}) out ${e.usage.output.toLocaleString("en-US")}${e.usage.costUsd > 0 ? " $" + e.usage.costUsd.toFixed(4) : ""}`
       : "";
     const tok = e.tokens == null
-      ? (e.tokensRequired ? '<span class="red" title="model-calling step missing token usage: provenance failure">MISSING</span>' : '<span class="faint" title="non-model step: tokens not applicable">n/a</span>')
+      ? (e.attempt === 0 ? '<span class="faint" title="start marker (attempt 0): tokens arrive with the real attempt">start</span>' : e.tokensRequired ? '<span class="red" title="model-calling step missing token usage: provenance failure">MISSING</span>' : '<span class="faint" title="non-model step: tokens not applicable">n/a</span>')
       : `<span class="violet" title="${esc(splitTip)}">${esc(e.tokens.toLocaleString("en-US"))}</span>`;
     const fileCell = e.file ? esc(short(e.file, 34)) : '<span class="faint">flow-level</span>';
     return `<tr>
@@ -221,10 +232,15 @@ function renderBurnDown(series) {
   }
   const W = 560, H = 170, PADL = 34, PADB = 22, PADT = 14, PADR = 12;
   const colors = { tsc: "#6cb6ff", vitest: "#dcbdfb" };
+  // A not-run point (vitest / tsc accounting) has no trustworthy count: it is
+  // drawn as a hollow marker on the baseline and breaks the line instead of
+  // reading as "0 errors".
+  const isRan = (p) => p.state !== "not-run" && p.errorCount != null;
   const html = series.map((s) => {
     const pts = s.points;
+    const color = colors[s.queue] || "#6fdc8c";
     const maxIter = Math.max(1, ...pts.map((p) => p.iteration));
-    const maxErr = Math.max(1, ...pts.map((p) => p.errorCount));
+    const maxErr = Math.max(1, ...pts.filter(isRan).map((p) => p.errorCount));
     const x = (i) => PADL + ((i - 1) / maxIter) * (W - PADL - PADR);
     const y = (v) => PADT + (1 - v / maxErr) * (H - PADT - PADB);
     const gridLines = [0, 0.5, 1].map((f) => {
@@ -233,18 +249,38 @@ function renderBurnDown(series) {
       return `<line x1="${PADL}" y1="${gy}" x2="${W - PADR}" y2="${gy}" stroke="#1c2634" stroke-width="1"/>` +
              `<text x="${PADL - 5}" y="${gy + 3}" fill="#38434f" font-size="9" text-anchor="end">${val}</text>`;
     }).join("");
-    const poly = pts.map((p) => `${x(p.iteration).toFixed(1)},${y(p.errorCount).toFixed(1)}`).join(" ");
-    const dots = pts.map((p) =>
-      `<circle cx="${x(p.iteration).toFixed(1)}" cy="${y(p.errorCount).toFixed(1)}" r="2.6" fill="${colors[s.queue] || "#6fdc8c"}"/>` +
-      `<text x="${x(p.iteration).toFixed(1)}" y="${(y(p.errorCount) - 6).toFixed(1)}" fill="#5b6b7c" font-size="9" text-anchor="middle">${esc(p.errorCount)}</text>`
+    // One polyline per run of consecutive ran points; a not-run point is a gap.
+    const segments = [];
+    let run = [];
+    for (const p of pts) {
+      if (isRan(p)) run.push(p);
+      else { if (run.length) segments.push(run); run = []; }
+    }
+    if (run.length) segments.push(run);
+    const lines = segments.filter((seg) => seg.length > 1).map((seg) =>
+      `<polyline points="${seg.map((p) => `${x(p.iteration).toFixed(1)},${y(p.errorCount).toFixed(1)}`).join(" ")}" fill="none" stroke="${color}" stroke-width="1.4"/>`
     ).join("");
+    const dots = pts.map((p) => {
+      const cx = x(p.iteration).toFixed(1);
+      if (!isRan(p)) {
+        const tip = "NOT RUN: " + (p.reason || "no reason recorded");
+        return `<circle cx="${cx}" cy="${y(0).toFixed(1)}" r="3.4" fill="none" stroke="#e3b341" stroke-width="1.4"><title>${esc(tip)}</title></circle>` +
+               `<text x="${cx}" y="${(y(0) - 7).toFixed(1)}" fill="#e3b341" font-size="9" text-anchor="middle">n/r<title>${esc(tip)}</title></text>`;
+      }
+      return `<circle cx="${cx}" cy="${y(p.errorCount).toFixed(1)}" r="2.6" fill="${color}"/>` +
+             `<text x="${cx}" y="${(y(p.errorCount) - 6).toFixed(1)}" fill="#5b6b7c" font-size="9" text-anchor="middle">${esc(p.errorCount)}</text>`;
+    }).join("");
     const xLabels = pts.map((p) =>
       `<text x="${x(p.iteration).toFixed(1)}" y="${H - 7}" fill="#38434f" font-size="9" text-anchor="middle">i${esc(p.iteration)}</text>`
     ).join("");
-    return `<div style="padding:6px 8px 2px"><span class="badge" style="color:${colors[s.queue] || "#6fdc8c"};border-color:#23425f">${esc(s.queue)}</span>
-      <span class="faint" style="margin-left:8px">latest ${pts.length ? esc(pts[pts.length - 1].errorCount) + " errors @ iteration " + esc(pts[pts.length - 1].iteration) : "-"}</span></div>` +
+    const last = pts[pts.length - 1];
+    const latest = !last ? "-"
+      : isRan(last) ? esc(`${last.errorCount} errors @ iteration ${last.iteration}`)
+      : `<span class="amber">NOT RUN @ iteration ${esc(last.iteration)} (${esc(last.reason || "no reason recorded")})</span>`;
+    return `<div style="padding:6px 8px 2px"><span class="badge" style="color:${color};border-color:#23425f">${esc(s.queue)}</span>
+      <span class="faint" style="margin-left:8px">latest ${latest}</span></div>` +
       `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="xMidYMid meet">
-        ${gridLines}<polyline points="${poly}" fill="none" stroke="${colors[s.queue] || "#6fdc8c"}" stroke-width="1.4"/>${dots}${xLabels}
+        ${gridLines}${lines}${dots}${xLabels}
       </svg>`;
   }).join("");
   host.innerHTML = html;
@@ -254,10 +290,14 @@ function renderFlows(flows) {
   const tb = $("flows").tBodies[0];
   $("flows-empty").hidden = flows.length > 0;
   $("flows-empty").textContent = flows.length ? "" : "dex unreachable — no flows visible";
+  const feedMode = (m) => m === "stream" ? '<span class="green" title="live envelope stream">stream</span>'
+    : m === "poll-fallback" ? '<span class="amber" title="stream failed (retrying with backoff); dexcli polling serves the feed">poll</span>'
+    : '<span class="faint" title="stream subscriber not following this flow">-</span>';
   tb.innerHTML = flows.map((f) => `<tr>
     <td class="cyan" title="${esc(f.flowId)}">${esc(short(f.flowId, 34))}</td>
     <td class="dim">${esc(f.flowType)}</td>
     <td><span class="badge ${esc(f.status)}">${esc(f.status.replace("FLOW_STATUS_", "").toLowerCase())}</span></td>
+    <td>${feedMode(f.streamMode)}</td>
     <td class="dim" title="${esc(utcFull(f.startTime))}">${utcTime(f.startTime)} <span class="faint">(${esc(rel(f.startTime))} ago)</span></td>
     <td class="dim">${f.closeTime ? utcTime(f.closeTime) : '<span class="faint">-</span>'}</td>
   </tr>`).join("");
@@ -279,15 +319,18 @@ function renderCommits(commits) {
 function renderKills(groups) {
   const host = $("kills");
   if (!groups.length) {
-    host.innerHTML = '<div class="empty">no kill sidecars found — chaos evidence appears here (metrics/kill-events.json|jsonl)</div>';
+    host.innerHTML = '<div class="empty">no kill sidecars found — chaos evidence appears here (metrics/kill-events.jsonl)</div>';
     return;
   }
   host.innerHTML = groups.map((g) => {
     const items = g.entries.map((e) => {
       const klass = e.kind === "intent" ? "intent" : "completed";
+      // A completion with fired:false killed nothing: a no-op, never a kill-and-resume.
       const detail = e.kind === "intent"
         ? `<span class="red">SIGKILL intent</span> pids [${e.pids.map(esc).join(",")}]${e.reason ? ' — ' + esc(e.reason) : ""}`
-        : `<span class="green">${e.resumed === true ? "resumed" : "kill completed"}</span> ${e.note ? esc(e.note) : ""}`;
+        : e.fired === false
+          ? `<span class="amber">no-op</span> nothing was killed ${e.note ? esc(e.note) : ""}`
+          : `<span class="green">${e.resumed === true ? "resumed" : "kill completed"}</span> ${e.note ? esc(e.note) : ""}`;
       return `<li class="${klass}"><span class="t">${utcTime(e.utc)}</span>${detail}${e.monotonicMs != null ? ` <span class="faint">(mono ${esc(e.monotonicMs)})</span>` : ""}</li>`;
     }).join("");
     const delta = g.entries.length >= 2 && g.entries[0] && g.entries[g.entries.length - 1]
@@ -297,14 +340,27 @@ function renderKills(groups) {
   }).join("");
 }
 
-function renderHeadline(text) {
+const HEADLINE_STATES = ["none", "running", "awaiting-resume", "resumed", "killed", "completed", "failed", "terminated", "canceled", "other-terminal"];
+
+function renderHeadline(st) {
   const el = $("headline");
-  const t = String(text || "");
-  el.textContent = t || "—";
-  el.classList.remove("completed", "killed", "resumed");
-  if (/\bcompleted\b|\bsurvived kill\b/.test(t)) el.classList.add("completed");
-  else if (/\bkilled\b/.test(t)) el.classList.add("killed");
-  else if (/\bresumed\b/.test(t)) el.classList.add("resumed");
+  el.textContent = String(st.headline || "") || "—";
+  el.classList.remove("degraded", ...HEADLINE_STATES.map((s) => "state-" + s));
+  if (HEADLINE_STATES.includes(st.headlineState)) el.classList.add("state-" + st.headlineState);
+  if (st.headlineDegraded === true) el.classList.add("degraded");
+}
+
+function renderDegraded(rounds) {
+  const tb = $("degraded").tBodies[0];
+  $("degraded-empty").hidden = rounds.length > 0;
+  $("degraded-empty").textContent = rounds.length ? "" : "no degraded rounds — every observed round kept at least one completed reviewer verdict";
+  tb.innerHTML = rounds.map((r) => `<tr class="row-blocked">
+    <td class="cyan" title="${esc(r.flowId)}">${esc(short(r.flowId, 34))}</td>
+    <td>${esc(short(r.file, 44))}</td>
+    <td>${esc(r.round)}</td>
+    <td>${esc((r.reviewers || []).join(", "))}</td>
+    <td class="wrap-cell red">${esc((r.reasons || []).filter((x) => x).join(" | ") || "-")}</td>
+  </tr>`).join("");
 }
 
 function renderUsage(rows) {
@@ -315,7 +371,9 @@ function renderUsage(rows) {
     : "no model-calling envelopes yet — usage split appears once agent turns report tokens";
   const num = (v) => (v == null ? '<span class="faint">n/a</span>' : esc(Number(v).toLocaleString("en-US")));
   tb.innerHTML = rows.map((u) => {
-    const fresh = u.input != null && u.cacheRead != null ? Math.max(0, u.input - u.cacheRead) : null;
+    // Server-computed: provider usage reports cache tokens disjoint from input,
+    // so the fresh count is `input` itself (never input - cacheRead).
+    const fresh = u.freshInput !== undefined ? u.freshInput : u.input;
     const cost =
       u.costUsd == null
         ? '<span class="faint">n/a</span>'
@@ -349,7 +407,7 @@ function renderSources(st) {
 function render(st) {
   lastData = st;
   $("generated").textContent = "snapshot " + utcFull(st.generatedAt) + " (" + rel(st.generatedAt) + " ago)";
-  renderHeadline(st.headline);
+  renderHeadline(st);
   renderGrid(st.grid);
   renderFeed(st.feed);
   renderBurnDown(st.burnDown);
@@ -357,21 +415,37 @@ function render(st) {
   renderCommits(st.commits);
   renderKills(st.killTimeline);
   renderUsage(st.agentUsage ?? []);
+  renderDegraded(st.degradedRounds ?? []);
   renderSources(st);
 }
 
+// One request in flight at a time (chained timeout, not setInterval), and a
+// snapshot older than the one already rendered is dropped, so a slow response
+// can never overlap or overwrite a newer one.
+let inFlight = false;
+let newestGeneratedMs = 0;
+
 async function poll() {
+  if (inFlight) return;
+  inFlight = true;
   try {
     const res = await fetch("/api/state", { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    render(await res.json());
+    const st = await res.json();
+    const generatedMs = Date.parse(st.generatedAt);
+    if (isNaN(generatedMs) || generatedMs >= newestGeneratedMs) {
+      if (!isNaN(generatedMs)) newestGeneratedMs = generatedMs;
+      render(st);
+    }
   } catch (e) {
     chip("chip-api", false, String(e));
     $("pollinfo").textContent = "";
+  } finally {
+    inFlight = false;
+    setTimeout(poll, POLL_MS);
   }
 }
 poll();
-setInterval(poll, POLL_MS);
 </script>
 </body>
 </html>
