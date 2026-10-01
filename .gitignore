@@ -18,18 +18,25 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# dex local dev state
+# dex local dev state (blob caches: .dex-cache, .dex-cache-watch, .dex-cache-dashboard)
 .dex/
-.dex-cache/
+.dex-cache*/
 
 # Chaos-kill evidence sidecars written at run time
 kill-events*.json
 kill-events*.jsonl
+# ...but recorded sidecars used as test fixtures are source and stay tracked
+!src/metrics/fixtures/kill-events-*.json
+!src/metrics/fixtures/kill-events-*.jsonl
 
 # Logs and OS noise
 *.log
 .DS_Store
 
-# OMC/ZCode local tool state
-.omo/
+# Local agent tool state (OMC, ZCode, Playwright MCP, Claude Code worktrees).
+# Only project-scoped OMC skills are meant to be committed.
+.omc/*
+!.omc/skills/
+.playwright-mcp/
+.claude/worktrees/
 .zcodeignore
