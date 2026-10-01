@@ -378,7 +378,7 @@ function parseFenceOpen(line: string): { fence: string; lang: string } | null {
 function closesFence(line: string, fence: string): boolean {
   const m = FENCE_CLOSE_RE.exec(line);
   const run = m?.[1];
-  return run !== undefined && run.startsWith(fence[0] ?? "`") && run.length >= fence.length;
+  return run?.startsWith(fence[0] ?? "`") === true && run.length >= fence.length;
 }
 
 /**
@@ -502,9 +502,9 @@ export function extractCodeFence(text: string, hint = ""): string {
     if (loose?.[1] === undefined || loose[1].trim().length === 0) {
       throw new Error("no fenced code block in reply");
     }
-    return loose[1].replace(/\s+$/, "") + "\n";
+    return `${loose[1].replace(/\s+$/, "")}\n`;
   }
-  return pick.body.replace(/\s+$/, "") + "\n";
+  return `${pick.body.replace(/\s+$/, "")}\n`;
 }
 
 /**
@@ -541,7 +541,7 @@ function extractMarkdownFence(text: string): string {
   if (endsInsideFence(body)) {
     throw new Error("fenced markdown block ends inside a nested code fence (reply truncated?)");
   }
-  return body.replace(/\s+$/, "") + "\n";
+  return `${body.replace(/\s+$/, "")}\n`;
 }
 
 /** True when `text` leaves a fenced block open at its end. */
@@ -884,7 +884,7 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
 
   // One-line `/** @var T */ private $name;` property pairs (Money fixture style).
   for (const m of phpSource.matchAll(
-    /\/\*\*\s*@var\s+([\w\\[\|]+)\s*\*\/\s*\n\s*(?:public|protected|private)\s+\$(\w+)/g,
+    /\/\*\*\s*@var\s+([\w\\[|]+)\s*\*\/\s*\n\s*(?:public|protected|private)\s+\$(\w+)/g,
   )) {
     const type = m[1];
     const name = m[2];
@@ -934,7 +934,7 @@ export function harvestPhpSymbolsReport(fileName: string, phpSource: string, cap
       }
     }
     // @var-annotated properties: the @var line itself names the symbol.
-    const varAnnot = /@var\s+([\w\\\[\|]+)\s*$/.exec(line.trim());
+    const varAnnot = /@var\s+([\w\\[|]+)\s*$/.exec(line.trim());
     if (varAnnot !== null) {
       const next = lines[i + 1] ?? "";
       const propDecl = /(?:public|protected|private)\s+\$(\w+)/.exec(next);

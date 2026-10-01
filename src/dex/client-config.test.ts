@@ -100,7 +100,11 @@ describe("releaseOnFailure", () => {
 
   test("a successful start runs no cleanup and returns the value", async () => {
     let cleaned = false;
-    const value = await releaseOnFailure(async () => 42, [() => void (cleaned = true)]);
+    const value = await releaseOnFailure(async () => 42, [
+      () => {
+        cleaned = true;
+      },
+    ]);
     expect(value).toBe(42);
     expect(cleaned).toBe(false);
   });

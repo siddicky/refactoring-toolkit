@@ -15,7 +15,14 @@ import {
   Worker,
   openBlobCache,
 } from "@superdurable/dex";
-import type { BlobCache, Flow } from "@superdurable/dex";
+import type { BlobCache } from "@superdurable/dex";
+
+/**
+ * Any flow, whatever its start input. `Flow<I>` is invariant in `I`, so a list
+ * of different flows has no common `Flow<I>`; this is dex's own element type
+ * for a Registry's flows (`Registry["flows"]`).
+ */
+export type AnyFlow = Registry["flows"][number];
 
 const DEFAULT_DEX_SERVER_ADDRESS = "127.0.0.1:8801";
 
@@ -73,7 +80,7 @@ export interface DexRuntime {
 
 /** Registry + native blob cache + Client, built the same way for runner and worker. */
 function buildClientParts(
-  flows: readonly Flow<any>[],
+  flows: readonly AnyFlow[],
   config: DexConfig,
 ): { registry: Registry; cache: BlobCache; client: Client } {
   const registry = new Registry([...flows]);
@@ -95,7 +102,7 @@ function buildClientParts(
 
 /** Opens a Client over a Registry of flows with a native blob cache. */
 export async function openDexClient(
-  flows: readonly Flow<any>[],
+  flows: readonly AnyFlow[],
   config: DexConfig,
 ): Promise<DexRuntime> {
   const { registry, cache, client } = buildClientParts(flows, config);
@@ -149,7 +156,7 @@ export async function releaseOnFailure<T>(
 
 /** Starts a Worker serving the given flows against the dex server. */
 export async function startDexWorker(
-  flows: readonly Flow<any>[],
+  flows: readonly AnyFlow[],
   config: DexConfig,
 ): Promise<DexWorkerHandle> {
   const { registry, cache, client } = buildClientParts(flows, config);

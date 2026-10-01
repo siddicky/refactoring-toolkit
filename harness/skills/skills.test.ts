@@ -28,14 +28,14 @@ describe("skills", () => {
   });
 
   test("PHP→TS type map covers the core scalars", () => {
-    expect(PHP_TO_TS_TYPE_MAP["string"]).toBe("string");
-    expect(PHP_TO_TS_TYPE_MAP["int"]).toBe("number");
-    expect(PHP_TO_TS_TYPE_MAP["float"]).toBe("number");
-    expect(PHP_TO_TS_TYPE_MAP["bool"]).toBe("boolean");
-    expect(PHP_TO_TS_TYPE_MAP["array"]).toBe("unknown[]");
-    expect(PHP_TO_TS_TYPE_MAP["mixed"]).toBe("unknown");
+    expect(PHP_TO_TS_TYPE_MAP.string).toBe("string");
+    expect(PHP_TO_TS_TYPE_MAP.int).toBe("number");
+    expect(PHP_TO_TS_TYPE_MAP.float).toBe("number");
+    expect(PHP_TO_TS_TYPE_MAP.bool).toBe("boolean");
+    expect(PHP_TO_TS_TYPE_MAP.array).toBe("unknown[]");
+    expect(PHP_TO_TS_TYPE_MAP.mixed).toBe("unknown");
     // Numeric PHP scalars must not map to string-ish TS types.
-    expect(PHP_TO_TS_TYPE_MAP["int"]).not.toBe("string");
-    expect(PHP_TO_TS_TYPE_MAP["float"]).not.toBe("string");
+    expect(PHP_TO_TS_TYPE_MAP.int).not.toBe("string");
+    expect(PHP_TO_TS_TYPE_MAP.float).not.toBe("string");
   });
 });

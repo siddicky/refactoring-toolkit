@@ -202,7 +202,7 @@ export function buildTscQueueState(
 
   const byCodeGroups: TscCodeGroup[] = [...byCode.entries()].map(
     ([code, files]) => ({
-      code: code!,
+      code,
       count: countWhere(errors, (e) => e.code === code),
       files: [...files].sort(compareStrings),
     }),
@@ -211,7 +211,7 @@ export function buildTscQueueState(
 
   const byFileGroups: TscFileGroup[] = [...byFile.entries()].map(
     ([file, codes]) => ({
-      file: file!,
+      file,
       count: countWhere(errors, (e) => e.file === file),
       codes: [...codes].sort(compareStrings),
     }),

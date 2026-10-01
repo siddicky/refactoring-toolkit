@@ -266,6 +266,10 @@ describe("C14: verdict schema vs prompt vs gate", () => {
 // C13 — reply extractors: nested fences, truncated specs, brace-y prose
 // ---------------------------------------------------------------------------
 
+// Markdown code fences, named so the spec fixtures below stay readable.
+const FENCE = "```";
+const LONG_FENCE = "````";
+
 const SPEC_HEAD = [
   "# Porting spec",
   "",
@@ -287,7 +291,7 @@ function specReply(nestedLang: string, outerFence = "```"): string {
     "",
     `${outerFence}markdown`,
     SPEC_HEAD,
-    "```" + nestedLang,
+    `${FENCE}${nestedLang}`,
     nestedLang === "php" ? "<?php echo round($a + $b);" : "const total: number = a + b;",
     "```",
     SPEC_TAIL,
@@ -297,14 +301,16 @@ function specReply(nestedLang: string, outerFence = "```"): string {
   ].join("\n");
 }
 
-const FULL_SPEC = (nestedLang: string): string =>
-  [
+const FULL_SPEC = (nestedLang: string): string => {
+  const body = [
     SPEC_HEAD,
-    "```" + nestedLang,
+    `${FENCE}${nestedLang}`,
     nestedLang === "php" ? "<?php echo round($a + $b);" : "const total: number = a + b;",
-    "```",
+    FENCE,
     SPEC_TAIL,
-  ].join("\n") + "\n";
+  ].join("\n");
+  return `${body}\n`;
+};
 
 describe("C13: extractSpecMap returns the OUTERMOST markdown block", () => {
   test("a nested ```typescript example no longer wins over the ```markdown spec", () => {
@@ -417,9 +423,9 @@ describe("C13: prep turns ask for a long outer fence and fence embedded markdown
       symbolTableText: "t",
       stubPrepBaseline: withFences,
     });
-    expect(gen).toContain("````markdown\n" + withFences + "\n````");
+    expect(gen).toContain(`${LONG_FENCE}markdown\n${withFences}\n${LONG_FENCE}`);
     const rev = composePrepReviseTurn({ specMapText: withFences, findings: [] });
-    expect(rev).toContain("````markdown\n" + withFences + "\n````");
+    expect(rev).toContain(`${LONG_FENCE}markdown\n${withFences}\n${LONG_FENCE}`);
   });
 });
 
@@ -603,7 +609,7 @@ describe("C75: user contract by value in implement/fix turns", () => {
     expect(turn).toContain("follow the contract");
     expect(turn.indexOf("## User contract")).toBeLessThan(turn.indexOf("## Prep artifact"));
     // the contract itself has a ``` fence: it is wrapped in a longer one
-    expect(turn).toContain("````markdown\n" + USER_CONTRACT + "\n````");
+    expect(turn).toContain(`${LONG_FENCE}markdown\n${USER_CONTRACT}\n${LONG_FENCE}`);
   });
 
   test("the stale '(stub, by value)' label is gone: the prep artifact is the generated, reviewed spec map", () => {

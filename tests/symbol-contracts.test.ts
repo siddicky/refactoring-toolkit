@@ -341,7 +341,7 @@ describe("C18: one offline factory, and the lane banner names the symbol table",
 
   test("the worker prints the summary under its JUDGMENT LANE label", () => {
     const src = readFileSync(join(REPO_ROOT, "scripts", "run-demo.ts"), "utf8");
-    expect(src).toContain("JUDGMENT LANE: ${judgmentLaneSummary(judgment.kind)}");
+    expect(src).toContain(`JUDGMENT LANE: \${judgmentLaneSummary(judgment.kind)}`);
   });
 });
 

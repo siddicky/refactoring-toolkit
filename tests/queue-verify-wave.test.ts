@@ -52,7 +52,7 @@ import {
   type WaveDispatchOutput,
   type WaveDispatchRecord,
 } from "../flows/port-project.js";
-import { envelopeEvents } from "../flows/steps/envelope.js";
+import { envelopeEvents, envelopeStepIdentityOf } from "../flows/steps/envelope.js";
 import { sessionFenceMap, type AgentSessionClient } from "../src/harness/opencode.js";
 import { git } from "../src/git/exec.js";
 import {
@@ -847,10 +847,10 @@ describe("ChildLeaseStep", () => {
 
     expect(routedTo(decision)).toBe(fileFlow.fence.constructor);
     const fri = routedInput<Record<string, unknown>>(decision);
-    expect(fri["childFlow"]).toBe(true);
-    expect(fri["file"]).toBe("src/a.php");
-    expect(fri["round"]).toBe(2);
-    expect(String(fri["worktreePath"])).toContain(worktreeRoot);
+    expect(fri.childFlow).toBe(true);
+    expect(fri.file).toBe("src/a.php");
+    expect(fri.round).toBe(2);
+    expect(String(fri.worktreePath)).toContain(worktreeRoot);
     expect("queueFixErrors" in fri).toBe(false);
     expect("queueFixVitest" in fri).toBe(false);
 
@@ -867,7 +867,7 @@ describe("ChildLeaseStep", () => {
 
     // Replay (same epoch): the held lease is reused, not re-acquired.
     const replay = await fileFlow.childLease.execute(ctxOver(stores), input);
-    expect(routedInput<{ worktreePath: string }>(replay).worktreePath).toBe(String(fri["worktreePath"]));
+    expect(routedInput<{ worktreePath: string }>(replay).worktreePath).toBe(String(fri.worktreePath));
   }, 60_000);
 });
 
@@ -879,9 +879,9 @@ describe("QueueFix is one step class in both flows (C90)", () => {
   test("port.Project and port.File register the SAME QueueFixStart / QueueFix classes", () => {
     expect(fileFlow.queueFix.constructor).toBe(projectFlow.queueFix.constructor);
     expect(fileFlow.queueFixStart.constructor).toBe(projectFlow.queueFixStart.constructor);
-    // Bracket access: the F1 lint (verification-fix-regressions.test.ts) greps source text for
-    // raw step-type access outside the envelope factory.
-    const stepTypeOf = (step: object): string => (step as { ["getStepType"]: () => string })["getStepType"]();
+    // The envelope registry, not raw step-type access: the F1 lint
+    // (verification-fix-regressions.test.ts) greps source text for that outside the factory.
+    const stepTypeOf = (step: object): string => envelopeStepIdentityOf(step)?.stepType ?? "<not a factory step>";
     expect(stepTypeOf(projectFlow.queueFix)).toBe("PpQueueFix");
     expect(stepTypeOf(projectFlow.queueFixStart)).toBe("PpQueueFixStart");
   });

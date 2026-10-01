@@ -67,7 +67,7 @@ describe("parseGitLog (C63)", () => {
   });
 
   test("skips junk records and short records without crashing", () => {
-    const out = record(["not-a-sha", "x"]) + record([sha1]) + "\n" + RS + record([sha2, "3937985"]);
+    const out = `${record(["not-a-sha", "x"])}${record([sha1])}\n${RS}${record([sha2, "3937985"])}`;
     const commits = parseGitLog(out);
     expect(commits.map((c) => c.sha)).toEqual([sha1, sha2]);
     expect(commits[0]).toMatchObject({ shortSha: sha1.slice(0, 7), author: "", subject: "", opId: null });

@@ -424,7 +424,7 @@ export function envelopeStepIdentityOf(step: object): EnvelopeStepIdentity | und
 }
 
 /** Every step a flow registers, by dex step type, with its recorded identity (undefined when not factory-made). */
-export function registeredSteps(flow: Flow<any>): Map<string, EnvelopeStepIdentity | undefined> {
+export function registeredSteps<I>(flow: Flow<I>): Map<string, EnvelopeStepIdentity | undefined> {
   const steps = new Map<string, EnvelopeStepIdentity | undefined>();
   for (const definition of flow.getSteps()) {
     steps.set(definition.step.getStepType(), envelopeStepIdentityOf(definition.step));

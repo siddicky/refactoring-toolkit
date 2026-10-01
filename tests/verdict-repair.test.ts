@@ -502,7 +502,7 @@ describe("repair paths through runReviewTurn", () => {
     expect(tomb?.attempt).toBe(1);
     // tokens = burned tokens of the discarded attempt(s) (original + repair).
     expect(typeof tomb?.tokens).toBe("object");
-    expect((tomb?.tokens as TokenUsage).input_tokens).toBe(200);
+    expect((tomb?.tokens as TokenUsage | undefined)?.input_tokens).toBe(200);
     expect(out.tokens).toBe(tomb?.tokens ?? null);
   });
 
@@ -704,7 +704,7 @@ describe("attempt-exhaustion tombstones (deterministic ctx.attempt >= maxAttempt
     expect(tomb).not.toBeNull();
     expect(tomb?.reason.startsWith("attempt-exhausted")).toBe(true);
     expect(tomb?.attempt).toBe(REVIEW_STEP_MAX_ATTEMPTS);
-    expect((tomb?.tokens as TokenUsage).input_tokens).toBe(100);
+    expect((tomb?.tokens as TokenUsage | undefined)?.input_tokens).toBe(100);
     expect(out.tokens).toBe(tomb?.tokens ?? null);
   });
 
@@ -761,7 +761,7 @@ describe("attempt-exhaustion tombstones (deterministic ctx.attempt >= maxAttempt
     expect(completed?.stepId).toBe("pp-review-a");
     expect(completed?.outcome).toBe("completed");
     expect(completed?.attempt).toBe(REVIEW_STEP_MAX_ATTEMPTS);
-    expect((completed?.tokens as TokenUsage).input_tokens).toBe(100);
+    expect((completed?.tokens as TokenUsage | undefined)?.input_tokens).toBe(100);
   });
 
   test("REGRESSION (fix-wave diagnosis forwarding): a successful attempt-2 review step's completion envelope carries turn_diagnosis (US-003 successor re-record)", async () => {

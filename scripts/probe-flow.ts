@@ -49,6 +49,7 @@ import {
   operationId,
   type CompletionMarker,
 } from "../src/git/worktree.js";
+import type { AnyFlow } from "../src/dex/client.js";
 import { git } from "../src/git/exec.js";
 import { identityKeyOf } from "../src/file-keys.js";
 
@@ -121,8 +122,8 @@ export function probePersistenceSchema(): {
 
 export type FaultSpec = string | undefined;
 
-let FAULT: FaultSpec = undefined;
-let HARNESS: AgentSessionClient | undefined = undefined;
+let FAULT: FaultSpec;
+let HARNESS: AgentSessionClient | undefined;
 
 export function configureProbe(harness: AgentSessionClient, fault: FaultSpec): void {
   HARNESS = harness;
@@ -406,7 +407,7 @@ export class PortRoundFlow implements Flow<RoundInput> {
   }
 }
 
-export function probeFlows(): Flow<any>[] {
+export function probeFlows(): AnyFlow[] {
   return [new HelloFlow(), new LongStepFlow(), new PortRoundFlow()];
 }
 

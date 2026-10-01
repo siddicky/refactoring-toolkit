@@ -14,7 +14,7 @@ import {
   type DispatchHistory,
 } from "./dispatch-anchor.js";
 import { renderReport } from "./render.js";
-import { type EnvelopeEvent } from "./types.js";
+import type { EnvelopeEvent } from "./types.js";
 import historyARaw from "./fixtures/dex-history-run-a.json" with { type: "json" };
 import runAEnvelopesRaw from "./fixtures/event-stream-run-a.json" with { type: "json" };
 

@@ -30,6 +30,7 @@ import {
   type ChildFileResult,
   type FileRoundInput,
 } from "../flows/port-project.js";
+import { envelopeStepIdentityOf } from "../flows/steps/envelope.js";
 import { classifyDispatchStepType, specForStepType } from "../src/metrics/dispatch-anchor.js";
 import { git } from "../src/git/exec.js";
 import { InMemoryLeaseStore, WorktreePool, operationId, type CompletionMarker, type LeaseRecord } from "../src/git/worktree.js";
@@ -48,10 +49,9 @@ function nextStep(decision: StepDecision): unknown {
   return decision.movements[0]?.step;
 }
 
-const stepTypeOf = (step: object): string =>
-  // Bracket access: raw step-type access is sanctioned only inside the
-  // envelope factory and the F1 lint matches comments too.
-  (step as { ["getStepType"]: () => string })["getStepType"]();
+// The dex step type of a factory-made step, read through the envelope registry (raw
+// step-type access is sanctioned only inside the envelope factory: the F1 lint).
+const stepTypeOf = (step: object): string => envelopeStepIdentityOf(step)?.stepType ?? "<not a factory step>";
 
 const tmpRoots: string[] = [];
 

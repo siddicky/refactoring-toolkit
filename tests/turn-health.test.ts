@@ -373,7 +373,7 @@ describe("US-003 fixture directory (checked-in raw SDK shapes)", () => {
     const manifest = JSON.parse(
       readFileSync(join(FIXTURE_DIR, "manifest.json"), "utf8"),
     );
-    const listed = manifest.cases.map((c: { id: string }) => c.id + ".json");
+    const listed = manifest.cases.map((c: { id: string }) => `${c.id}.json`);
     expect(listed.sort()).toEqual(files);
   });
 

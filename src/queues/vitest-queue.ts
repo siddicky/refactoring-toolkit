@@ -214,7 +214,9 @@ function parseSummaryLine(line: string, label: RegExp): VitestSummaryCounts | nu
 // Parsing
 // ---------------------------------------------------------------------------
 
-const ANSI_ESCAPE = /\x1b\[[0-9;]*m/g;
+// Built from the ESC character (not a regex literal with \x1b) so the control character is explicit.
+const ESC = String.fromCharCode(0x1b);
+const ANSI_ESCAPE = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 
 /**
  * Record starts: vitest's default reporter `FAIL  path > suite > test` lines

@@ -71,8 +71,12 @@ function loadPage(options: { fetch?: (url: string, init?: unknown) => Promise<un
         title: "",
         tBodies: [{ innerHTML: "" }],
         classList: {
-          add: (...names) => names.forEach((n) => classes.add(n)),
-          remove: (...names) => names.forEach((n) => classes.delete(n)),
+          add: (...names) => {
+            for (const n of names) classes.add(n);
+          },
+          remove: (...names) => {
+            for (const n of names) classes.delete(n);
+          },
           toggle: (name, force) => {
             const on = force ?? !classes.has(name);
             if (on) classes.add(name);

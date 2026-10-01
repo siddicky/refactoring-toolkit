@@ -36,6 +36,7 @@ import {
   dexConfigFromEnv,
   openDexClient,
   startDexWorker,
+  type AnyFlow,
 } from "../src/dex/client.js";
 import { waitForFlowTerminal } from "../src/dex/wait-for-terminal.js";
 import {
@@ -105,7 +106,6 @@ import {
   gateLine,
   GATE_QUERY_TIMEOUT_MS,
 } from "./dispatch-gate.js";
-import type { Flow } from "@superdurable/dex";
 
 // ---------------------------------------------------------------------------
 // Harness selection — the stub double is explicit and labeled, never silent.
@@ -205,7 +205,7 @@ async function gitSelftest(): Promise<number> {
   );
 
   // Crash-window replay: a redo produces the SAME dedup decision.
-  await writeFile(join(lease.worktreePath, "src", "a.php"), contentV1 + "// redo\n");
+  await writeFile(join(lease.worktreePath, "src", "a.php"), `${contentV1}// redo\n`);
   const keyedAgain = await findCommitByOpId(root, opId);
   check(
     "0d: crash-window replay finds the same keyed commit (no duplicate)",
@@ -376,7 +376,7 @@ async function startRound(
     promptText: `Port ${file} round ${round} (probe).`,
     writtenContent: `<?php\n// ported content for ${file} round ${round} epoch ${epoch}\n`,
   };
-  const flows: Flow<any>[] = probeFlows();
+  const flows: AnyFlow[] = probeFlows();
   const runtime = await openDexClient(flows, config);
   try {
     const flow = flows.find((f) => f.getFlowType() === "probe.PortRound");
@@ -421,7 +421,7 @@ async function runDispatchGate(gateFlowId: string | undefined): Promise<number> 
 // Port-project (Phase 2 trial gate)
 // ---------------------------------------------------------------------------
 
-function portFlows(harness: AgentSessionClient): Flow<any>[] {
+function portFlows(harness: AgentSessionClient): AnyFlow[] {
   configurePortHarness(harness);
   // v1.1: the per-file child flow MUST be registered on every worker that
   // serves port.Project — the parallel wave join starts port.File SubFlows.
@@ -1045,7 +1045,7 @@ async function startDemo(options: DemoOptions): Promise<number> {
     await runDispatchGate(options.gateFlowId);
   }
 
-  const flows: Flow<any>[] = [new PortProjectFlow()];
+  const flows: AnyFlow[] = [new PortProjectFlow()];
   const runtime = await openDexClient(flows, config);
   try {
     const flow = flows[0];

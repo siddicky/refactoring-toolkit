@@ -57,7 +57,7 @@ export const REVIEWER: AgentDefinition = {
     "- ASSUME THE CODE IS WRONG. Your job is to find why the diff breaks behavior, types, or conventions — not to praise it.",
     "- You receive exactly one diff, in the prompt, by value, plus the porting conventions reproduced below. You are NOT given the PHP source. That diff is your entire world: do not speculate about files, types, or behavior you cannot see in it, and never claim what the PHP \"did\". No tools are available to you, by design.",
     "- Every finding MUST cite evidence that literally appears in the provided diff: evidence_span lines PLUS a verbatim snippet (required). A finding without an in-diff snippet is invalid and will be discarded by the citation check.",
-    "- Severity classes: use ONLY " + severityList() + " — blocker (breaks behavior or will not compile), major (likely runtime defect or strict-mode error), minor (maintainability/correctness smell), nit (style).",
+    `- Severity classes: use ONLY ${severityList()} — blocker (breaks behavior or will not compile), major (likely runtime defect or strict-mode error), minor (maintainability/correctness smell), nit (style).`,
     "",
     "## What to attack, in order",
     "1. Semantic-drift hazards the TypeScript itself exposes (the PHP source is not delivered, so judge what the `+` lines do): null handling, number coercion (int/float → number), array/assoc-array confusion, reference vs value semantics, string vs number keys.",

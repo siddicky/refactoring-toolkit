@@ -157,7 +157,7 @@ export function parseKillEvents(
       const doc = asRecord(JSON.parse(trimmed));
       if (doc !== null && Array.isArray(doc.events)) {
         const docRunId = typeof doc.run_id === "string" && doc.run_id !== "" ? doc.run_id : null;
-        doc.events.forEach((e, i) => consume(e, i + 1, docRunId));
+        for (const [i, e] of doc.events.entries()) consume(e, i + 1, docRunId);
         parsedWhole = true;
       } else if (doc !== null) {
         consume(doc, 1, null);

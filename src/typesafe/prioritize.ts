@@ -83,7 +83,7 @@ export async function jevPrioritize(
     pByFinding.set(finding.finding_id, answer.noul);
   }
   const inputOrder = new Map<string, number>();
-  findings.forEach((finding, index) => inputOrder.set(finding.finding_id, index));
+  for (const [index, finding] of findings.entries()) inputOrder.set(finding.finding_id, index);
 
   return [...findings].sort((a, b) => {
     const pa = pByFinding.get(a.finding_id) ?? 0;

@@ -1831,7 +1831,7 @@ function renderStream() {
 
   // update steppers
   for (let i = 0; i < 5; i++) {
-    const el = document.getElementById("st-" + i);
+    const el = document.getElementById(`st-${i}`);
     if (!el) continue;
     el.setAttribute("aria-pressed", String(i === curStep));
     if (i <= curStep) {
@@ -1987,7 +1987,6 @@ const DW_DEFECT_LINES = [
 
 const DW_LANE_TOTALS = [11, 7, 4, 3, 2, 1];
 const DW_STAGES = ["#fbbf24", "#a78bfa", "#4ade80"];
-const DW_T0 = 1778053205000;
 
 function setupDynamicWorkflow() {
   const root = document.getElementById("dynamic-workflow");
@@ -2059,11 +2058,11 @@ function setupDynamicWorkflow() {
     const tag = document.createElement("span");
     tag.style.fontWeight = "700";
     tag.style.color = fixed ? "var(--green)" : "#f87171";
-    tag.textContent = fixed ? "✓ " + code : "✕ " + code;
+    tag.textContent = fixed ? `✓ ${code}` : `✕ ${code}`;
 
     const text = document.createElement("span");
     text.style.color = fixed ? "#4b5563" : "var(--steel)";
-    text.textContent = ": " + msg;
+    text.textContent = `: ${msg}`;
 
     div.appendChild(tag);
     div.appendChild(text);
@@ -2080,7 +2079,7 @@ function setupDynamicWorkflow() {
   function syncLane(l) {
     if (l >= DW_LANE_TOTALS.length) return;
     const pct = Math.min(100, (laneCurrent[l] / DW_LANE_TOTALS[l] * 100)).toFixed(0);
-    fills[l].style.width = pct + "%";
+    fills[l].style.width = `${pct}%`;
     nums[l].textContent = `${laneCurrent[l]}/${DW_LANE_TOTALS[l]} fs`;
   }
 
@@ -2195,7 +2194,7 @@ function setupDynamicWorkflow() {
 
       logEls[0].textContent = logEls[1].textContent;
       logEls[1].textContent = logEls[2].textContent;
-      logEls[2].textContent = "· " + logMsg;
+      logEls[2].textContent = `· ${logMsg}`;
 
       inflight--;
       if (batchIndex >= DW_EVENTS.length && inflight === 0) {

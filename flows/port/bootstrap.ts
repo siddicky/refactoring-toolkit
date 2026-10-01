@@ -76,26 +76,25 @@ export function tsconfigIncludeFromSourceMap(
   return [...include].sort();
 }
 
+/** A generated JSON file: two-space indent, trailing newline. */
+function jsonFileText(value: unknown): string {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
 /** The toolkit-owned scaffold tsconfig (single builder: bootstrap + verify fallback). */
 export function scaffoldTsconfigText(include: readonly string[] = DEFAULT_TSCONFIG_INCLUDE): string {
-  return (
-    JSON.stringify(
-      {
-        compilerOptions: {
-          strict: true,
-          target: "ES2022",
-          module: "ESNext",
-          moduleResolution: "Bundler",
-          noEmit: true,
-          skipLibCheck: true,
-          types: [],
-        },
-        include,
-      },
-      null,
-      2,
-    ) + "\n"
-  );
+  return jsonFileText({
+    compilerOptions: {
+      strict: true,
+      target: "ES2022",
+      module: "ESNext",
+      moduleResolution: "Bundler",
+      noEmit: true,
+      skipLibCheck: true,
+      types: [],
+    },
+    include,
+  });
 }
 
 /** What the bootstrap writes when no source map adds directories to the include (pinned by tests/mirror-drift.test.ts). */
@@ -118,18 +117,13 @@ export function bootstrapVitestConfig(): string {
 
 const BOOTSTRAP_VITEST_CONFIG = bootstrapVitestConfig();
 
-const BOOTSTRAP_PACKAGE_JSON =
-  JSON.stringify(
-    {
-      name: "ported-project",
-      private: true,
-      type: "module",
-      scripts: { test: "vitest run" },
-      devDependencies: { vitest: BOOTSTRAP_VITEST_PIN },
-    },
-    null,
-    2,
-  ) + "\n";
+const BOOTSTRAP_PACKAGE_JSON = jsonFileText({
+  name: "ported-project",
+  private: true,
+  type: "module",
+  scripts: { test: "vitest run" },
+  devDependencies: { vitest: BOOTSTRAP_VITEST_PIN },
+});
 
 /** US-010 pure core: decide the bootstrap work from an inspection. */
 export function bootstrapPlan(insp: BootstrapInspection): BootstrapPlan {

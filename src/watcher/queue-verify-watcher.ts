@@ -150,7 +150,7 @@ export interface QueueVerifyWatcherOptions {
    * outcome "no-op" instead of a successful kill (audit C71). Resolving void
    * means the kill happened.
    */
-  fire: (trigger: { via: "stream" | "poll"; atUtc: string }) => Promise<FireResult | void>;
+  fire: (trigger: { via: "stream" | "poll"; atUtc: string }) => Promise<FireResult> | Promise<void>;
   /**
    * Flow status probe. THROW on a query failure (the watcher logs it,
    * rate-limited, and treats the status as "unknown"); "unknown" never

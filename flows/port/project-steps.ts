@@ -453,13 +453,12 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
       tscRun: tscOutcome.accounting,
       ...(vitestTriage !== undefined ? { vitestTriage } : {}),
     });
+    const nextFix = fixable[0];
     ppQueue.set(ctx, "queue", {
       ...queue,
       blocked,
       current:
-        fixable.length > 0
-          ? { file: fixable[0]!.file, round: fixable[0]!.fromRound + 1, epoch: input.epoch }
-          : null,
+        nextFix !== undefined ? { file: nextFix.file, round: nextFix.fromRound + 1, epoch: input.epoch } : null,
     });
 
     // Remaining fixable files stay in fixQueue (release → dispatch →
@@ -643,8 +642,7 @@ export const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepC
     // must already exist (plan's no-op reconcile row).
     const prep = ppPrep.get(ctx, "prep");
     const done = [...queue.done];
-    for (let i = 0; i < wave.entries.length; i++) {
-      const entry = wave.entries[i]!;
+    for (const [i, entry] of wave.entries.entries()) {
       const round = waveEntryRound(wave, entry);
       const result = SubFlow.getConditionResults(ctx, i);
       if (!result.isTerminal || result.errorType !== undefined) {

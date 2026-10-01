@@ -94,7 +94,7 @@ function deferredReader(): {
     return entry;
   };
   const read: EnvelopeStreamReader = (flowId, _resumeToken, timeoutMs) => {
-    (timeouts[flowId] ??= []).push(timeoutMs);
+    timeouts[flowId] = [...(timeouts[flowId] ?? []), timeoutMs];
     return new Promise((resolve, reject) => {
       pending.set(flowId, [...(pending.get(flowId) ?? []), { resolve, reject }]);
     });

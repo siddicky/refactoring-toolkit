@@ -164,7 +164,7 @@ export function gitQueries(gitBin = "git"): GitQueries {
             "--all",
             `--max-count=${limit}`,
             "--date=iso-strict",
-            "--pretty=%H" + LOG_SEP + "%h" + LOG_SEP + "%an" + LOG_SEP + "%aI" + LOG_SEP + "%s" + LOG_SEP + "%D" + LOG_SEP + "%b" + LOG_REC,
+            `--pretty=%H${LOG_SEP}%h${LOG_SEP}%an${LOG_SEP}%aI${LOG_SEP}%s${LOG_SEP}%D${LOG_SEP}%b${LOG_REC}`,
           ],
           10_000,
         );
