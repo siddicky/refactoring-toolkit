@@ -1,14 +1,18 @@
 /**
- * watch-queue-verify command-line parsing and exit codes (audit C34).
+ * watch-queue-verify command line: its option table, exit-code table and the
+ * parse adapter (audit C34, absorbed into the shared layer by C69).
  *
- * The script's old parsing had three defects: `parseInt("abc")` produced NaN
- * (`--deadline-minutes abc` made the watcher exit "timeout" immediately after
- * arming), `argValue` happily took the NEXT FLAG as a value, and the usage
- * error shared exit code 2 with "30-minute bound elapsed" while any fatal
- * throw shared exit code 1 with "flow terminal before trigger". Parsing is now
- * strict and pure (importable by tests; the script itself runs on import),
- * and the exit codes are disjoint.
+ * The scanner that used to live here (`parseFlagValues`) is gone: parsing,
+ * validation and usage text come from src/cli/args.ts, and chaos-kill uses the
+ * same layer. What stays here is what is specific to the watcher: which
+ * options it takes, and the exit codes, which are disjoint (C34: the usage
+ * error used to share 2 with "30-minute bound elapsed", and any fatal throw
+ * shared 1 with "flow terminal before trigger"). The script itself runs on
+ * import, so its table lives here where tests can import it.
  */
+
+import { type CliParse, CLI_EXIT, defineCli, exitCodesNote, parseOptions, usageText } from "../cli/args.js";
+import { DEFAULT_KILL_EVENTS_PATH } from "../metrics/kill-events.js";
 
 /** Exit codes of scripts/watch-queue-verify.ts — every outcome has its own. */
 export const WATCHER_EXIT = {
@@ -23,55 +27,69 @@ export const WATCHER_EXIT = {
   /** The kill fired but a target survived SIGKILL (the experiment is not valid). */
   survivor: 4,
   /** Usage error (sysexits EX_USAGE). */
-  usage: 64,
+  usage: CLI_EXIT.usage,
   /** Fatal internal error (sysexits EX_SOFTWARE). */
-  fatal: 70,
+  fatal: CLI_EXIT.fatal,
 } as const;
 
-export type ParsedFlagValues =
-  | { ok: true; values: Map<string, string> }
-  | { ok: false; error: string };
+export const WATCHER_CLI = defineCli({
+  name: "watch-queue-verify",
+  summary:
+    "Watches a port flow for the pp-queue-verify start and fires the chaos kill exactly once (stream subscription, dexcli poll as fallback).",
+  options: {
+    flowId: { kind: "string", metavar: "id", required: true, description: "Dex flow id to watch" },
+    runId: {
+      kind: "string",
+      metavar: "label",
+      default: "watch-queue-verify",
+      description: "run_id label written to the kill sidecar",
+    },
+    events: {
+      kind: "string",
+      metavar: "sidecar.jsonl",
+      default: DEFAULT_KILL_EVENTS_PATH,
+      description: "kill-event sidecar path",
+    },
+    flowRunId: {
+      kind: "string",
+      metavar: "dexRunId",
+      description: "Dex run id for the sidecar's flow_run_id (default: read from `dexcli flow summary`)",
+    },
+    deadlineMinutes: {
+      kind: "number",
+      greaterThan: 0,
+      default: 30,
+      metavar: "n",
+      description: "whole-watch bound in minutes; fractions allowed",
+    },
+    pollSeconds: {
+      kind: "int",
+      min: 1,
+      default: 60,
+      description: "poll-fallback cadence in seconds (the SDK takes whole seconds)",
+    },
+    catchUpSeconds: {
+      kind: "int",
+      min: 1,
+      default: 1,
+      description: "read budget after the first event in seconds (0 would mean the 60 s server default)",
+    },
+  },
+  notes: [
+    exitCodesNote(WATCHER_EXIT, {
+      fired: "kill fired",
+      terminal: "flow terminal before the trigger",
+      timeout: "bound elapsed without a trigger",
+      noop: "trigger seen but nothing was killed",
+      survivor: "a target survived SIGKILL",
+      usage: "usage error",
+      fatal: "fatal error",
+    }),
+  ],
+});
 
-/**
- * Strict `--flag value` / `--flag=value` scan shared by the watcher and
- * chaos-kill CLIs. Unknown flags, stray positionals, a flag without a value,
- * an EMPTY value and a repeated flag are errors (a repeat would silently drop
- * the earlier value, e.g. shrink a PID list); a SPACE-separated value may not
- * itself start with `--` (so a forgotten value cannot swallow the next flag) —
- * write `--flag=--value` for a value that legitimately starts with `--`.
- */
-export function parseFlagValues(
-  argv: readonly string[],
-  knownFlags: readonly string[],
-): ParsedFlagValues {
-  const values = new Map<string, string>();
-  for (let i = 0; i < argv.length; i++) {
-    const token = argv[i] as string;
-    const eq = token.startsWith("--") ? token.indexOf("=") : -1;
-    const flag = eq > 0 ? token.slice(0, eq) : token;
-    if (!knownFlags.includes(flag)) {
-      return { ok: false, error: `unknown argument: ${flag}` };
-    }
-    if (values.has(flag)) {
-      return { ok: false, error: `${flag} was given more than once` };
-    }
-    let value: string | undefined;
-    if (eq > 0) {
-      value = token.slice(eq + 1);
-    } else {
-      value = argv[i + 1];
-      if (value === undefined || value.startsWith("--")) {
-        return { ok: false, error: `${flag} requires a value` };
-      }
-      i++;
-    }
-    if (value.trim() === "") {
-      return { ok: false, error: `${flag} requires a non-empty value` };
-    }
-    values.set(flag, value);
-  }
-  return { ok: true, values };
-}
+/** The generated usage text (synopsis, option lines, exit codes). */
+export const WATCHER_USAGE = usageText(WATCHER_CLI);
 
 export interface WatcherCliOptions {
   flowId: string;
@@ -89,78 +107,23 @@ export interface WatcherCliOptions {
   catchUpSeconds: number;
 }
 
-export type ParsedWatcherArgs =
-  | { ok: true; options: WatcherCliOptions }
-  | { ok: false; error: string };
-
-export const WATCHER_USAGE =
-  "usage: watch-queue-verify --flow-id <id> [--run-id <label>] [--events <sidecar.jsonl>] [--flow-run-id <dexRunId>] [--deadline-minutes <n>] [--poll-seconds <n>] [--catch-up-seconds <n>]";
-
-const KNOWN_FLAGS = [
-  "--flow-id",
-  "--run-id",
-  "--events",
-  "--flow-run-id",
-  "--deadline-minutes",
-  "--poll-seconds",
-  "--catch-up-seconds",
-] as const;
-
-export interface WatcherArgDefaults {
-  /** Default sidecar path (chaos-kill's DEFAULT_KILL_EVENTS_PATH). */
-  eventsPath: string;
-}
-
-function positiveInteger(flag: string, raw: string): number | string {
-  const text = raw.trim();
-  const value = /^\d+$/.test(text) ? Number(text) : Number.NaN;
-  if (!Number.isSafeInteger(value) || value < 1) {
-    return `${flag} must be a whole number >= 1, got ${JSON.stringify(raw)}`;
-  }
-  return value;
-}
+export type ParsedWatcherArgs = CliParse<WatcherCliOptions>;
 
 /** Strict parse of the watcher's argv (without the `bun run script` prefix). */
-export function parseWatcherArgs(
-  argv: readonly string[],
-  defaults: WatcherArgDefaults,
-): ParsedWatcherArgs {
-  const scanned = parseFlagValues(argv, KNOWN_FLAGS);
-  if (!scanned.ok) return scanned;
-  const values = scanned.values;
-
-  const flowId = values.get("--flow-id");
-  if (flowId === undefined || flowId.trim() === "") {
-    return { ok: false, error: "--flow-id is required" };
-  }
-
-  const deadlineRaw = values.get("--deadline-minutes") ?? "30";
-  const deadlineMinutes = /^\d+(\.\d+)?$/.test(deadlineRaw.trim()) ? Number(deadlineRaw.trim()) : Number.NaN;
-  if (!Number.isFinite(deadlineMinutes) || deadlineMinutes <= 0) {
-    return {
-      ok: false,
-      error: `--deadline-minutes must be a number > 0, got ${JSON.stringify(deadlineRaw)}`,
-    };
-  }
-
-  const pollSeconds = positiveInteger("--poll-seconds", values.get("--poll-seconds") ?? "60");
-  if (typeof pollSeconds === "string") return { ok: false, error: pollSeconds };
-  const catchUpSeconds = positiveInteger(
-    "--catch-up-seconds",
-    values.get("--catch-up-seconds") ?? "1",
-  );
-  if (typeof catchUpSeconds === "string") return { ok: false, error: catchUpSeconds };
-
+export function parseWatcherArgs(argv: readonly string[]): ParsedWatcherArgs {
+  const parsed = parseOptions(WATCHER_CLI, argv);
+  if (!parsed.ok) return parsed;
+  const o = parsed.options;
   return {
     ok: true,
     options: {
-      flowId: flowId.trim(),
-      runId: values.get("--run-id") ?? "watch-queue-verify",
-      eventsPath: values.get("--events") ?? defaults.eventsPath,
-      flowRunId: values.get("--flow-run-id"),
-      deadlineMinutes,
-      pollSeconds,
-      catchUpSeconds,
+      flowId: o.flowId.trim(),
+      runId: o.runId,
+      eventsPath: o.events,
+      flowRunId: o.flowRunId,
+      deadlineMinutes: o.deadlineMinutes,
+      pollSeconds: o.pollSeconds,
+      catchUpSeconds: o.catchUpSeconds,
     },
   };
 }

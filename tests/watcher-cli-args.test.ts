@@ -11,16 +11,12 @@ import { describe, expect, test } from "bun:test";
 
 import { join } from "node:path";
 
-import {
-  WATCHER_EXIT,
-  WATCHER_USAGE,
-  parseFlagValues,
-  parseWatcherArgs,
-} from "../src/watcher/cli-args.js";
+import { CLI_EXIT } from "../src/cli/args.js";
+import { DEFAULT_KILL_EVENTS_PATH } from "../src/metrics/kill-events.js";
+import { WATCHER_EXIT, WATCHER_USAGE, parseWatcherArgs } from "../src/watcher/cli-args.js";
 
 const WATCH_SCRIPT = join(import.meta.dir, "..", "scripts", "watch-queue-verify.ts");
-const DEFAULTS = { eventsPath: "metrics/kill-events.jsonl" };
-const parse = (...argv: string[]) => parseWatcherArgs(argv, DEFAULTS);
+const parse = (...argv: string[]) => parseWatcherArgs(argv);
 
 describe("C34(5): parseWatcherArgs validates instead of coercing", () => {
   test("a minimal invocation gets the documented defaults (30 min, 60 s poll, 1 s catch-up)", () => {
@@ -30,7 +26,7 @@ describe("C34(5): parseWatcherArgs validates instead of coercing", () => {
       options: {
         flowId: "cx-5e",
         runId: "watch-queue-verify",
-        eventsPath: "metrics/kill-events.jsonl",
+        eventsPath: DEFAULT_KILL_EVENTS_PATH,
         flowRunId: undefined,
         deadlineMinutes: 30,
         pollSeconds: 60,
@@ -88,6 +84,17 @@ describe("C34(5): parseWatcherArgs validates instead of coercing", () => {
     if (!trailing.ok) expect(trailing.error).toContain("--events requires a value");
   });
 
+  test("the numeric flags follow the same rule: a flag where the value belongs, or no value at all", () => {
+    for (const flag of ["--deadline-minutes", "--poll-seconds", "--catch-up-seconds"]) {
+      const swallowed = parse("--flow-id", "f", flag, "--run-id", "x");
+      expect(swallowed.ok).toBe(false);
+      if (!swallowed.ok) expect(swallowed.error).toContain(`${flag} requires a value`);
+      const trailing = parse("--flow-id", "f", flag);
+      expect(trailing.ok).toBe(false);
+      if (!trailing.ok) expect(trailing.error).toBe(`${flag} requires a value`);
+    }
+  });
+
   test("missing --flow-id, blank --flow-id, unknown flags and stray positionals are rejected", () => {
     expect(parse().ok).toBe(false);
     expect(parse("--flow-id", "  ").ok).toBe(false);
@@ -102,6 +109,8 @@ describe("C34(4): every outcome has its own exit code", () => {
   test("usage (64) and fatal (70) no longer collide with bound-elapsed (2) or terminal (1)", () => {
     const codes = Object.values(WATCHER_EXIT);
     expect(new Set(codes).size).toBe(codes.length); // all distinct
+    expect(WATCHER_EXIT.usage).toBe(CLI_EXIT.usage);
+    expect(WATCHER_EXIT.fatal).toBe(CLI_EXIT.fatal);
     expect(WATCHER_EXIT).toEqual({
       fired: 0,
       terminal: 1,
@@ -113,16 +122,23 @@ describe("C34(4): every outcome has its own exit code", () => {
     });
   });
 
-  test("the usage string names the new flags", () => {
-    for (const flag of ["--flow-id", "--events", "--flow-run-id", "--deadline-minutes", "--poll-seconds", "--catch-up-seconds"]) {
+  test("the usage string is generated from the option table: every flag, its default, and the exit codes", () => {
+    for (const flag of ["--flow-id", "--run-id", "--events", "--flow-run-id", "--deadline-minutes", "--poll-seconds", "--catch-up-seconds"]) {
       expect(WATCHER_USAGE).toContain(flag);
+    }
+    expect(WATCHER_USAGE).toContain("usage: watch-queue-verify --flow-id <id>");
+    expect(WATCHER_USAGE).toContain("default: 30");
+    expect(WATCHER_USAGE).toContain("default: 60");
+    expect(WATCHER_USAGE).toContain(`default: ${DEFAULT_KILL_EVENTS_PATH}`);
+    for (const [name, code] of Object.entries(WATCHER_EXIT)) {
+      expect(WATCHER_USAGE, `exit ${name}`).toContain(`${code} `);
     }
   });
 });
 
 describe("C34(4,5): the script itself exits 64 on a usage error, before arming anything", () => {
   async function runScript(...args: string[]) {
-    const proc = Bun.spawn(["bun", "run", WATCH_SCRIPT, ...args], {
+    const proc = Bun.spawn([process.execPath, "run", WATCH_SCRIPT, ...args], {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -147,34 +163,39 @@ describe("C34(4,5): the script itself exits 64 on a usage error, before arming a
     expect(r.code).toBe(64);
     expect(r.stderr).toContain("--flow-id is required");
   });
+
+  test("a trailing flag and a flag-as-value both exit 64 with the flag named", async () => {
+    const trailing = await runScript("--flow-id", "f", "--poll-seconds");
+    expect(trailing.code).toBe(64);
+    expect(trailing.stderr).toContain("--poll-seconds requires a value");
+    const swallowed = await runScript("--flow-id", "--poll-seconds", "5");
+    expect(swallowed.code).toBe(64);
+    expect(swallowed.stderr).toContain("--flow-id requires a value");
+  });
+
+  test("--help prints the generated usage on stdout and exits 0 without arming anything", async () => {
+    const r = await runScript("--help");
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain(WATCHER_USAGE);
+    expect(r.stdout).not.toContain("watcher start");
+    expect(r.stderr).toBe("");
+  });
 });
 
-describe("shared flag scanner: --flag=value escape hatch", () => {
+describe("--flag=value escape hatch, empty and repeated values (shared layer rules, watcher table)", () => {
   test("a value that starts with -- is accepted in --flag=value form (and only there)", () => {
     const eq = parse("--flow-id", "f", "--run-id=--smoke");
     expect(eq.ok && eq.options.runId).toBe("--smoke");
     expect(parse("--flow-id", "f", "--run-id", "--smoke").ok).toBe(false);
   });
 
-  test("parseFlagValues handles both spellings, empty =values, and rejects unknown flags", () => {
-    const known = ["--a", "--b"];
-    const ok = parseFlagValues(["--a=1", "--b", "2"], known);
-    expect(ok.ok && Object.fromEntries(ok.values)).toEqual({ "--a": "1", "--b": "2" });
-    const eqInValue = parseFlagValues(["--a=x=y"], known);
-    expect(eqInValue.ok && eqInValue.values.get("--a")).toBe("x=y");
-    expect(parseFlagValues(["--c=1"], known).ok).toBe(false);
-  });
-});
-
-describe("shared flag scanner: empty and repeated values", () => {
   test("an empty value (--events=, --events '') is a usage error, not a path that fails inside the kill window", () => {
     expect(parse("--flow-id", "f", "--events=").ok).toBe(false);
     expect(parse("--flow-id", "f", "--events", "").ok).toBe(false);
     expect(parse("--flow-id", "f", "--run-id", "  ").ok).toBe(false);
-    expect(parse("--flow-id", "f", "--flow-run-id=").ok).toBe(false);
-    const empty = parseFlagValues(["--a="], ["--a"]);
-    expect(empty.ok).toBe(false);
-    if (!empty.ok) expect(empty.error).toContain("non-empty");
+    const flowRun = parse("--flow-id", "f", "--flow-run-id=");
+    expect(flowRun.ok).toBe(false);
+    if (!flowRun.ok) expect(flowRun.error).toContain("non-empty");
   });
 
   test("a repeated flag is rejected instead of silently overwriting the earlier value", () => {

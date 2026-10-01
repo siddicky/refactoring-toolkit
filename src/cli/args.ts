@@ -508,6 +508,22 @@ function renderUsage(
   return sections.join("\n\n");
 }
 
+/**
+ * "exit codes: 0 ok; 3 ..." paragraph for `notes`, built from the script's own
+ * exit-code table plus a meaning per entry, so the usage text lists the numbers
+ * the script actually returns.
+ */
+export function exitCodesNote<T extends Readonly<Record<string, number>>>(
+  table: T,
+  meanings: { readonly [K in keyof T]: string },
+): string {
+  const rows = (Object.keys(table) as Array<keyof T & string>)
+    .map((key) => [table[key] as number, meanings[key]] as const)
+    .sort((a, b) => a[0] - b[0])
+    .map(([code, meaning], i, all) => `${code} ${meaning}${i < all.length - 1 ? ";" : ""}`);
+  return wrapTokens("exit codes:", rows);
+}
+
 /** Usage text of a single-command script, generated from its option table. */
 export function usageText(spec: CliSpec): string {
   return renderUsage(spec.name, "", spec.summary, spec.options, spec.notes);

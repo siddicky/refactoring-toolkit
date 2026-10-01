@@ -141,6 +141,41 @@ describe("C71: the CLI rejects unparsable input instead of filtering it", () => 
     expect(parseChaosKillArgs(["--pids", "123", "stray"]).ok).toBe(false);
   });
 
+  test("every value flag rejects a trailing occurrence and a flag where its value belongs, naming the flag", () => {
+    for (const flag of ["--pids", "--reason", "--events", "--run-id", "--flow-run-id", "--wait-ms"]) {
+      const base = flag === "--pids" ? [] : ["--pids", "123"];
+      const trailing = parseChaosKillArgs([...base, flag]);
+      expect(trailing.ok).toBe(false);
+      if (!trailing.ok) expect(trailing.error).toBe(`${flag} requires a value`);
+      const swallowed = parseChaosKillArgs([...base, flag, "--reason=x"]);
+      expect(swallowed.ok).toBe(false);
+      if (!swallowed.ok) expect(swallowed.error).toContain(`${flag} requires a value`);
+    }
+  });
+
+  test("--wait-ms NaN/Infinity/negative are usage errors; 0 is a valid wait", () => {
+    for (const bad of ["NaN", "Infinity", "-100", "1e3"]) {
+      expect(parseChaosKillArgs(["--pids", "123", `--wait-ms=${bad}`]).ok, bad).toBe(false);
+    }
+    const zero = parseChaosKillArgs(["--pids", "123", "--wait-ms", "0"]);
+    expect(zero.ok && zero.options.waitMs).toBe(0);
+  });
+
+  test("--help prints the generated usage and exits 0 without touching the sidecar", async () => {
+    dir = await mkdtemp(join(tmpdir(), "chaos-kill-"));
+    const proc = Bun.spawn([process.execPath, "run", CHAOS_KILL_SCRIPT, "--help"], {
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+    expect(code).toBe(0);
+    expect(stdout).toContain("usage: chaos-kill --pids <pid[,pid...]>");
+    expect(stdout).toContain("--wait-ms <n>");
+    expect(stdout).toContain("exit codes: 0 every target exited after SIGKILL; 3 NO-OP");
+    expect(existsSync(join(dir, "metrics"))).toBe(false);
+  });
+
   test("CLI exits 64 (usage) on a bad PID WITHOUT writing any sidecar record", async () => {
     dir = await mkdtemp(join(tmpdir(), "chaos-kill-"));
     const eventsPath = join(dir, "events.jsonl");

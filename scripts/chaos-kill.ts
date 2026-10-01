@@ -17,7 +17,10 @@
  *
  * Every --pids entry must be a PID > 1 and --wait-ms a whole number of
  * milliseconds: an unparsable value is a usage error (exit 64), never silently
- * dropped (a dropped PID would shrink the kill set without a trace).
+ * dropped (a dropped PID would shrink the kill set without a trace). Argument
+ * handling is the shared layer in src/cli/args.ts: the option table is
+ * CHAOS_KILL_CLI below, `--help` prints the usage generated from it, and an
+ * unknown flag, a repeated flag or a flag with no value is a usage error too.
  *
  * Exit codes ({@link CHAOS_KILL_EXIT}, the SAME numbers and meanings as
  * watch-queue-verify's, so one table covers both tools): 0 every target exited
@@ -40,8 +43,9 @@
 import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { type CliParse, defineCli, exitCodesNote, parseOptions, reportParseFailure } from "../src/cli/args.js";
 import { DEFAULT_KILL_EVENTS_PATH } from "../src/metrics/kill-events.js";
-import { WATCHER_EXIT, parseFlagValues } from "../src/watcher/cli-args.js";
+import { WATCHER_EXIT } from "../src/watcher/cli-args.js";
 
 /**
  * Default kill-event sidecar path (Contract B): JSON Lines, relative to the
@@ -205,68 +209,73 @@ export async function chaosKill(options: ChaosKillOptions): Promise<ChaosKillRes
 // CLI entrypoint
 // ---------------------------------------------------------------------------
 
-const KNOWN_FLAGS = ["--pids", "--reason", "--events", "--run-id", "--flow-run-id", "--wait-ms"] as const;
+/** The CLI's option table: parsing, validation and the usage text all come from it. */
+export const CHAOS_KILL_CLI = defineCli({
+  name: "chaos-kill",
+  summary: "Writes a kill-intent record, SIGKILLs the target PIDs, then appends the completion record to the sidecar.",
+  options: {
+    pids: {
+      kind: "int-list",
+      min: 2,
+      required: true,
+      metavar: "pid[,pid...]",
+      description: "PIDs to kill (0 and negatives would signal a process group, so each must be > 1)",
+    },
+    reason: { kind: "string", default: "unspecified", metavar: "reason", description: "reason recorded in the sidecar" },
+    events: {
+      kind: "string",
+      default: DEFAULT_KILL_EVENTS_PATH,
+      metavar: "path",
+      description: "kill-event sidecar (JSON Lines)",
+    },
+    runId: { kind: "string", metavar: "id", description: "run_id label (default: kill-<epoch ms>)" },
+    flowRunId: {
+      kind: "string",
+      metavar: "dexRunId",
+      description: "real Dex run id recorded in both sidecar records (default: omitted)",
+    },
+    waitMs: { kind: "int", default: 5000, description: "milliseconds to wait for the targets to exit after SIGKILL" },
+  },
+  notes: [
+    exitCodesNote(CHAOS_KILL_EXIT, {
+      ok: "every target exited after SIGKILL",
+      noop: "NO-OP: no target was alive",
+      survivors: "a target survived SIGKILL",
+      usage: "usage error",
+      fatal: "fatal error",
+    }),
+  ],
+});
 
-const USAGE =
-  "usage: chaos-kill --pids <pid[,pid...]> --reason <reason> [--events path] [--run-id id] [--flow-run-id dexRunId] [--wait-ms n]";
-
-export type ParsedChaosKillArgs =
-  | { ok: true; options: ChaosKillOptions }
-  | { ok: false; error: string };
+export type ParsedChaosKillArgs = CliParse<ChaosKillOptions>;
 
 /**
- * Strict CLI parse (audit C71): every token is validated instead of filtered.
- * A flag needs a value that is not itself a flag, unknown flags are rejected
- * (a typo like `--event` would otherwise fall back to the default path), every
- * `--pids` entry must be a whole PID > 1 (0 and negatives would signal a whole
- * process group), and `--wait-ms` must be a non-negative whole number.
+ * Strict CLI parse (audit C71, now on the shared layer): every token is
+ * validated instead of filtered. A flag needs a value that is not itself a
+ * flag, unknown flags are rejected (a typo like `--event` would otherwise fall
+ * back to the default path), every `--pids` entry must be a whole PID > 1, and
+ * `--wait-ms` must be a non-negative whole number.
  */
 export function parseChaosKillArgs(argv: readonly string[]): ParsedChaosKillArgs {
-  const scanned = parseFlagValues(argv, KNOWN_FLAGS);
-  if (!scanned.ok) return scanned;
-  const values = scanned.values;
-
-  const pidsArg = values.get("--pids");
-  if (pidsArg === undefined || pidsArg.trim() === "") {
-    return { ok: false, error: "--pids is required" };
-  }
-  const pids: number[] = [];
-  const invalid: string[] = [];
-  for (const raw of pidsArg.split(",")) {
-    const token = raw.trim();
-    const pid = /^\d+$/.test(token) ? Number(token) : Number.NaN;
-    if (Number.isSafeInteger(pid) && pid > 1) pids.push(pid);
-    else invalid.push(token === "" ? "<empty>" : token);
-  }
-  if (invalid.length > 0) {
-    return { ok: false, error: `invalid --pids entr${invalid.length === 1 ? "y" : "ies"} (need whole PIDs > 1): ${invalid.join(", ")}` };
-  }
-
-  const waitArg = values.get("--wait-ms") ?? "5000";
-  if (!/^\d+$/.test(waitArg.trim())) {
-    return { ok: false, error: `invalid --wait-ms (need a non-negative whole number): ${waitArg}` };
-  }
-
-  const flowRunId = values.get("--flow-run-id");
+  const parsed = parseOptions(CHAOS_KILL_CLI, argv);
+  if (!parsed.ok) return parsed;
+  const o = parsed.options;
   return {
     ok: true,
     options: {
-      pids,
-      reason: values.get("--reason") ?? "unspecified",
-      runId: values.get("--run-id") ?? `kill-${Date.now()}`,
-      eventsPath: values.get("--events") ?? DEFAULT_KILL_EVENTS_PATH,
-      waitMs: Number(waitArg.trim()),
-      ...(flowRunId !== undefined ? { flowRunId } : {}),
+      pids: o.pids,
+      reason: o.reason,
+      runId: o.runId ?? `kill-${Date.now()}`,
+      eventsPath: o.events,
+      waitMs: o.waitMs,
+      ...(o.flowRunId !== undefined ? { flowRunId: o.flowRunId } : {}),
     },
   };
 }
 
 async function main(): Promise<number> {
   const parsed = parseChaosKillArgs(process.argv.slice(2));
-  if (!parsed.ok) {
-    console.error(`[chaos-kill] ${parsed.error}\n${USAGE}`);
-    return CHAOS_KILL_EXIT.usage;
-  }
+  if (!parsed.ok) return reportParseFailure("chaos-kill", parsed);
   const options = parsed.options;
   const result = await chaosKill(options);
   console.log(

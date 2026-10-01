@@ -54,10 +54,13 @@
  * from `dexcli flow summary` (overridable with `--flow-run-id`, omitted when
  * unknown) — never the flow id.
  *
- * Numeric flags are validated: --deadline-minutes is a number > 0,
- * --poll-seconds and --catch-up-seconds are whole numbers >= 1 (the SDK takes
- * whole seconds; 0 would mean the 60 s server default). A flag without a value
- * (or whose value is another flag) is a usage error.
+ * Argument handling is the shared layer in src/cli/args.ts; this script's
+ * option table is WATCHER_CLI in src/watcher/cli-args.ts, and `--help` prints
+ * the usage generated from it. Numeric flags are validated: --deadline-minutes
+ * is a number > 0, --poll-seconds and --catch-up-seconds are whole numbers >= 1
+ * (the SDK takes whole seconds; 0 would mean the 60 s server default). A flag
+ * without a value (or whose value is another flag), an unknown flag and a
+ * repeated flag are usage errors (exit 64).
  *
  * Probe cadence: the stream long-poll paces the loop, the dexcli poll +
  * flow-status probes run about once per --poll-seconds, and their failures
@@ -79,16 +82,13 @@ import { openDexClient, dexConfigFromEnv } from "../src/dex/client.js";
 import { dexCliQueries } from "../src/dashboard/queries.js";
 import { envelopeStream } from "../flows/steps/envelope.js";
 import { PortProjectFlow } from "../flows/port-project.js";
-import { DEFAULT_KILL_EVENTS_PATH, chaosKill } from "./chaos-kill.js";
+import { reportParseFailure } from "../src/cli/args.js";
+import { chaosKill } from "./chaos-kill.js";
 import {
   runQueueVerifyWatcher,
   type WatcherStreamEvent,
 } from "../src/watcher/queue-verify-watcher.js";
-import {
-  WATCHER_EXIT,
-  WATCHER_USAGE,
-  parseWatcherArgs,
-} from "../src/watcher/cli-args.js";
+import { WATCHER_EXIT, parseWatcherArgs } from "../src/watcher/cli-args.js";
 import {
   DRAIN_PAGE_SIZE,
   drainRetainedBacklog,
@@ -155,11 +155,8 @@ async function targetPids(): Promise<number[]> {
 }
 
 async function main(): Promise<number> {
-  const parsed = parseWatcherArgs(process.argv.slice(2), { eventsPath: DEFAULT_KILL_EVENTS_PATH });
-  if (!parsed.ok) {
-    console.error(`[watch-queue-verify] ${parsed.error}\n${WATCHER_USAGE}`);
-    return WATCHER_EXIT.usage;
-  }
+  const parsed = parseWatcherArgs(process.argv.slice(2));
+  if (!parsed.ok) return reportParseFailure("watch-queue-verify", parsed);
   const {
     flowId,
     runId,
@@ -332,13 +329,16 @@ async function main(): Promise<number> {
   }
 }
 
-const started = Date.now();
-main()
-  .then((code) => {
-    log(`exit ${code} after ${Math.round((Date.now() - started) / 1000)}s`);
-    process.exit(code);
-  })
-  .catch((err: unknown) => {
-    console.error("[watch-queue-verify] fatal:", err);
-    process.exit(WATCHER_EXIT.fatal);
-  });
+// Only run when executed directly: importing this module must not start a watcher.
+if (import.meta.main) {
+  const started = Date.now();
+  main()
+    .then((code) => {
+      log(`exit ${code} after ${Math.round((Date.now() - started) / 1000)}s`);
+      process.exit(code);
+    })
+    .catch((err: unknown) => {
+      console.error("[watch-queue-verify] fatal:", err);
+      process.exit(WATCHER_EXIT.fatal);
+    });
+}

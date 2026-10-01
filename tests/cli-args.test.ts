@@ -16,6 +16,7 @@ import {
   commandUsageText,
   defineCli,
   defineProgram,
+  exitCodesNote,
   flagName,
   parseCommand,
   parseOptions,
@@ -268,6 +269,23 @@ describe("usage text is generated from the table", () => {
     });
     expect(usageText(other)).toContain("--retries <n>");
     expect(usageText(other)).not.toContain("--flow-id");
+  });
+});
+
+describe("exitCodesNote", () => {
+  test("lists the script's own exit-code table in numeric order, one meaning per code", () => {
+    const table = { later: 70, ok: 0, usage: 64, mid: 3 } as const;
+    expect(exitCodesNote(table, { later: "fatal", ok: "fine", usage: "bad usage", mid: "no-op" })).toBe(
+      "exit codes: 0 fine; 3 no-op; 64 bad usage; 70 fatal",
+    );
+  });
+
+  test("a long table wraps instead of running off the line", () => {
+    const table = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`c${i}`, i])) as Record<string, number>;
+    const meanings = Object.fromEntries(Object.keys(table).map((k) => [k, `meaning of ${k} in words`]));
+    const note = exitCodesNote(table, meanings);
+    for (const line of note.split("\n")) expect(line.length).toBeLessThanOrEqual(100);
+    expect(note.split("\n").length).toBeGreaterThan(1);
   });
 });
 
