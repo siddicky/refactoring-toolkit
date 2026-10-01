@@ -21,6 +21,7 @@ A colocated test may import its neighbours, lower-level `src/` modules and `test
 - `dex-context.ts`: the stand-in for a dex step `Context`. `stubContext` over in-memory attribute stores (pass `loads: declaredLoads(step)` to enforce dex's declared-load rule), `stagingContext` for write-only steps, `runStep`, `seedAttribute` / `peekAttribute`. Do not write another stub.
 - `paths.ts`: `REPO_ROOT`. No test derives the repository root from its own location, so a test can move without breaking.
 - `opencode-env.ts`: `clearHarnessEnv()` for tests that read `OPENCODE_*` / `TYPESAFE_*` (bun loads the operator's `.env`).
+- `source-files.ts`: `walkFiles`, `productionSources`, `readSource`, for guards that scan the repository; use them rather than writing another directory walker.
 - `port-flow-source.ts`: the source of the port flow, which is `flows/port-project.ts` plus `flows/port/*.ts`. Guards that grep flow source read the whole set.
 - `queue-verify-run.ts`, `virtual-stream.ts`: a real `QueueVerifyStep` over fake `tsc`/`vitest` binaries; a virtual-clock dex stream.
 
@@ -30,7 +31,7 @@ Test data lives in a directory named `fixtures/` next to its users: `src/metrics
 
 ## Guards that read source
 
-Some tests assert on source text or on a hand-kept mirror (`tests/test-layout.test.ts`, `tests/repo-hygiene.test.ts`, `tests/cli-scripts-guard.test.ts`, the source checks in `tests/lane-demotion-and-abort.test.ts` and `tests/jev-wiring.test.ts`). They exist to fail when two copies of a fact drift apart. When one fails, fix the drift. Do not loosen the guard.
+Some tests assert on source text or on a hand-kept mirror (`tests/mirror-drift.test.ts`, `tests/test-layout.test.ts`, `tests/repo-hygiene.test.ts`, `tests/cli-scripts-guard.test.ts`, the source checks in `tests/lane-demotion-and-abort.test.ts` and `tests/jev-wiring.test.ts`). They exist to fail when two copies of a fact drift apart. `mirror-drift.test.ts` pins the copies the metrics layer and the dashboard keep by hand, because they must not import the flows (the dispatch-anchor step table, the fixer step id, the dashboard accounting types), against the real flows. When one fails, fix the drift. Do not loosen the guard.
 
 ## Running
 

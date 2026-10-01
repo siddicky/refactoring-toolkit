@@ -49,8 +49,14 @@ export interface BootstrapPlan {
   install: boolean;
 }
 
+/** Where the scaffold's vitest config looks for tests; the scaffold tsconfig includes the same directories. */
+export const BOOTSTRAP_TEST_GLOBS: readonly string[] = ["test/**/*.test.ts", "tests/**/*.test.ts"];
+
 /** tsconfig `include` globs every scaffold covers, whatever the source map says. */
-const DEFAULT_TSCONFIG_INCLUDE: readonly string[] = ["src/**/*.ts", "test/**/*.ts", "tests/**/*.ts"];
+const DEFAULT_TSCONFIG_INCLUDE: readonly string[] = [
+  "src/**/*.ts",
+  ...BOOTSTRAP_TEST_GLOBS.map((glob) => glob.replace(/\.test\.ts$/, ".ts")),
+];
 
 /**
  * C06: tsconfig `include` for the integrated checkout — the defaults PLUS the
@@ -95,18 +101,25 @@ export function scaffoldTsconfigText(include: readonly string[] = DEFAULT_TSCONF
   );
 }
 
-const BOOTSTRAP_TSCONFIG = scaffoldTsconfigText();
+/** What the bootstrap writes when no source map adds directories to the include (pinned by tests/mirror-drift.test.ts). */
+export const BOOTSTRAP_TSCONFIG = scaffoldTsconfigText();
 
-const BOOTSTRAP_VITEST_CONFIG = [
-  'import { defineConfig } from "vitest/config";',
-  "",
-  "export default defineConfig({",
-  "  test: {",
-  '    include: ["test/**/*.test.ts", "tests/**/*.test.ts"],',
-  "  },",
-  "});",
-  "",
-].join("\n");
+/** The vitest.config.ts the bootstrap writes: it runs the tests under BOOTSTRAP_TEST_GLOBS. */
+export function bootstrapVitestConfig(): string {
+  const include = BOOTSTRAP_TEST_GLOBS.map((glob) => JSON.stringify(glob)).join(", ");
+  return [
+    'import { defineConfig } from "vitest/config";',
+    "",
+    "export default defineConfig({",
+    "  test: {",
+    `    include: [${include}],`,
+    "  },",
+    "});",
+    "",
+  ].join("\n");
+}
+
+const BOOTSTRAP_VITEST_CONFIG = bootstrapVitestConfig();
 
 const BOOTSTRAP_PACKAGE_JSON =
   JSON.stringify(
