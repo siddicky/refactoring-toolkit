@@ -11,6 +11,7 @@
  * both are accepted.
  */
 
+import { fileFromSanitizedKey } from "../metrics/types.js";
 import type {
   BurnDownPointView,
   BurnDownSample,
@@ -815,7 +816,13 @@ export interface ParsedTombstone {
   reason: string;
 }
 
-/** Parses a verdict attribute key suffix `<sanitized-file>#<round>#<reviewer>`. */
+/**
+ * Parses a verdict attribute key suffix `<sanitized-file>#<round>#<reviewer>`.
+ * The file comes from the ONE inverse of the key sanitizer
+ * (fileFromSanitizedKey, src/metrics/types.ts), which is lossy for a file whose
+ * own name contains "__": a verdict record's `file` is authoritative where one
+ * exists, and this key-derived file is only a label for a tombstone-only round.
+ */
 function parseVerdictKeySuffix(suffix: string): { file: string; round: number; reviewer: string } | null {
   const reviewerSep = suffix.lastIndexOf("#");
   const roundSep = reviewerSep > 0 ? suffix.lastIndexOf("#", reviewerSep - 1) : -1;
@@ -824,7 +831,7 @@ function parseVerdictKeySuffix(suffix: string): { file: string; round: number; r
   const round = Number(roundPart);
   if (!Number.isInteger(round) || roundPart === "") return null;
   return {
-    file: suffix.slice(0, roundSep).replace(/__/g, "/"),
+    file: fileFromSanitizedKey(suffix.slice(0, roundSep)),
     round,
     reviewer: suffix.slice(reviewerSep + 1),
   };
