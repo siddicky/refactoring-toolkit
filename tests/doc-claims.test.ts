@@ -31,6 +31,7 @@ import { JEV_SPOT_CHECK_EXIT } from "../scripts/jev-spot-check.js";
 import { RUN_DEMO_CLI, RUN_DEMO_EXIT } from "../scripts/run-demo.js";
 import { flagName } from "../src/cli/args.js";
 import { makeFixtureRepo } from "../src/git/fixture.js";
+import { InMemoryLeaseStore, sanitizePathSegment, WorktreePool } from "../src/git/worktree.js";
 import { configFromEnv, DEFAULT_KILL_EVENT_FILES, DEFAULT_BURN_DOWN_FILES } from "../src/dashboard/config.js";
 import { DEFAULT_MAX_CHILD_FLOWS, DEFAULT_MAX_FLOWS } from "../src/dashboard/flow-select.js";
 import { DEFAULT_WORKER_TARGET_ADDRESS, dexConfigFromEnv } from "../src/dex/client.js";
@@ -387,6 +388,32 @@ describe("doc claims: the fixed verification stack", () => {
   test("the skill and the runner reference say where the result lands and that merging needs authorization", () => {
     for (const text of [skill, runner]) {
       expect(missingFrom(text, ["`integration`", ".worktrees/", "info/exclude", "explicit authorization"])).toEqual([]);
+    }
+  });
+});
+
+describe("doc claims: lease branch and worktree names (B29)", () => {
+  test("the runner reference's example is what the code produces, hash suffix included", async () => {
+    const segment = sanitizePathSegment("src/Billing/Invoice.php");
+    expect(segment).toMatch(/^src__Billing__Invoice\.php-[0-9a-f]{8}$/);
+    expect(runner).toContain(`\`src/Billing/Invoice.php\` is \`${segment}\``);
+    // a path that needs no rewriting is used as it is
+    expect(sanitizePathSegment("Invoice.php")).toBe("Invoice.php");
+    expect(runner).toContain("`Invoice.php`) is used as it is");
+    expect(runner).toContain("`lease/<segment>/<epoch>`");
+    expect(runner).toContain("`<dir>/.worktrees/<segment>-<epoch>`");
+
+    // and the pool really names the branch and the directory that way
+    const root = await mkdtemp(join(tmpdir(), "doc-lease-"));
+    try {
+      await makeFixtureRepo(join(root, "repo"));
+      const pool = new WorktreePool(join(root, "repo"), join(root, "repo", ".worktrees"), new InMemoryLeaseStore(), 2);
+      const res = await pool.acquire("src/Billing/Invoice.php", 3, "doc-claims");
+      if (!res.acquired) throw new Error(res.reason);
+      expect(res.lease.branch).toBe(`lease/${segment}/3`);
+      expect(res.lease.worktreePath).toBe(join(root, "repo", ".worktrees", `${segment}-3`));
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
