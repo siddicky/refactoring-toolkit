@@ -149,7 +149,7 @@ describe("INT-9: chaos-kill and watch-queue-verify share one exit-code table", (
   });
 
   async function run(script: string, args: string[]): Promise<number> {
-    const proc = Bun.spawn(["bun", join(ROOT, "scripts", script), ...args], {
+    const proc = Bun.spawn([process.execPath, join(ROOT, "scripts", script), ...args], {
       cwd: ROOT,
       env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
       stdout: "pipe",
