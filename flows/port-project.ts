@@ -83,6 +83,7 @@ import { REVIEWER } from "../harness/agents/reviewer.js";
 import { FIXER } from "../harness/agents/fixer.js";
 import {
   executorPromptOpts,
+  isDemotedAttempt,
   plannerPromptOpts,
   reviewLaneRouting,
 } from "../src/harness/lanes.js";
@@ -1033,7 +1034,7 @@ async function diagnoseAmbiguousThrow(input: {
       reviewer: input.reviewerId,
       attempt: input.attempt,
       prior_failed_attempts: Math.max(0, input.attempt - 1),
-      lane: input.attempt >= 2 ? "demoted" : "default",
+      lane: isDemotedAttempt(input.attempt) ? "demoted" : "default",
       shape: observation,
       recordedAtUtc: new Date().toISOString(),
     });
@@ -1257,17 +1258,15 @@ async function runReviewTurnOnce(input: {
       attemptNo > 1
         ? `${turn}\n\n(retry attempt ${attemptNo}: a previous reply on this step was truncated or unparseable — respond with exactly one JSON object and nothing else)`
         : turn;
-    // Lane routing = f(attempt) ONLY (US-002): attempt >= 2 on a review turn
-    // demotes the reviewer lane (gpt-6-luna @ high) to OPENCODE_REVIEWER_MODEL_
-    // FALLBACK or — when unset — the executor lane (glm-5.3-flash @ max).
-    // Pure policy over the durable dex attempt count — no env mutation, no
-    // durable flag substrate (intra-step writes don't survive; 0(g)). Tier-0
-    // retries (degenerate no-text replies) therefore land on the fallback
-    // lane automatically. Table: src/harness/lanes.ts reviewLaneRouting().
+    // Lane routing = f(attempt) ONLY (US-002): from the demotion threshold
+    // (isDemotedAttempt, src/harness/lanes.ts — the one place the rule lives)
+    // a review turn leaves the reviewer lane (gpt-6-luna @ high) for
+    // OPENCODE_REVIEWER_MODEL_FALLBACK or — when unset — the executor lane
+    // (glm-5.3-flash @ max). Pure policy over the durable dex attempt count — no
+    // env mutation, no durable flag substrate (intra-step writes don't survive;
+    // 0(g)). Tier-0 retries (degenerate no-text replies) therefore land on the
+    // fallback lane automatically. Table: reviewLaneRouting().
     const agent = reviewerAgentOverride();
-    // Lane routing = f(attempt) (US-002) over the wave-5 lane table: attempt 1
-    // runs the reviewer lane (gpt-6-luna @ high), attempt >= 2 demotes to the
-    // fallback model or the executor lane. See src/harness/lanes.ts.
     const routing = reviewLaneRouting(attemptNo);
     const result = await runAgentTurn({
       def: REVIEWER,
@@ -1285,13 +1284,13 @@ async function runReviewTurnOnce(input: {
     const replyNormalized = normalizeVerdictText(result.text);
     inStepVerdictTexts.set(stepKey, replyNormalized);
 
-    // Deterministic successor re-record (US-003): on attempt n >= 2 the prior
-    // attempt(s) left NO durable trace (0(g) — a throwing attempt cannot
+    // Deterministic successor re-record (US-003): on a retry (attempt > 1) the
+    // prior attempt(s) left NO durable trace (0(g) — a throwing attempt cannot
     // persist), so THIS successful attempt records the deterministic context:
     // attempt count + resulting lane. NO Jev call — a parsed verdict is
     // shape-trivial and the battery must never fire on it (AC-B1).
     const turnDiagnosis =
-      attemptNo >= 2
+      attemptNo > 1
         ? buildRetryContextDiagnosis({
             file: input.file,
             stepId,

@@ -14,7 +14,8 @@
  * 3. Healthy negatives pass through: ~235-output-token valid verdict
  *    (wave-5 Sisyphus signature), text-present/output-0 (the case the
  *    deliberately DROPPED ≤8-output-token arm would have misclassified),
- *    aborted-no-text (recovery path, handled at flows/port-project.ts:563).
+ *    aborted-no-text (recovery path: returned as aborted:true, handled by
+ *    flows/port-project.ts runAgentTurn).
  * 4. Demotion policy = pure function of (attempt): attempt >= 2 on a review
  *    turn demotes OPENCODE_REVIEWER_MODEL to the fallback lane.
  * 5. WriteStream outage cannot fail a durable step (try/catch-swallow).
@@ -222,11 +223,12 @@ describe("Tier-0 degenerate-turn detection (raw SDK shapes through the real extr
     expect(reply.text.length).toBeGreaterThan(0);
   });
 
-  test("aborted-no-text is NOT classified Tier-0: it surfaces as the ODW upstream-failure retryable class (runAgentTurn:563 stays the abort handler)", async () => {
-    // Observed seam reality: an aborted assistant message carries
-    // info.error = MessageAbortedError, and the ODW finding-1 check bails
-    // BEFORE the Tier-0 guard — so an abort must never be misreported as a
-    // degenerate turn (the Tier-0 predicate also excludes aborted shapes).
+  test("aborted-no-text is NOT classified Tier-0: it is returned as aborted:true (runAgentTurn is the abort handler), never a degenerate turn", async () => {
+    // An aborted assistant message carries info.error = MessageAbortedError.
+    // The seam classifies the abort BEFORE the generic upstream-error check
+    // (INT-6), and the Tier-0 predicate also excludes aborted shapes — so an
+    // abort is neither misreported as an upstream failure nor as a degenerate
+    // turn; the flow sees `aborted` and decides.
     const h = harness({
       info: {
         tokens: { input: 500, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -235,17 +237,10 @@ describe("Tier-0 degenerate-turn detection (raw SDK shapes through the real extr
       },
       parts: [],
     });
-    let caught: unknown;
-    try {
-      await h.prompt("ses_aborted", "review this diff");
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(OpencodePromptError);
-    const e = caught as OpencodePromptError;
-    expect(e.retryable).toBe(true);
-    expect(e.message).toContain("upstream failure");
-    expect(e.message).not.toContain("degenerate turn");
+    const reply = await h.prompt("ses_aborted", "review this diff");
+    expect(reply.aborted).toBe(true);
+    expect(reply.text).toBe("");
+    expect(reply.usage?.input).toBe(500);
   });
 });
 

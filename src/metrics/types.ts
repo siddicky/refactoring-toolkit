@@ -210,9 +210,8 @@ export function isShapeAmbiguous(shape: TurnShapeClass): boolean {
  * resulting lane. NO Jev call — the battery fires only on shape-ambiguous
  * turns, and a turn whose verdict parsed is shape-trivial.
  *
- * `lane` mirrors the demotion policy f(attempt) (demoteReviewerLane: attempt
- * >= 2 → demoted) — deliberate data-only mirror, same rule as
- * src/metrics/dispatch-anchor.ts's step table.
+ * `lane` is the demotion policy f(attempt), taken from the one threshold
+ * (isDemotedAttempt in src/harness/lanes.ts) rather than a copy of it.
  */
 export function buildRetryContextDiagnosis(input: {
   file: string;
@@ -229,7 +228,7 @@ export function buildRetryContextDiagnosis(input: {
     reviewer: input.reviewer,
     attempt: input.attempt,
     prior_failed_attempts: Math.max(0, input.attempt - 1),
-    lane: (input.attempt ?? 1) >= 2 ? "demoted" : "default",
+    lane: isDemotedAttempt(input.attempt) ? "demoted" : "default",
     trigger: "retry-context",
     shape: input.shape,
     questions: [],
@@ -365,6 +364,7 @@ export function fileFromIdentity(identity: string): { file: string; round: numbe
  * downstream consumers keep one import surface.
  */
 import { SEVERITIES, type Severity } from "../../harness/agents/verdict-schema.js";
+import { isDemotedAttempt } from "../harness/lanes.js";
 
 export type SeverityClass = Severity;
 

@@ -95,6 +95,11 @@ export function tokenTotal(usage: TokenUsage): number {
 export interface PromptResult {
   text: string;
   usage: TokenUsage | null;
+  /**
+   * The turn ended in MessageAbortedError (the session was aborted, e.g. by
+   * ordered recovery's fence). The reply is returned, not thrown, so the flow
+   * (runAgentTurn) decides; text/usage are whatever the turn produced.
+   */
   aborted: boolean;
 }
 
@@ -403,12 +408,15 @@ export class OpencodeHarness {
     }
     // ODW finding 1: prompt RESOLVES with info.error on upstream failure —
     // bail immediately instead of burning the poll window on a stuck turn.
-    const immediateError = upstreamErrorOf(data.info);
+    // An abort ALSO arrives as info.error (MessageAbortedError) but is not an
+    // upstream failure: classify it first, or `aborted` could never be true
+    // (upstreamErrorOf would throw on it before hasAbortedError ran).
+    let aborted = hasAbortedError(data.info);
+    const immediateError = aborted ? null : upstreamErrorOf(data.info);
     if (immediateError !== null) {
       throw new OpencodePromptError(`upstream failure: ${immediateError}`, true);
     }
     let usage = extractTokenUsage(data.info);
-    let aborted = hasAbortedError(data.info);
     let textOut = extractText(data.parts);
 
     if (usage === null && !aborted) {
@@ -430,12 +438,13 @@ export class OpencodeHarness {
           );
         }
         if (last === undefined) continue;
-        const turnError = upstreamErrorOf(last.info);
+        const turnAborted = hasAbortedError(last.info);
+        const turnError = turnAborted ? null : upstreamErrorOf(last.info);
         if (turnError !== null) {
           throw new OpencodePromptError(`upstream failure: ${turnError}`, true);
         }
         usage = extractTokenUsage(last.info);
-        aborted = hasAbortedError(last.info);
+        aborted = turnAborted;
         const completed = extractText(last.parts);
         if (completed.length > 0) textOut = completed;
       }

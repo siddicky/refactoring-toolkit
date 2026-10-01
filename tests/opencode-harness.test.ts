@@ -13,8 +13,9 @@
  * 2. withCallTimeout through prompt(): retryable timeout naming the effective
  *    value; constructor option beats env.
  * 3. Poll loop: usage-less then completed, completed-without-usage
- *    (provenance null), empty reply, aborted reply, upstream failure,
- *    tolerated messages() errors, degenerate reply, message-shape variants.
+ *    (provenance null), empty reply, aborted reply (returned as aborted:true,
+ *    not thrown), upstream failure, tolerated messages() errors, degenerate
+ *    reply, message-shape variants.
  * 4. abort / abortAndConfirm / isBusy.
  */
 
@@ -273,16 +274,50 @@ describe("prompt poll loop (usage-less prompt result)", () => {
     expect(err.message).toContain("empty reply without usage");
   });
 
-  test("an aborted reply (MessageAbortedError) surfaces as a RETRYABLE upstream failure, never as aborted:true", async () => {
-    // upstreamErrorOf() runs before hasAbortedError(), so the `aborted`
-    // result flag cannot be produced by this harness; pinned here.
+  test("an aborted reply found while polling (MessageAbortedError) is returned as aborted:true, not thrown as an upstream failure", async () => {
+    // Regression (INT-6): upstreamErrorOf() used to run before hasAbortedError(),
+    // so MessageAbortedError (an info.error) was thrown as a retryable upstream
+    // failure and `aborted` could never be true from this harness.
     const { harness } = harnessFor({
       messages: [{ data: [assistant({ error: { name: "MessageAbortedError" } }, "partial text")] }],
     });
-    const err = await rejection(harness.prompt("s", "hi"));
+    const res = await harness.prompt("s", "hi");
+
+    expect(res.aborted).toBe(true);
+    expect(res.text).toBe("partial text");
+    expect(res.usage).toBeNull();
+  });
+
+  test("an abort in the prompt() response itself skips the poll loop and returns aborted:true", async () => {
+    const { client, calls } = scripted({
+      prompt: async () => ({ data: { info: { error: { name: "MessageAbortedError" } }, parts: [] } }),
+    });
+    const res = await new OpencodeHarness(client, undefined, undefined, FAST).prompt("s", "hi");
+
+    expect(res).toEqual({ text: "", usage: null, aborted: true });
+    expect(calls.messages).toBe(0); // an aborted turn is final: nothing to wait for
+  });
+
+  test("an aborted turn that still reports usage is NOT the degenerate no-text failure", async () => {
+    const { client } = scripted({
+      prompt: async () => ({
+        data: { info: { ...USAGE_INFO, error: { name: "MessageAbortedError" } }, parts: [] },
+      }),
+    });
+    const res = await new OpencodeHarness(client, undefined, undefined, FAST).prompt("s", "hi");
+
+    expect(res.aborted).toBe(true);
+    expect(res.usage?.output).toBe(7);
+  });
+
+  test("every OTHER info.error still fails RETRYABLE as an upstream failure", async () => {
+    const { client } = scripted({
+      prompt: async () => ({ data: { info: { error: { name: "APIError", message: "overloaded" } }, parts: [] } }),
+    });
+    const err = await rejection(new OpencodeHarness(client, undefined, undefined, FAST).prompt("s", "hi"));
 
     expect(err.retryable).toBe(true);
-    expect(err.message).toContain("upstream failure: MessageAbortedError");
+    expect(err.message).toBe("upstream failure: APIError: overloaded");
   });
 
   test("an upstream provider error found while polling fails RETRYABLE immediately", async () => {
