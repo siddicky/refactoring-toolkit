@@ -308,8 +308,11 @@ function parseAgainst(table: OptionTable, argv: readonly string[]): RawParse {
     values = parsed.values;
     tokens = parsed.tokens;
   } catch (err) {
-    // `tool --typo --help` should answer the help request, not the typo.
-    if (argv.some((token) => (HELP_FLAGS as readonly string[]).includes(token))) {
+    // `tool --typo --help` should answer the help request, not the typo (but a
+    // `--help` after the `--` terminator is a positional, not a request).
+    const end = argv.indexOf("--");
+    const options = end < 0 ? argv : argv.slice(0, end);
+    if (options.some((token) => (HELP_FLAGS as readonly string[]).includes(token))) {
       return { ok: false, help: true, error: "" };
     }
     return { ok: false, help: false, error: describeParseArgsError(err) };

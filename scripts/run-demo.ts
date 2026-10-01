@@ -612,7 +612,7 @@ const WAIT_MINUTES_OPTION = {
   min: 1,
   default: 30,
   metavar: "n",
-  description: "minutes to wait for the flow; if it is still running the exit code is 4 (keep waiting with wait-flow --id)",
+  description: "how long to wait for the flow; a flow still running then exits 4 (resume with wait-flow --id)",
 } as const;
 
 export const RUN_DEMO_CLI = defineProgram({

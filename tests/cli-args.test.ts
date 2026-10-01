@@ -218,6 +218,12 @@ describe("help", () => {
     expect(failure("--help").error).toBe("");
   });
 
+  test("a --help after the -- terminator is a positional, not a help request", () => {
+    const f = failure("--flow-id", "f", "--", "--help");
+    expect(f.help).toBe(false);
+    expect(f.error).toBe("unexpected argument: --help");
+  });
+
   test("reportParseFailure: help prints usage to stdout and exits 0; an error prints to stderr and exits 64", () => {
     const out: string[] = [];
     const err: string[] = [];
