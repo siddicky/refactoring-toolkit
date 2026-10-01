@@ -12,7 +12,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { argValue, expandFilesArg, makeFixtureRepo } from "../scripts/run-demo.js";
+import { expandFilesArg, makeFixtureRepo, parseRunDemoArgs } from "../scripts/run-demo.js";
 
 const RUN_DEMO = join(import.meta.dir, "..", "scripts", "run-demo.ts");
 const tmpDirs: string[] = [];
@@ -23,18 +23,21 @@ afterEach(async () => {
 
 describe("importing run-demo.ts", () => {
   test("does not run main() or exit: this test body is executing", () => {
-    // If the import had run main(), process.exit(2) (no subcommand => usage)
+    // If the import had run main(), process.exit(64) (no subcommand => usage)
     // would have terminated the runner before any test ran.
     expect(typeof makeFixtureRepo).toBe("function");
-    expect(typeof argValue).toBe("function");
+    expect(typeof parseRunDemoArgs).toBe("function");
   });
 
-  test("argValue reads from a supplied argv and honours the fallback", () => {
-    const argv = ["bun", "run-demo.ts", "demo", "--dir", "/x", "--epoch", "3"];
-    expect(argValue("--dir", undefined, argv)).toBe("/x");
-    expect(argValue("--epoch", "1", argv)).toBe("3");
-    expect(argValue("--missing", "fallback", argv)).toBe("fallback");
-    expect(argValue("--missing", undefined, argv)).toBeUndefined();
+  test("parseRunDemoArgs parses a supplied argv (no process.argv, no side effects)", () => {
+    const parsed = parseRunDemoArgs(["demo", "--dir", "/x", "--epoch", "3"]);
+    expect(parsed.ok && parsed.command).toBe("demo");
+    if (parsed.ok && parsed.command === "demo") {
+      expect(parsed.options.dir).toBe("/x");
+      expect(parsed.options.epoch).toBe(3);
+      expect(parsed.options.maxRounds).toBe(1); // the documented default
+      expect(parsed.options.flowId).toBeUndefined(); // absent: the runner generates demo-<epoch ms>
+    }
   });
 
   test("expandFilesArg: `creatorex` expands to the 10 fixture files, anything else is a trimmed comma list", () => {
@@ -48,11 +51,12 @@ describe("importing run-demo.ts", () => {
 });
 
 describe("running run-demo.ts directly still executes main()", () => {
-  test("no subcommand prints usage and exits 2", async () => {
+  test("no subcommand prints the generated usage and exits 64 (usage error; it was 2 before the shared layer)", async () => {
     const proc = Bun.spawn({ cmd: [process.execPath, "run", RUN_DEMO], stdout: "pipe", stderr: "pipe" });
     const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
-    expect(code).toBe(2);
-    expect(stderr).toContain("usage: run-demo.ts");
+    expect(code).toBe(64);
+    expect(stderr).toContain("[run-demo] missing command");
+    expect(stderr).toContain("usage: run-demo.ts <worker|hello|long-step|wait-flow|round|recover|recover-port|agent-roundtrip|git-selftest|gate|demo>");
   });
 
   test("git-selftest passes (0d2 now exercises the marker-present reconcile branch)", async () => {

@@ -87,7 +87,7 @@ describe("INT-5: pickHarness requireReal at every recovery call site", () => {
     const plain = sites.filter((s) => !s.includes("requireReal"));
     expect(real).toHaveLength(2); // recover (HARNESS env) + recover-port (--harness)
     expect(plain).toHaveLength(1); // worker start: auto may fall back, loudly
-    expect(plain[0]).toContain('argValue("--harness")');
+    expect(plain[0]).toContain("options.harness");
   });
 });
 

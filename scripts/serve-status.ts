@@ -25,6 +25,10 @@
  *
  * Launch:
  *   bun run scripts/serve-status.ts
+ * It takes no command-line arguments: configuration is environment-only, and
+ * any argument is a usage error (exit 64, shared layer in src/cli/args.ts;
+ * `--help` prints the generated usage). An argument is never ignored: `--port
+ * 5000` would otherwise bind the default port without a word.
  * Env (numeric values are validated; an invalid one falls back to its
  * default with a startup warning):
  *   STATUS_PORT          (default 4646; the generic PORT is a deprecated
@@ -58,6 +62,7 @@ import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+import { defineCli, parseOptions, reportParseFailure } from "../src/cli/args.js";
 import { dexCliQueries, gitQueries } from "../src/dashboard/queries.js";
 import { CLIENT_POLL_MS, configFromEnv } from "../src/dashboard/config.js";
 import { allowedHostsFor, createDashboardServer } from "../src/dashboard/server.js";
@@ -68,6 +73,16 @@ import { envelopeStream } from "../flows/steps/envelope.js";
 import { PortProjectFlow } from "../flows/port-project.js";
 
 const STATIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "../src/dashboard/static");
+
+/** serve-status has no options: everything is configured through the environment (see above). */
+export const SERVE_STATUS_CLI = defineCli({
+  name: "serve-status.ts",
+  summary: "Read-only live status dashboard for the porting run (HTTP, default http://127.0.0.1:4646/).",
+  options: {},
+  notes: [
+    "It is configured through environment variables only (STATUS_PORT, STATUS_HOST, STATUS_REPO_ROOT, DEXCLI_BIN, DEX_SERVER_ADDRESS, ...); the full list is in the header of scripts/serve-status.ts.",
+  ],
+});
 
 export function main(): void {
   const cfg = configFromEnv();
@@ -122,4 +137,9 @@ export function main(): void {
   process.on("SIGTERM", shutdown);
 }
 
-main();
+// Only start the server when executed directly: importing this module must not bind a port.
+if (import.meta.main) {
+  const parsed = parseOptions(SERVE_STATUS_CLI, process.argv.slice(2));
+  if (!parsed.ok) process.exit(reportParseFailure("serve-status", parsed));
+  main();
+}

@@ -6,6 +6,11 @@
  *     [--legacy-flow-keyed-envelopes] \
  *     [--out-dir metrics] [--generated-at <utc-iso>]
  *
+ * Argument handling is the shared layer in src/cli/args.ts; the option table is
+ * RENDER_METRICS_CLI below and `--help` prints the usage generated from it. A
+ * flag with no value, a flag where a value belongs, an unknown flag and a
+ * repeated flag are usage errors (exit 64). Exit codes: {@link RENDER_METRICS_EXIT}.
+ *
  * dexcli is resolved like every other dex caller: DEXCLI_BIN (default
  * `dexcli`) and DEX_SERVER_ADDRESS (passed as `-server`).
  *
@@ -30,6 +35,14 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import {
+  type CliParse,
+  CLI_EXIT,
+  defineCli,
+  exitCodesNote,
+  parseOptions,
+  reportParseFailure,
+} from "../src/cli/args.js";
 import { dexConfigFromEnv } from "../src/dex/client.js";
 import {
   collectBurnDown,
@@ -59,21 +72,70 @@ interface FlowState {
   attributes?: StateAttribute[];
 }
 
-class UsageError extends Error {}
+/** Exit codes of render-metrics. Usage is the shared 64; "failed" also covers any fatal error. */
+export const RENDER_METRICS_EXIT = {
+  ok: 0,
+  /** The report's provenance check failed, or a fatal error. */
+  failed: 1,
+  /** `--kill-events` / `--events` names a sidecar that does not exist. */
+  sidecarMissing: 2,
+  usage: CLI_EXIT.usage,
+} as const;
 
-/**
- * Value of `--flag <value>`; undefined when the flag is absent. A missing
- * value or one that is itself a flag (`--flow-id --out-dir x`) is a usage
- * error rather than silently swallowing the next flag as the value.
- */
-export function argValueFrom(argv: readonly string[], flag: string): string | undefined {
-  const i = argv.indexOf(flag);
-  if (i < 0) return undefined;
-  const value = argv[i + 1];
-  if (value === undefined || value.startsWith("--")) {
-    throw new UsageError(`${flag} requires a value`);
-  }
-  return value;
+/** The CLI's option table: parsing, validation and the usage text all come from it. */
+export const RENDER_METRICS_CLI = defineCli({
+  name: "render-metrics.ts",
+  summary:
+    "Collects one flow's durable evidence from the read-only dex surfaces and writes <out-dir>/report.md and report.json.",
+  options: {
+    flowId: { kind: "string", metavar: "id", required: true, description: "flow to report on" },
+    killEvents: { kind: "string", metavar: "jsonl", description: "chaos kill sidecar (JSON Lines) to merge" },
+    events: { kind: "string", metavar: "jsonl", description: "alias of --kill-events (the chaos-kill / watcher name)" },
+    allRuns: { kind: "flag", description: "attribute every run in the sidecar to this report, not only this flow's" },
+    legacyFlowKeyedEnvelopes: {
+      kind: "flag",
+      description: "accept pre-identityOf envelopes keyed by flow id (cx-5e style evidence)",
+    },
+    outDir: { kind: "string", metavar: "dir", default: "metrics", description: "output directory" },
+    generatedAt: { kind: "string", metavar: "utc-iso", description: "report timestamp (default: now)" },
+  },
+  notes: [
+    exitCodesNote(RENDER_METRICS_EXIT, {
+      ok: "report written, provenance ok",
+      failed: "provenance check failed, or fatal error",
+      sidecarMissing: "kill-events sidecar not found",
+      usage: "usage error",
+    }),
+  ],
+});
+
+export interface RenderMetricsOptions {
+  flowId: string;
+  /** `--kill-events`, else `--events`. */
+  killEventsPath: string | undefined;
+  allRuns: boolean;
+  legacyFlowKeyedEnvelopes: boolean;
+  outDir: string;
+  /** Undefined means "now". */
+  generatedAt: string | undefined;
+}
+
+/** Strict parse of render-metrics' argv (without the `bun run script` prefix). */
+export function parseRenderMetricsArgs(argv: readonly string[]): CliParse<RenderMetricsOptions> {
+  const parsed = parseOptions(RENDER_METRICS_CLI, argv);
+  if (!parsed.ok) return parsed;
+  const o = parsed.options;
+  return {
+    ok: true,
+    options: {
+      flowId: o.flowId,
+      killEventsPath: o.killEvents ?? o.events,
+      allRuns: o.allRuns,
+      legacyFlowKeyedEnvelopes: o.legacyFlowKeyedEnvelopes,
+      outDir: o.outDir,
+      generatedAt: o.generatedAt,
+    },
+  };
 }
 
 /**
@@ -135,20 +197,14 @@ export function mergedHistoryOf(flowId: string, run: DexRunner = runDexcli): Dis
 }
 
 async function main(argv: readonly string[]): Promise<number> {
-  const argValue = (flag: string): string | undefined => argValueFrom(argv, flag);
-  const flowId = argValue("--flow-id");
-  if (flowId === undefined) {
-    console.error("usage: render-metrics.ts --flow-id <id> [--kill-events|--events <jsonl>] [--all-runs] [--legacy-flow-keyed-envelopes] [--out-dir metrics] [--generated-at <iso>]");
-    return 2;
-  }
-  // `--events` is the flag name chaos-kill / watch-queue-verify use.
-  const killEventsPath = argValue("--kill-events") ?? argValue("--events");
+  const parsed = parseRenderMetricsArgs(argv);
+  if (!parsed.ok) return reportParseFailure("render-metrics", parsed);
+  const { flowId, killEventsPath, outDir } = parsed.options;
+  const generatedAt = parsed.options.generatedAt ?? new Date().toISOString();
   if (killEventsPath !== undefined && !existsSync(killEventsPath)) {
     console.error(`[render-metrics] kill-events sidecar not found: ${killEventsPath}`);
-    return 2;
+    return RENDER_METRICS_EXIT.sidecarMissing;
   }
-  const outDir = argValue("--out-dir") ?? "metrics";
-  const generatedAt = argValue("--generated-at") ?? new Date().toISOString();
 
   // flowStatus / runId / firstRunId come from ONE `flow summary` call; the
   // `flow state` payload only carries the attribute store.
@@ -186,7 +242,7 @@ async function main(argv: readonly string[]): Promise<number> {
   const loaded = loadKillEvents({
     explicitPath: killEventsPath,
     matchIds: runIds,
-    allRuns: argv.includes("--all-runs"),
+    allRuns: parsed.options.allRuns,
     runId,
   });
   // "resumed" is a post-kill fact this driver supplies per kill: the flow
@@ -203,7 +259,7 @@ async function main(argv: readonly string[]): Promise<number> {
     killEventDiagnostics: loaded.diagnostics,
     history,
     // Old (pre-identityOf, cx-5e style) evidence only; strict anchoring otherwise.
-    ...(argv.includes("--legacy-flow-keyed-envelopes") ? { legacyFlowKeyedEnvelopes: true } : {}),
+    ...(parsed.options.legacyFlowKeyedEnvelopes ? { legacyFlowKeyedEnvelopes: true } : {}),
     generatedAt,
   });
 
@@ -222,18 +278,14 @@ async function main(argv: readonly string[]): Promise<number> {
       `[render-metrics] NO EVIDENCE: flow ${flowId} has no envelope events (wrong flow id, attributes not read, or no steps yet) — the report verifies nothing`,
     );
   }
-  return report.json.provenance_ok ? 0 : 1;
+  return report.json.provenance_ok ? RENDER_METRICS_EXIT.ok : RENDER_METRICS_EXIT.failed;
 }
 
 if (import.meta.main) {
   main(process.argv.slice(2))
     .then((code) => process.exit(code))
     .catch((err: unknown) => {
-      if (err instanceof UsageError) {
-        console.error(`[render-metrics] usage: ${err.message}`);
-        process.exit(2);
-      }
       console.error("[render-metrics] fatal:", err);
-      process.exit(1);
+      process.exit(RENDER_METRICS_EXIT.failed);
     });
 }

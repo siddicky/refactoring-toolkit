@@ -29,6 +29,7 @@ import {
 import type { Context, Flow, StepDecision } from "@superdurable/dex";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import type { OptionTable } from "../src/cli/args.js";
 import {
   envelopeStepClass,
   envelopeStream,
@@ -52,6 +53,40 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
+
+// ---------------------------------------------------------------------------
+// Command-line inputs. This module has no argv of its own (run-demo.ts drives
+// the probe flows); the options that feed its inputs are declared here and
+// spread into run-demo's `round` / `long-step` command tables, so the defaults
+// and bounds live next to the code that consumes them.
+// ---------------------------------------------------------------------------
+
+/** `run-demo.ts round`: the file, round number and epoch of the probe PortRound flow's RoundInput. */
+export const PROBE_ROUND_OPTIONS = {
+  file: {
+    kind: "string",
+    metavar: "path",
+    default: "src/a.php",
+    description: "file the probe round writes, relative to the repository",
+  },
+  round: { kind: "int", min: 1, default: 1, description: "round number (the op-ID is <file>#<round>)" },
+  epoch: { kind: "int", min: 1, default: 1, description: "session-fence epoch of the lease" },
+} as const satisfies OptionTable;
+
+/** setTimeout fires at once for a delay above 2^31-1 ms, so a larger --ms would not sleep. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** `run-demo.ts long-step`: how long the probe LongStep flow's single step sleeps. */
+export const PROBE_LONG_STEP_OPTIONS = {
+  ms: {
+    kind: "int",
+    min: 0,
+    max: MAX_TIMER_MS,
+    default: 90_000,
+    metavar: "ms",
+    description: "how long the step sleeps; the multi-minute kill target of exit 0(c)",
+  },
+} as const satisfies OptionTable;
 
 // ---------------------------------------------------------------------------
 // Probe-durable attributes
