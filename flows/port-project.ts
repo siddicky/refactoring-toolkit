@@ -102,7 +102,10 @@ import {
 } from "../src/harness/runtime.js";
 import {
   buildTscQueueState,
-  parseTscOutput,
+  capErrorsPerFile,
+  tscOutcomeFromRun,
+  TSC_ERRORS_PER_FILE_CAP,
+  type TscRunAccounting,
 } from "../src/queues/tsc-queue.js";
 import {
   buildClassifiedVitestQueueState,
@@ -158,6 +161,9 @@ import {
 
 const execFileP = promisify(execFile);
 
+/** Contract A: honest tsc accounting (defined with the tsc queue, re-exported for metrics consumers). */
+export type { TscRunAccounting };
+
 // ---------------------------------------------------------------------------
 // Durable input/output shapes
 // ---------------------------------------------------------------------------
@@ -199,10 +205,6 @@ export interface FileRoundInput {
   branch: string;
   /** v1.1: true inside a per-file SubFlow child (routes to child release). */
   childFlow?: boolean;
-  /** v1.1: grouped queue errors for this file (fix rounds in child flows). */
-  queueFixErrors?: ReadonlyArray<QueueVerifyError>;
-  /** v1.1: vitest failures triaged to this file (fix rounds in child flows). */
-  queueFixVitest?: ReadonlyArray<ClassifiedVitestFailure>;
   /**
    * Run-level fields of the PortRunInput this file-round was leased from.
    * LeaseStep spreads the run input into the FileRoundInput, so they ride the
@@ -292,6 +294,13 @@ export interface QueueVerifyState {
     * recording").
     */
   vitestRun: VitestRunState | null;
+  /**
+   * C06 honest tsc accounting: `ran`, or `not-run` with an explicit reason
+   * (spawn error, timeout, non-zero exit with no located diagnostics).
+   * tscTotal counts LOCATED diagnostics only — read the state, not the count.
+   * Absent on states persisted before C06 and on child by-value feeds.
+   */
+  tscRun?: TscRunAccounting;
 }
 
 /** Phase 4: one burn-down sample (dashboard renders queue-burndown/*). */
@@ -307,6 +316,11 @@ export interface QueueBurnDownSample {
    * reason travel with the sample.
    */
   vitest?: VitestRunAccounting;
+  /**
+   * C06 (Contract A): honest tsc accounting, on the tsc TOTAL row only
+   * (file null). A not-run row is never a bare error_count 0.
+   */
+  tsc?: TscRunAccounting;
 }
 
 export interface PrepArtifact {
@@ -396,6 +410,8 @@ export interface PortRunResult {
     vitestNote: string | null;
     /** US-010: ran/not-run accounting (null on pre-US-010 states). */
     vitestRun: VitestRunState | null;
+    /** C06: tsc ran/not-run accounting (null on pre-C06 states). */
+    tscRun?: TscRunAccounting | null;
   } | null;
 }
 
@@ -441,12 +457,19 @@ export const ppBootstrap = new AttributeMap<BootstrapRecord>("pp-bootstrap", jso
 // v1.1 parallel dispatch durable attributes.
 export interface WaveEntry {
   file: string;
+  /**
+   * C03: the round THIS file runs at (fix waves mix files at different
+   * fromRounds). Absent on records persisted before C03 — readers fall back
+   * to the wave-level round (see waveEntryRound).
+   */
+  round?: number;
   errors: ReadonlyArray<QueueVerifyError>;
   /** Vitest failures triaged to this file (fix waves; Lane-B vitest-triage). */
   vitest: ReadonlyArray<ClassifiedVitestFailure>;
 }
 export interface WaveDispatchRecord {
   entries: WaveEntry[];
+  /** The FIRST entry's round (informational; each entry carries its own). */
   round: number;
   mode: "port" | "fix";
   dispatchedAtUtc: string;
@@ -1666,12 +1689,11 @@ const FenceStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
     return { output: fri, tokens: null };
   },
   // Phase 4: fix rounds (round >= 2) enter the queue-driven fix loop instead
-  // of re-implementing from scratch. Child flows route to their own fix step
-  // (queue errors arrive by SubFlow input, not the parent's pp-verify store).
+  // of re-implementing from scratch. One QueueFix class serves both flows: it
+  // reads its feed from the ctx-bound pp-verify, which is the parent's store
+  // in port.Project and the child's by-value seed (ChildLeaseStep) in port.File.
   route: (_ctx, _input, fri) =>
-    fri.round >= 2
-      ? goTo(fri.childFlow === true ? ChildQueueFixStart : QueueFixStart, fri)
-      : goTo(ImplementStart, fri),
+    fri.round >= 2 ? goTo(QueueFixStart, fri) : goTo(ImplementStart, fri),
 });
 
 // M4 (0(g)): durable PRE-start markers for model-calling steps. The
@@ -2189,6 +2211,7 @@ const FinalStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInpu
                 vitestTotal: verify.vitestTotal,
                 vitestNote: verify.vitestNote,
                 vitestRun: verify.vitestRun ?? null,
+                tscRun: verify.tscRun ?? null,
               },
       },
       tokens: null,
@@ -2694,23 +2717,53 @@ export interface BootstrapPlan {
   install: boolean;
 }
 
-const BOOTSTRAP_TSCONFIG =
-  JSON.stringify(
-    {
-      compilerOptions: {
-        strict: true,
-        target: "ES2022",
-        module: "ESNext",
-        moduleResolution: "Bundler",
-        noEmit: true,
-        skipLibCheck: true,
-        types: [],
+/** tsconfig `include` globs every scaffold covers, whatever the source map says. */
+const DEFAULT_TSCONFIG_INCLUDE: readonly string[] = ["src/**/*.ts", "test/**/*.ts", "tests/**/*.ts"];
+
+/**
+ * C06: tsconfig `include` for the integrated checkout — the defaults PLUS the
+ * top-level directory of every prep source-map output, so a map that puts
+ * output outside src/test/tests does not make tsc fail with TS18003 (no
+ * inputs). Outputs that are absolute, parent-relative or globbed are ignored
+ * (the include must stay inside the checkout).
+ */
+export function tsconfigIncludeFromSourceMap(
+  sourceMap: Record<string, { outPath: string }>,
+): string[] {
+  const include = new Set<string>(DEFAULT_TSCONFIG_INCLUDE);
+  for (const row of Object.values(sourceMap)) {
+    const rel = row.outPath.replace(/^\.\//, "");
+    if (rel === "" || rel.startsWith("/") || rel.includes("*") || rel.split("/").includes("..")) continue;
+    const ext = rel.endsWith(".tsx") ? "tsx" : "ts";
+    const slash = rel.indexOf("/");
+    include.add(slash > 0 ? `${rel.slice(0, slash)}/**/*.${ext}` : rel);
+  }
+  return [...include].sort();
+}
+
+/** The toolkit-owned scaffold tsconfig (single builder: bootstrap + verify fallback). */
+export function scaffoldTsconfigText(include: readonly string[] = DEFAULT_TSCONFIG_INCLUDE): string {
+  return (
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          target: "ES2022",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          noEmit: true,
+          skipLibCheck: true,
+          types: [],
+        },
+        include,
       },
-      include: ["src/**/*.ts", "test/**/*.ts", "tests/**/*.ts"],
-    },
-    null,
-    2,
-  ) + "\n";
+      null,
+      2,
+    ) + "\n"
+  );
+}
+
+const BOOTSTRAP_TSCONFIG = scaffoldTsconfigText();
 
 const BOOTSTRAP_VITEST_CONFIG = [
   'import { defineConfig } from "vitest/config";',
@@ -2792,11 +2845,17 @@ export async function findVitestTestFiles(integrationWorktreePath: string): Prom
  * runner either RAN (counts from the vitest summary + parsed failure records)
  * or did NOT run — with an explicit reason. A crashed runner (no parseable
  * summary) is NOT-RUN, never a zero-failure ran.
+ *
+ * C26: vitest 3.x writes the summary and per-file bullets to stdout but every
+ * `FAIL` block (message, diff, `file:line:col` frames) to stderr, so `run`
+ * carries both streams. They are read as stdout-then-stderr; the parsers
+ * anchor the summary lines and start records on `FAIL` only, so the merge
+ * neither doubles records nor lets the `Failed Tests N` banner win.
  */
 export function vitestOutcomeFromRun(
   binExists: boolean,
   testFiles: readonly string[],
-  run: { stdout: string } | null,
+  run: { stdout: string; stderr?: string } | null,
 ): { vitestRun: VitestRunState; records: VitestFailureRecord[] } {
   if (!binExists) {
     return {
@@ -2816,7 +2875,8 @@ export function vitestOutcomeFromRun(
   if (run === null) {
     return { vitestRun: { kind: "not-run", reason: "runner produced no output" }, records: [] };
   }
-  const summary = parseVitestSummary(run.stdout);
+  const text = run.stderr === undefined || run.stderr === "" ? run.stdout : `${run.stdout}\n${run.stderr}`;
+  const summary = parseVitestSummary(text);
   if (summary === null) {
     return {
       vitestRun: {
@@ -2833,7 +2893,7 @@ export function vitestOutcomeFromRun(
       failed: summary.tests.failed,
       total: summary.tests.total,
     },
-    records: parseVitestOutput(run.stdout),
+    records: parseVitestOutput(text),
   };
 }
 
@@ -2861,7 +2921,7 @@ export interface BootstrapDeps {
  * so kill-replay never duplicates the bootstrap commit.
  */
 export async function runIntegrationBootstrap(
-  input: { repoRoot: string; integrationWorktreePath: string },
+  input: { repoRoot: string; integrationWorktreePath: string; tsconfigInclude?: readonly string[] },
   deps: BootstrapDeps = {},
 ): Promise<BootstrapOutcome> {
   const itg = input.integrationWorktreePath;
@@ -2918,7 +2978,12 @@ export async function runIntegrationBootstrap(
     };
     await write("package.json", `${JSON.stringify(obj, null, 2)}\n`);
   }
-  if (plan.tsconfig) await write("tsconfig.json", BOOTSTRAP_TSCONFIG);
+  if (plan.tsconfig) {
+    await write(
+      "tsconfig.json",
+      input.tsconfigInclude === undefined ? BOOTSTRAP_TSCONFIG : scaffoldTsconfigText(input.tsconfigInclude),
+    );
+  }
   if (plan.vitestConfig) await write("vitest.config.ts", BOOTSTRAP_VITEST_CONFIG);
   if (plan.gitignore) {
     const base = (insp.gitignoreRaw ?? "").replace(/\n*$/, "\n");
@@ -2958,6 +3023,62 @@ export async function runIntegrationBootstrap(
 
 const TSC_BIN = join(import.meta.dir, "..", "node_modules", ".bin", "tsc");
 
+/**
+ * Tool locations and timeouts for the verify step. Production defaults; a
+ * mutable export so tests can point tsc at a missing binary or shrink the
+ * timeout without spawning a 180 s process.
+ */
+export const queueVerifyTools = {
+  tscBin: TSC_BIN,
+  tscTimeoutMs: 180_000,
+  vitestTimeoutMs: 180_000,
+};
+
+/** One finished child process, with everything execFile reports on failure. */
+interface CapturedRun {
+  stdout: string;
+  stderr: string;
+  /** Exit code; null when killed, signalled or never spawned. */
+  exitCode: number | null;
+  signal: string | null;
+  /** True when execFile's timeout / maxBuffer guard killed the process. */
+  killed: boolean;
+  /** Spawn-level error code ("ENOENT", "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", ...). */
+  errorCode: string | null;
+}
+
+/** Runs a tool to completion and NEVER throws: failure modes are data. */
+async function runCaptured(
+  bin: string,
+  args: readonly string[],
+  opts: { cwd: string; timeoutMs: number },
+): Promise<CapturedRun> {
+  try {
+    const { stdout, stderr } = await execFileP(bin, [...args], {
+      cwd: opts.cwd,
+      timeout: opts.timeoutMs,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return { stdout, stderr, exitCode: 0, signal: null, killed: false, errorCode: null };
+  } catch (err) {
+    const e = err as {
+      stdout?: string;
+      stderr?: string;
+      code?: number | string | null;
+      signal?: string | null;
+      killed?: boolean;
+    };
+    return {
+      stdout: e.stdout ?? "",
+      stderr: e.stderr ?? "",
+      exitCode: typeof e.code === "number" ? e.code : null,
+      signal: e.signal ?? null,
+      killed: e.killed === true,
+      errorCode: typeof e.code === "string" ? e.code : null,
+    };
+  }
+}
+
 async function pathExists(p: string): Promise<boolean> {
   try {
     await stat(p);
@@ -2993,38 +3114,19 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     if (!(await pathExists(join(itg, "tsconfig.json")))) {
       await writeFile(
         join(itg, "tsconfig.json"),
-        JSON.stringify(
-          {
-            compilerOptions: {
-              strict: true,
-              target: "ES2022",
-              module: "ESNext",
-              moduleResolution: "Bundler",
-              noEmit: true,
-              skipLibCheck: true,
-              types: [],
-            },
-            include: ["src/**/*.ts", "test/**/*.ts", "tests/**/*.ts"],
-          },
-          null,
-          2,
-        ),
+        scaffoldTsconfigText(tsconfigIncludeFromSourceMap(prep?.sourceMap ?? {})),
       );
     }
 
-    // tsc queue: parse + group via the proven queue module.
-    let tscOut = "";
-    try {
-      const { stdout } = await execFileP(TSC_BIN, ["--noEmit", "--pretty", "false"], {
-        cwd: itg,
-        timeout: 180_000,
-        maxBuffer: 64 * 1024 * 1024,
-      });
-      tscOut = stdout;
-    } catch (err) {
-      const e = err as { stdout?: string; stderr?: string };
-      tscOut = `${e.stdout ?? ""}\n${e.stderr ?? ""}`;
-    }
+    // tsc queue: parse + group via the proven queue module. C06: the process
+    // outcome (exit code, kill/timeout, spawn error) is data, not a silent
+    // "0 parsed errors": a run that could not produce a trustworthy count is
+    // recorded as NOT-RUN with its reason.
+    const tscRun = await runCaptured(queueVerifyTools.tscBin, ["--noEmit", "--pretty", "false"], {
+      cwd: itg,
+      timeoutMs: queueVerifyTools.tscTimeoutMs,
+    });
+    let tscOut = `${tscRun.stdout}\n${tscRun.stderr}`;
     // Deterministic kill-smoke fault (Phase 4 exit): iteration 1 only — inject
     // one synthetic, self-labeled tsc error for the first done file so the fix
     // round ACTUALLY runs and the queue/fix-round kill window exists. Never
@@ -3036,7 +3138,15 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
         tscOut += `\n${injectPath.replace(/^\.\//, "")}(1,1): error TS9999: injected fault queue-verify:inject-error:seed (synthetic — fix-round durability smoke, not a real port error)\n`;
       }
     }
-    const tscState = buildTscQueueState(parseTscOutput(tscOut), iteration);
+    const tscOutcome = tscOutcomeFromRun({
+      output: tscOut,
+      exitCode: tscRun.exitCode,
+      signal: tscRun.signal,
+      killed: tscRun.killed,
+      errorCode: tscRun.errorCode,
+      timeoutMs: queueVerifyTools.tscTimeoutMs,
+    });
+    const tscState = buildTscQueueState(tscOutcome.errors, iteration);
 
     // vitest queue (US-010 honest accounting): the runner either RAN — counts
     // from the vitest summary plus parsed failure records — or did NOT run,
@@ -3048,25 +3158,23 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     const vitestBin = join(itg, "node_modules", ".bin", "vitest");
     const binExists = await pathExists(vitestBin);
     const testFiles = await findVitestTestFiles(itg);
-    let vitestStdout: string | null = null;
+    let vitestIo: { stdout: string; stderr: string } | null = null;
     if (binExists && testFiles.length > 0) {
-      try {
-        const res = await execFileP(vitestBin, ["run", "--reporter", "default"], {
-          cwd: itg,
-          timeout: 180_000,
-          maxBuffer: 64 * 1024 * 1024,
-        });
-        vitestStdout = res.stdout;
-      } catch (err) {
-        // Non-zero exit = failing tests (still ran — output carries counts).
-        vitestStdout = (err as { stdout?: string }).stdout ?? null;
-      }
+      // C26: vitest 3.x writes every `FAIL` block (message, diff, frames) to
+      // STDERR and only the summary + per-file bullets to stdout — both
+      // streams are captured. A non-zero exit = failing tests (still ran —
+      // the output carries counts); no output at all on a failed spawn = null.
+      const vitestProc = await runCaptured(vitestBin, ["run", "--reporter", "default"], {
+        cwd: itg,
+        timeoutMs: queueVerifyTools.vitestTimeoutMs,
+      });
+      const silent = vitestProc.stdout === "" && vitestProc.stderr === "";
+      vitestIo =
+        silent && vitestProc.exitCode !== 0
+          ? null
+          : { stdout: vitestProc.stdout, stderr: vitestProc.stderr };
     }
-    const { vitestRun, records: vitestRecords } = vitestOutcomeFromRun(
-      binExists,
-      testFiles,
-      vitestStdout === null ? null : { stdout: vitestStdout },
-    );
+    const { vitestRun, records: vitestRecords } = vitestOutcomeFromRun(binExists, testFiles, vitestIo);
     const vitestNote = vitestRun.kind === "not-run" ? vitestRun.reason : null;
     const jevUsageSink: number[] = [];
     const roots = portedRootsFromSourceMap(prep?.sourceMap ?? {});
@@ -3085,9 +3193,12 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
     ppBurndown.set(ctx, `tsc-${iteration}`, {
       queue: "tsc",
       iteration,
+      // C06: error_count counts LOCATED diagnostics only; the accounting says
+      // whether that count is trustworthy (ran) or vacuous (not-run).
       error_count: tscState.total,
       file: null,
       recorded_at: recordedAt,
+      tsc: tscOutcome.accounting,
     });
     ppBurndown.set(ctx, `vitest-${iteration}`, {
       queue: "vitest",
@@ -3129,13 +3240,20 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
       errorCountByFile,
       config?.maxRounds ?? input.maxRounds,
     );
+    // `capped` is recomputed from the WHOLE done set every iteration, so a
+    // file capped earlier shows up again: append only files not already
+    // blocked (C04 — else PortRunResult.blocked and the dashboard counts
+    // inflate with every further iteration).
+    const alreadyBlocked = new Set(queue.blocked.map((b) => b.file));
     const blocked = [
       ...queue.blocked,
-      ...capped.map((c) => ({
-        file: c.file,
-        round: c.round,
-        reason: `round cap reached with ${c.count} queue error(s) remaining`,
-      })),
+      ...capped
+        .filter((c) => !alreadyBlocked.has(c.file))
+        .map((c) => ({
+          file: c.file,
+          round: c.round,
+          reason: `round cap reached with ${c.count} queue error(s) remaining`,
+        })),
     ];
 
     ppVerify.set(ctx, "verify", {
@@ -3145,7 +3263,9 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
       vitestTotal,
       vitestNote,
       lastRunAt: recordedAt,
-      errors: tscState.errors.slice(0, 80).map((e) => ({
+      // C05: capped PER FILE (not globally): selection above counts every
+      // file's errors, so every fixable file must keep a non-empty feed.
+      errors: capErrorsPerFile(tscState.errors).map((e) => ({
         file: e.file.replace(/^\.\//, ""),
         code: e.code,
         message: e.message,
@@ -3153,6 +3273,7 @@ const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
       })),
       vitestState,
       vitestRun,
+      tscRun: tscOutcome.accounting,
     });
     ppQueue.set(ctx, "queue", {
       ...queue,
@@ -3201,11 +3322,14 @@ const BootstrapStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRun
   stepId: "pp-bootstrap",
   role: "integration",
   identityOf: () => "bootstrap",
-  stepOptions: { executeRetry: { maximumAttempts: 2 } },
+  stepOptions: { executeRetry: { maximumAttempts: 2 }, executeLoadAttributeMaps: [ppPrep] },
   inner: async (ctx, input) => {
+    // C06: the scaffold tsconfig must cover the prep source map's outputs.
+    const prep = ppPrep.get(ctx, "prep");
     const outcome = await runIntegrationBootstrap({
       repoRoot: input.repoRoot,
       integrationWorktreePath: input.integrationWorktreePath,
+      ...(prep !== undefined ? { tsconfigInclude: tsconfigIncludeFromSourceMap(prep.sourceMap) } : {}),
     });
     ppBootstrap.set(ctx, "bootstrap", {
       bootstrappedAtUtc: new Date().toISOString(),
@@ -3226,7 +3350,9 @@ const BootstrapStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRun
 /**
  * Queue-driven fix step (Phase 4 fix loop): the fixer receives the grouped
  * queue errors for THIS file by value and produces the fixed file. Clean
- * runs skip it entirely.
+ * runs skip it entirely. Shared by port.Project (sequential mode) and
+ * port.File (parallel children): the feed is read from the flow's own
+ * ctx-bound pp-verify, so the step body is identical in both.
  */
 const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoundInput, FileRoundInput>({
   stepType: "PpQueueFix",
@@ -3250,7 +3376,10 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
     const feed = queueFixFeedForFile(verify, rel);
     const errs = feed.errors;
     if (errs.length === 0 && feed.testFailures.length === 0) {
-      return { output: fri, tokens: null, outcome: "skipped" as EnvelopeOutcome };
+      // Nothing to fix: no agent turn. The envelope rejects tokens:null for a
+      // model-calling role even on a skip (it threw "provenance failure"), so
+      // a skip reports its true usage: an explicit 0.
+      return { output: fri, tokens: 0, outcome: "skipped" as EnvelopeOutcome };
     }
     const current = await readFile(join(fri.worktreePath, outPath), "utf8");
 
@@ -3287,8 +3416,6 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
   },
   route: (_ctx, _input, fri) => goTo(CaptureDiffStep, fri),
 });
-
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // v1.1 — parallel per-file dispatch (dex SubFlows; default mode)
@@ -3351,6 +3478,11 @@ function childInputOf(
   };
 }
 
+/** The round one wave entry runs at (pre-C03 records carry only the wave's). */
+export function waveEntryRound(wave: Pick<WaveDispatchRecord, "round">, entry: Pick<WaveEntry, "round">): number {
+  return entry.round ?? wave.round;
+}
+
 export type WaveMode = "port" | "fix";
 export interface WaveDispatchOutput extends PortRunInput {
   mode: WaveMode;
@@ -3372,27 +3504,29 @@ const WaveDispatchStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClas
       throw new Error("wave dispatch requires durable queue + prep state");
     }
     let entries: WaveEntry[];
-    let round: number;
     if (input.mode === "fix") {
       const fixable = (verify?.fixQueue ?? []).slice(0, CHILD_SLOT_CAP);
       if (fixable.length === 0) throw new Error("fix wave dispatched with empty fix queue");
-      round = (fixable[0]?.fromRound ?? 1) + 1;
       const outPathOf = (file: string): string =>
         (prep.sourceMap[file]?.outPath ?? "").replace(/^\.\//, "");
+      // C03: a fix queue mixes files at different fromRounds. Each entry runs
+      // at ITS OWN next round — one shared round skipped a round for the
+      // lower-round file, or re-ran the higher-round file at a round whose
+      // keyed commit already exists (the new fix deduped away).
       entries = fixable.map((f) => ({
         file: f.file,
+        round: f.fromRound + 1,
         errors: (verify?.errors ?? []).filter((e) => e.file === outPathOf(f.file)),
         vitest: vitestRoutedTo(verify?.vitestState?.classified, outPathOf(f.file)),
       }));
     } else {
       const files = queue.pending.slice(0, CHILD_SLOT_CAP);
       if (files.length === 0) throw new Error("port wave dispatched with empty pending queue");
-      entries = files.map((file) => ({ file, errors: [], vitest: [] }));
-      round = 1;
+      entries = files.map((file) => ({ file, round: 1, errors: [], vitest: [] }));
     }
     ppWave.set(ctx, "wave", {
       entries,
-      round,
+      round: entries[0]?.round ?? 1,
       mode: input.mode,
       dispatchedAtUtc: new Date().toISOString(),
     });
@@ -3428,13 +3562,14 @@ const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
     if (prep === undefined) throw new Error("wave join requires durable prep state");
     const wave = ppWave.get(ctx, "wave");
     if (wave === undefined) throw new Error("wave join requires a durable wave record");
-    const conditions = wave.entries.map((entry, i) =>
-      SubFlow.run(
+    const conditions = wave.entries.map((entry, i) => {
+      const round = waveEntryRound(wave, entry);
+      return SubFlow.run(
         PortFileFlowInstance,
-        childInputOf(input, prep, entry.file, wave.round, entry.errors, entry.vitest),
-        { conditionId: `wave-${wave.mode}-${wave.round}-${i}` },
-      ),
-    );
+        childInputOf(input, prep, entry.file, round, entry.errors, entry.vitest),
+        { conditionId: `wave-${wave.mode}-${round}-${i}` },
+      );
+    });
     return Wait.allOf(...conditions);
   },
   inner: async (ctx, input) => {
@@ -3447,7 +3582,7 @@ const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
     ppWaveChildren.set(ctx, "children", {
       children: wave.entries.map((entry, i) => ({
         file: entry.file,
-        round: wave.round,
+        round: waveEntryRound(wave, entry),
         flowId: SubFlow.getFlowId(ctx, i),
       })),
     });
@@ -3462,12 +3597,13 @@ const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
     const done = [...queue.done];
     for (let i = 0; i < wave.entries.length; i++) {
       const entry = wave.entries[i]!;
+      const round = waveEntryRound(wave, entry);
       const result = SubFlow.getConditionResults(ctx, i);
       if (!result.isTerminal || result.errorType !== undefined) {
-        throw new Error(`wave join: child ${entry.file}#${wave.round} not successfully terminal (${result.status})`);
+        throw new Error(`wave join: child ${entry.file}#${round} not successfully terminal (${result.status})`);
       }
       const receipt = result.singleOutput<ChildFileResult>();
-      const opId = operationId(entry.file, wave.round);
+      const opId = operationId(entry.file, round);
       const keyed = await findCommitByOpId(input.repoRoot, opId);
       if (keyed !== undefined) {
         await mergeLeaseIntoIntegration(
@@ -3481,7 +3617,7 @@ const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
         }
         done.push({
           file: entry.file,
-          round: wave.round,
+          round,
           commitSha: keyed.sha,
           treeHash: keyed.contentHash ?? null,
         });
@@ -3497,7 +3633,7 @@ const WaveJoinStep: EnvelopeStepClass<WaveDispatchOutput> = envelopeStepClass<
         }
         done.push({
           file: entry.file,
-          round: wave.round,
+          round,
           commitSha: receipt.commitSha ?? null,
           treeHash: receipt.treeHash ?? null,
         });
@@ -3578,7 +3714,7 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
       vitestTotal: childVitest.length,
       vitestNote: "child flow (errors by value)",
       lastRunAt: new Date().toISOString(),
-      errors: [...input.queueFixErrors].slice(0, 80).map((e) => ({ ...e })),
+      errors: [...input.queueFixErrors].slice(0, TSC_ERRORS_PER_FILE_CAP).map((e) => ({ ...e })),
       vitestState: {
         kind: "vitest-queue",
         iteration: input.round,
@@ -3595,25 +3731,23 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
       bindLeaseStore(ctx, ppLease),
       LEASE_SLOT_CAP,
     );
+    // The fix feed travels through the child's pp-verify seeded above (read by
+    // queueFixFeedForFile), so the FileRoundInput carries no error copies.
+    const childInput = (lease: { worktreePath: string; branch: string }): FileRoundInput => ({
+      repoRoot: input.repoRoot,
+      worktreeRoot: input.worktreeRoot,
+      integrationWorktreePath: input.integrationWorktreePath,
+      sourceRoot: input.sourceRoot,
+      epoch: input.epoch,
+      file: input.file,
+      round: input.round,
+      worktreePath: lease.worktreePath,
+      branch: lease.branch,
+      childFlow: true,
+    });
     const existing = pool.store().get(input.file);
     if (existing !== undefined && !pool.isStale(existing, input.epoch)) {
-      return {
-        output: {
-          repoRoot: input.repoRoot,
-          worktreeRoot: input.worktreeRoot,
-          integrationWorktreePath: input.integrationWorktreePath,
-          sourceRoot: input.sourceRoot,
-          epoch: input.epoch,
-          file: input.file,
-          round: input.round,
-          worktreePath: existing.worktreePath,
-          branch: existing.branch,
-          childFlow: true,
-          queueFixErrors: input.queueFixErrors,
-          queueFixVitest: input.queueFixVitest,
-        },
-        tokens: null,
-      };
+      return { output: childInput(existing), tokens: null };
     }
     const acquired = await pool.acquire(input.file, input.epoch, `pp-child-${input.epoch}`);
     if (!acquired.acquired) {
@@ -3622,92 +3756,9 @@ const ChildLeaseStep: EnvelopeStepClass<PortFileInput> = envelopeStepClass<PortF
       // this store (concurrent re-acquire): retryable.
       throw new Error(`child lease failed for ${input.file}: ${acquired.reason}`);
     }
-    return {
-      output: {
-        repoRoot: input.repoRoot,
-        worktreeRoot: input.worktreeRoot,
-        integrationWorktreePath: input.integrationWorktreePath,
-        sourceRoot: input.sourceRoot,
-        epoch: input.epoch,
-        file: input.file,
-        round: input.round,
-        worktreePath: acquired.lease.worktreePath,
-        branch: acquired.lease.branch,
-        childFlow: true,
-        queueFixErrors: input.queueFixErrors,
-        queueFixVitest: input.queueFixVitest,
-      },
-      tokens: null,
-    };
+    return { output: childInput(acquired.lease), tokens: null };
   },
   route: (_ctx, _input, fri) => goTo(FenceStep, fri),
-});
-
-const ChildQueueFixStart: EnvelopeStepClass<FileRoundInput> = envelopeStartMarker<FileRoundInput>({
-  stepType: "PpQueueFixStart",
-  targetStepId: "pp-queue-fix",
-  role: "agent",
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
-  stepOptions: MARKER_STEP_OPTIONS,
-  route: (fri) => goTo(ChildQueueFixStep, fri),
-});
-
-/** Child fix step: grouped errors arrive by SubFlow input (child pp-verify). */
-const ChildQueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRoundInput, FileRoundInput>({
-  stepType: "PpQueueFix",
-  stepId: "pp-queue-fix",
-  role: "agent",
-  // cx-5e: identity-keyed envelope (see ChildLeaseStep note).
-  identityOf: (_ctx, fri) => markerKeyOf(fri.file, fri.round),
-  stepOptions: {
-    ...MODEL_STEP_OPTIONS,
-    executeLoadAttributeMaps: [ppVerify, ppOut, ppPrep],
-  },
-  inner: async (ctx, fri) => {
-    const verify = ppVerify.get(ctx, "verify");
-    const prep = ppPrep.get(ctx, "prep");
-    const out = ppOut.get(ctx, outKeyOf(fri.file, fri.round));
-    const outPath = out?.outPath ?? prep?.sourceMap[fri.file]?.outPath;
-    if (outPath === undefined) throw new Error(`output path missing for ${fri.file}#${fri.round}`);
-    const rel = outPath.replace(/^\.\//, "");
-    // Fix-round feed: tsc errors + vitest failures triaged to this file
-    // (Lane-B vitest-triage; registry-declared routing by attributedFile).
-    const feed = queueFixFeedForFile(verify, rel);
-    const errs = feed.errors;
-    if (errs.length === 0 && feed.testFailures.length === 0) {
-      return { output: fri, tokens: null, outcome: "skipped" as EnvelopeOutcome };
-    }
-    const current = await readFile(join(fri.worktreePath, outPath), "utf8");
-    const harness = requireHarness();
-    const label = fenceLabel(`${fri.file}:queuefix`, fri.round, fri.epoch);
-    const session = await harness.createSession(label);
-    sessionFenceMap.set(ctx, label, {
-      sessionId: session.id,
-      stepId: "pp-queue-fix",
-      epoch: fri.epoch,
-      label,
-      persistedAtUtc: new Date().toISOString(),
-    });
-    const turn = composeQueueFixTurn({
-      currentContent: current,
-      outputPath: outPath,
-      errors: errs.map((e) => ({ code: e.code, message: e.message, line: e.line })),
-      testFailures: feed.testFailures,
-      ...(prep?.userContract !== undefined ? { userContract: prep.userContract } : {}),
-    });
-    const result = await runAgentTurn({
-      def: FIXER,
-      sessionId: session.id,
-      turn,
-      file: fri.file,
-      round: fri.round,
-      ...executorPromptOpts(),
-    });
-    const code = extractCodeFence(result.text, ".ts");
-    await writeOutFile(fri.worktreePath, outPath, code);
-    return { output: fri, tokens: result.usage ?? result.tokens };
-  },
-  route: (_ctx, _input, fri) => goTo(CaptureDiffStep, fri),
 });
 
 /** Child receipt: release the lease, hand the round's git facts to the parent. */
@@ -3755,8 +3806,8 @@ export class PortFileFlow implements Flow<PortFileInput> {
   readonly fence = new FenceStep();
   readonly implementStart = new ImplementStart();
   readonly implement = new ImplementStep();
-  readonly queueFixStart = new ChildQueueFixStart();
-  readonly queueFix = new ChildQueueFixStep();
+  readonly queueFixStart = new QueueFixStart();
+  readonly queueFix = new QueueFixStep();
   readonly captureDiff = new CaptureDiffStep();
   readonly reviewAStart = new ReviewAStart();
   readonly reviewA = new ReviewAStep();

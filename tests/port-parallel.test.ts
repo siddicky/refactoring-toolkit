@@ -170,7 +170,7 @@ describe("shared per-file steps route by flow kind (parent vs child)", () => {
     abortSessionsNotTagged: async () => [],
   };
 
-  test("FenceStep: round 1 implements in both flows; fix rounds enter each flow's own queue-fix step", async () => {
+  test("FenceStep: round 1 implements in both flows; fix rounds enter the one shared queue-fix step", async () => {
     configurePortHarness(stubHarness);
     const parent = new PortProjectFlow();
     const child = new PortFileFlow();
@@ -181,12 +181,12 @@ describe("shared per-file steps route by flow kind (parent vs child)", () => {
     expect(nextStep(await run(stores, child.fence, { ...round1, childFlow: true }))).toBe(child.implementStart.constructor);
 
     const fix = fileRound("/r", { round: 2 });
-    // Parent: queue errors come from its own pp-verify store.
+    // One QueueFix class serves both flows (C90): the parent reads its own
+    // pp-verify store and the child reads the copy seeded by ChildLeaseStep.
     expect(nextStep(await run(stores, parent.fence, fix))).toBe(parent.queueFixStart.constructor);
-    // Child: errors arrive by SubFlow input, so it routes to its own fix step.
     const childFix = nextStep(await run(stores, child.fence, { ...fix, childFlow: true }));
     expect(childFix).toBe(child.queueFixStart.constructor);
-    expect(childFix).not.toBe(parent.queueFixStart.constructor);
+    expect(childFix).toBe(parent.queueFixStart.constructor);
   });
 
   test("CommitStep: a child's round ends at the child release; the parent's round goes to integration", async () => {

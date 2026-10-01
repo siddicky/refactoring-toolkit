@@ -132,9 +132,13 @@ export interface VitestSummary {
  *   Test Files  2 failed | 3 passed (5)
  *        Tests  4 failed | 41 passed (45)
  *
- * ANSI is expected pre-stripped (parseVitestOutput normalizes). Returns null
- * when no parseable `Tests` summary exists (runner crash / no run happened) —
- * the caller records that as not-run, never as a zero-failure ran.
+ * ANSI is stripped here (a colored `Tests` line must still anchor). Returns
+ * null when no parseable `Tests` summary exists (runner crash / no run
+ * happened) — the caller records that as not-run, never as a zero-failure ran.
+ *
+ * `output` may be stdout and stderr concatenated: vitest 3.x writes the
+ * summary to stdout and every `FAIL` block plus the `Failed Tests N` banner to
+ * stderr, and only the anchored `Test Files` / `Tests` lines count.
  *
  * cx6c live finding: when EVERY test file fails to COLLECT (e.g. a ported
  * module imports a file the implementer never wrote), vitest prints
@@ -146,13 +150,13 @@ export interface VitestSummary {
 export function parseVitestSummary(output: string): VitestSummary | null {
   let testFiles: VitestSummaryCounts | null = null;
   let tests: VitestSummaryCounts | null = null;
-  for (const line of output.split("\n")) {
-    const files = parseSummaryLine(line, "Test Files");
+  for (const line of output.replace(ANSI_ESCAPE, "").split("\n")) {
+    const files = parseSummaryLine(line, TEST_FILES_LABEL);
     if (files !== null) {
       testFiles = files;
       continue;
     }
-    const t = parseSummaryLine(line, "Tests");
+    const t = parseSummaryLine(line, TESTS_LABEL);
     if (t !== null) tests = t;
   }
   if (tests === null) {
@@ -176,11 +180,21 @@ export function parseVitestSummary(output: string): VitestSummary | null {
   return { testFiles, tests };
 }
 
-/** `Tests  4 failed | 41 passed (45)` → {passed: 41, failed: 4, total: 45}. */
-function parseSummaryLine(line: string, label: string): VitestSummaryCounts | null {
-  const idx = line.indexOf(label);
-  if (idx < 0) return null;
-  const rest = line.slice(idx + label.length);
+const TEST_FILES_LABEL = /^\s*Test Files\s/;
+const TESTS_LABEL = /^\s*Tests\s/;
+
+/**
+ * `Tests  4 failed | 41 passed (45)` → {passed: 41, failed: 4, total: 45}.
+ *
+ * Anchored: the label must be the first token of the line. vitest 3.x also
+ * prints `⎯⎯ Failed Tests 2 ⎯⎯` banners and `FAIL  f > Tests > x` headers; an
+ * indexOf match let those overwrite the real summary once stdout and stderr
+ * are read together (C26).
+ */
+function parseSummaryLine(line: string, label: RegExp): VitestSummaryCounts | null {
+  const anchored = label.exec(line);
+  if (anchored === null) return null;
+  const rest = line.slice(anchored[0].length);
   const failed = /(\d+)\s+failed/.exec(rest);
   const passed = /(\d+)\s+passed/.exec(rest);
   const skipped = /(\d+)\s+skipped/.exec(rest);
@@ -203,13 +217,17 @@ function parseSummaryLine(line: string, label: string): VitestSummaryCounts | nu
 const ANSI_ESCAPE = /\x1b\[[0-9;]*m/g;
 
 /**
- * Record starts: vitest's default reporter `FAIL  path > suite > test` lines,
- * plus cross/tick markers that carry a suite separator (guards against the
- * per-file summary bullets like `× applies discount 12ms`, which lack " > "
- * and would duplicate the detailed FAIL block).
+ * Record starts: vitest's default reporter `FAIL  path > suite > test` lines
+ * ONLY. The per-file `× Suite > test 12ms` bullets carry no message or stack
+ * frames, duplicate the FAIL block when both streams are read, and — when the
+ * FAIL blocks were dropped with stderr (C26) — produced frameless records that
+ * could never be attributed to a file. A test that fails always gets a FAIL
+ * block; a collection failure gets `FAIL  file [ file ]`.
  */
-const RECORD_START = /^\s*(?:FAIL\s+\S|[✗×]\s+\S.*\s>\s)/;
+const RECORD_START = /^\s*FAIL\s+\S/;
 const SUMMARY_START = /^\s*(?:Test Files\s|Tests\s|Duration\s|Start at\s)/;
+/** `⎯⎯⎯ Failed Tests 2 ⎯⎯⎯` banners and `⎯⎯⎯[1/3]⎯` footers end a record. */
+const SECTION_RULE = /^\s*⎯{2,}/;
 
 const STACK_FRAME_LINE = /(?:^|\s)(?:❯|at)\s+(.+)$/;
 const FILE_LINE_COL = /([^\s()'"]+):(\d+):(\d+)/g;
@@ -230,8 +248,8 @@ export function parseVitestOutput(output: string): VitestFailureRecord[] {
     }
   };
 
-  for (const line of clean.split("\n")) {
-    if (SUMMARY_START.test(line)) {
+  for (const line of clean.split(/\r?\n/)) {
+    if (SUMMARY_START.test(line) || SECTION_RULE.test(line)) {
       flush();
       continue;
     }
@@ -258,13 +276,17 @@ export function parseVitestOutput(output: string): VitestFailureRecord[] {
   return failures;
 }
 
-/** `FAIL  tests/foo.test.ts > Suite > test name` → {testFile, testName}. */
+/**
+ * `FAIL  tests/foo.test.ts > Suite > test name` → {testFile, testName}.
+ * A collection failure prints `FAIL  tests/foo.test.ts [ tests/foo.test.ts ]`;
+ * the bracketed repeat is not part of the file path.
+ */
 function parseFailHeader(line: string): VitestFailureRecord {
-  const rest = line.trim().replace(/^(?:FAIL|[✗×])\s+/, "");
+  const rest = line.trim().replace(/^FAIL\s+/, "");
   const separatorIndex = rest.indexOf(" > ");
   if (separatorIndex < 0) {
     return {
-      testFile: rest,
+      testFile: rest.replace(/\s+\[\s.*\s\]$/, ""),
       testName: "",
       errorMessage: "",
       frames: [],
