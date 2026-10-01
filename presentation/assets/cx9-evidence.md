@@ -95,3 +95,25 @@ health chips green). Replaces the previous capture.
 - AC2: `presentation/assets/report-final.md` — provenance_ok=true
   (77 envelopes on the final run, 16 start markers, 0 interrupted,
   8 verdict records, 0 tombstones, kill events: none recorded — honest).
+
+## Historical output (added 2026-09-30)
+
+The recorded files in this directory are evidence from the runs above and are
+not regenerated. `report-cx5e.md`, `report-final.md` and the copy of the cx-5e
+report embedded in `../index.html` predate later fixes to `render-metrics`, so
+current output differs from them in these ways:
+
+- `resumed` is derived per kill from the flow summary and post-kill envelopes,
+  not recorded as `false` after a completed kill run.
+- "total wall clock" is now two figures: step time (the sum of step durations)
+  and elapsed wall clock (first envelope start to last end).
+- Burn-down tables no longer show a `(total):0` per-file entry.
+- The cost footnote reads differently when a lane reports no per-call cost.
+- `PORTING.spec.md` is no longer listed among the files.
+- The dispatch count is no longer 368: it counted events rather than entries.
+- The report gains a "Judgment (Jev) tokens and cost" section and states
+  `typecheck (tsc): NOT RUN (<reason>)` when type checking did not run.
+
+Compare regenerated numbers against these reports with that in mind.
+`final-test-gate.txt` is the test summary of an earlier build (356 tests in 30
+files); `bun test` now runs far more.
