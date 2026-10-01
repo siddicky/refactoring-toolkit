@@ -112,7 +112,7 @@ describe("extractDispatchEntries (dexcli history -> dispatch entries)", () => {
   test("recorded run-a history extracts 57 entries including 3 non-agent kinds", () => {
     const entries = extractDispatchEntries(historyA);
     expect(entries.length).toBe(57);
-    expect(entries.filter((e) => classifyDispatchStepType(e.stepType) === "non-agent").length).toBe(3);
+    expect(entries.filter((e) => classifyDispatchStepType(e.stepType).kind === "non-agent").length).toBe(3);
   });
 });
 
@@ -141,12 +141,20 @@ describe("identity + step table helpers", () => {
   });
 
   test("classifyDispatchStepType: flow steps, non-agent dex kinds (case-insensitive), unknown", () => {
-    expect(classifyDispatchStepType("PpCommit")).toBe("flow-step");
+    expect(classifyDispatchStepType("PpCommit").kind).toBe("flow-step");
     for (const kind of NON_AGENT_DEX_KINDS) {
-      expect(classifyDispatchStepType(kind)).toBe("non-agent");
-      expect(classifyDispatchStepType(kind.toUpperCase())).toBe("non-agent");
+      expect(classifyDispatchStepType(kind)).toEqual({ kind: "non-agent" });
+      expect(classifyDispatchStepType(kind.toUpperCase())).toEqual({ kind: "non-agent" });
     }
-    expect(classifyDispatchStepType("PpEvil")).toBe("unknown");
+    expect(classifyDispatchStepType("PpEvil")).toEqual({ kind: "unknown" });
+  });
+
+  test("a flow-step classification carries the spec it was found under, for every step type in the table", () => {
+    // anchorDispatch uses this spec directly; it used to look the spec up a second time and skip the entry if
+    // that lookup came back empty, a branch no classification could reach.
+    for (const spec of PORT_FLOW_STEPS) {
+      expect(classifyDispatchStepType(spec.stepType)).toEqual({ kind: "flow-step", spec });
+    }
   });
 });
 

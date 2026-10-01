@@ -334,16 +334,16 @@ export function runProvenanceCrossCheck(input: {
 }
 
 /**
- * Recover the grouping target for an envelope: explicit file/round first,
- * else parse the M2 identity (`file#round`); null for flow-level steps.
- * The live factory leaves file/round null on per-file steps — identity is
- * the authoritative target key.
+ * Recover the grouping target for an envelope: an explicit file/round first
+ * (hand-built and legacy events), else parse the M2 identity (`file#round`);
+ * null for flow-level steps. The live factory writes no file/round on any
+ * event, so there the identity is the authoritative target key.
  */
 function envelopeTarget(
   env: EnvelopeEvent,
   canonicalFile: (file: string) => string,
 ): { file: string; round: number | null } | null {
-  if (env.file !== null) return { file: canonicalFile(env.file), round: env.round };
+  if (env.file != null) return { file: canonicalFile(env.file), round: env.round ?? null };
   if (env.identity !== null) {
     const parsed = fileFromIdentity(env.identity);
     if (parsed !== null) {

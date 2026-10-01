@@ -267,15 +267,22 @@ function isNonAgentDexKind(stepType: string): boolean {
 }
 
 /**
- * Classify a dispatch entry's step type for the anchor.
- * "flow-step" -> envelope-carrying (needs its envelope/marker);
+ * What a dispatch entry's step type is, for the anchor:
+ * "flow-step" -> envelope-carrying (needs its envelope/marker); carries the spec
+ *                it was found under, so the caller needs no second lookup;
  * "non-agent" -> allowed without an envelope (dex kinds);
  * "unknown"   -> unexplained (anchor failure).
  */
-export function classifyDispatchStepType(stepType: string): "flow-step" | "non-agent" | "unknown" {
-  if (SPEC_BY_STEP_TYPE.has(stepType)) return "flow-step";
-  if (isNonAgentDexKind(stepType)) return "non-agent";
-  return "unknown";
+export type StepTypeClass =
+  | { kind: "flow-step"; spec: PortStepSpec }
+  | { kind: "non-agent" }
+  | { kind: "unknown" };
+
+export function classifyDispatchStepType(stepType: string): StepTypeClass {
+  const spec = SPEC_BY_STEP_TYPE.get(stepType);
+  if (spec !== undefined) return { kind: "flow-step", spec };
+  if (isNonAgentDexKind(stepType)) return { kind: "non-agent" };
+  return { kind: "unknown" };
 }
 
 // ---------------------------------------------------------------------------
@@ -375,20 +382,19 @@ export function anchorDispatch(
   let nonAgentCount = 0;
   let unexplainedCount = 0;
   for (const entry of entries) {
-    const kind = classifyDispatchStepType(entry.stepType);
-    if (kind === "non-agent") {
+    const classified = classifyDispatchStepType(entry.stepType);
+    if (classified.kind === "non-agent") {
       nonAgentCount++;
       continue;
     }
-    if (kind === "unknown") {
+    if (classified.kind === "unknown") {
       unexplainedCount++;
       failures.push(
         `unexplained dispatch entry of type "${entry.stepType}" (not a known port-flow step type and not a non-agent dex kind)`,
       );
       continue;
     }
-    const spec = specForStepType(entry.stepType);
-    if (spec === null) continue; // unreachable by classification
+    const spec = classified.spec;
     const key = groupKey(entry.stepType, entry.identity);
     const group = entryGroups.get(key);
     if (group === undefined) {

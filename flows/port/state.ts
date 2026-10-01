@@ -414,7 +414,8 @@ export interface PortFileInput {
   epoch: number;
   file: string;
   round: number;
-  maxRounds: number;
+  // No round cap rides along: the parent enforces it (deriveNext, the wave
+  // entries) before it dispatches a child, and nothing in the child reads one.
   /** The parent's reviewed prep artifact (children own a copy in their store). */
   prep: PrepArtifact;
   /** Grouped queue errors for fix rounds (round ≥ 2); empty for round 1. */

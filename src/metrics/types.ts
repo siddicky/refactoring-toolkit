@@ -271,9 +271,14 @@ export function buildRetryContextDiagnosis(input: {
 export interface EnvelopeEvent {
   stepId: string;
   role: EnvelopeRole;
-  /** Lease file key; null for flow-level steps (and in the live factory). */
-  file: string | null;
-  round: number | null;
+  /**
+   * An explicit file/round, read when present. The live factory never writes
+   * them (a per-file step is identified by {@link EnvelopeEvent.identity}, the
+   * sanitized `file#round`), so they exist for hand-built and legacy events,
+   * where they take precedence over the identity.
+   */
+  file?: string | null;
+  round?: number | null;
   /** 0 = M4 start marker; >= 1 = real attempt (dex Context.attempt). */
   attempt: number;
   /** UTC ISO-8601 timestamp. */

@@ -992,7 +992,6 @@ describe("ChildLeaseStep", () => {
       epoch: 1,
       file: "src/a.php",
       round: 2,
-      maxRounds: 3,
       prep: prepOf(WAVE_MAP),
       queueFixErrors: errors,
       queueFixVitest: [],

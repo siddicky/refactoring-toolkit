@@ -5,7 +5,7 @@
  * is forbidden and policed by the Phase 1 module-boundary lint check.
  *
  * Each execution emits an envelope event:
- *   {stepId, role, file, round, attempt, started_at, ended_at, outcome,
+ *   {stepId, role, identity, attempt, started_at, ended_at, outcome,
  *    tokens, wall_clock_ms}
  *
  * `tokens` is REQUIRED (non-null) for model-calling roles (agent, review,
@@ -201,8 +201,6 @@ export function publishTurnDiagnosisEvent(context: Context, diagnosis: TurnDiagn
   const event: EnvelopeEvent = {
     stepId: TURN_HEALTH_STEP_ID,
     role: "record",
-    file: null,
-    round: null,
     attempt: context.attempt,
     started_at: diagnosis.recorded_at_utc,
     ended_at: diagnosis.recorded_at_utc,
@@ -355,9 +353,7 @@ async function executeEnvelope<I, O>(
   const base: EnvelopeEvent = {
     stepId: spec.stepId,
     role: spec.role,
-    // The target is identified by `identity` (file#round); file/round stay null.
-    file: null,
-    round: null,
+    // The target is identified by `identity` (file#round); the event carries no file/round of its own.
     attempt,
     started_at: startedAt,
     ended_at: null,
@@ -523,8 +519,6 @@ export function envelopeStartMarker<I>(spec: StartMarkerSpec<I>): EnvelopeStepCl
       const markerEvent: EnvelopeEvent = {
         stepId: spec.targetStepId,
         role: spec.role,
-        file: null,
-        round: null,
         attempt: 0,
         started_at: startedAt,
         ended_at: null,

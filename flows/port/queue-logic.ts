@@ -360,7 +360,6 @@ export function childInputOf(
     epoch: base.epoch,
     file,
     round,
-    maxRounds: base.maxRounds,
     prep,
     queueFixErrors: errors,
     queueFixVitest: vitest,

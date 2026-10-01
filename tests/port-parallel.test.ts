@@ -96,7 +96,7 @@ function fileRound(repo: string, overrides: Partial<FileRoundInput> = {}): FileR
 describe("parallel topology registration", () => {
   test("parallel topology is anchor-registered (AC2 holds on the new shape)", () => {
     for (const stepType of ["PpWaveDispatch", "PpWaveJoin", "PpChildLease", "PpChildRelease"]) {
-      expect(classifyDispatchStepType(stepType)).toBe("flow-step");
+      expect(classifyDispatchStepType(stepType).kind).toBe("flow-step");
       expect(specForStepType(stepType)?.kind).toBe("support");
     }
   });

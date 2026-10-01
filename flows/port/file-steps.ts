@@ -72,7 +72,6 @@ import {
   ppMarker,
   ppOut,
   ppPrep,
-  ppQueue,
   ppVerdict,
   ppVerify,
 } from "./state.js";
@@ -120,7 +119,7 @@ export const ImplementStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClas
   identityOf: fileRoundIdentity,
   stepOptions: {
     ...MODEL_STEP_OPTIONS,
-    executeLoadAttributeMaps: [sessionFenceMap, ppPrep, ppQueue],
+    executeLoadAttributeMaps: [sessionFenceMap, ppPrep],
   },
   inner: async (ctx, fri) => {
     const label = fenceLabel(fri.file, fri.round, fri.epoch);
