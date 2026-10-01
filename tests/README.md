@@ -31,7 +31,7 @@ Test data lives in a directory named `fixtures/` next to its users: `src/metrics
 
 ## Guards that read source
 
-Some tests assert on source text or on a hand-kept mirror (`tests/mirror-drift.test.ts`, `tests/test-layout.test.ts`, `tests/repo-hygiene.test.ts`, `tests/cli-scripts-guard.test.ts`, the source checks in `tests/lane-demotion-and-abort.test.ts` and `tests/jev-wiring.test.ts`). They exist to fail when two copies of a fact drift apart. `mirror-drift.test.ts` pins the copies the metrics layer and the dashboard keep by hand, because they must not import the flows (the dispatch-anchor step table, the fixer step id, the dashboard accounting types), against the real flows. When one fails, fix the drift. Do not loosen the guard.
+Some tests assert on source text or on a hand-kept mirror (`tests/mirror-drift.test.ts`, `tests/test-layout.test.ts`, `tests/repo-hygiene.test.ts`, `tests/cli-scripts-guard.test.ts`, `tests/doc-claims.test.ts` (the docs against `package.json` and the code: `.env.example` against the environment the code reads, every `bun run <script>`, link and repository path in the README, skill and runner reference, the documented `run-demo` flags and exit codes), the source checks in `tests/lane-demotion-and-abort.test.ts` and `tests/jev-wiring.test.ts`). They exist to fail when two copies of a fact drift apart. `mirror-drift.test.ts` pins the copies the metrics layer and the dashboard keep by hand, because they must not import the flows (the dispatch-anchor step table, the fixer step id, the dashboard accounting types), against the real flows. When one fails, fix the drift. Do not loosen the guard.
 
 ## Running
 
