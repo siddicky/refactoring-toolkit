@@ -15,6 +15,7 @@
  *    implementer agent).
  */
 import { choice, noul, type ChoiceCriteria, type ChoiceResponse, type JudgmentClient } from "./client.js";
+import { lookupPhpTypeHint } from "../../harness/skills/php-ts-type-map.js";
 
 // ---- inputs -----------------------------------------------------------------
 
@@ -56,8 +57,9 @@ export interface RecallResult {
 /**
  * PHPDoc/PHP type hint -> TypeScript type. Handles nullable (`?T`), unions,
  * indexed sugar (`T[]`), common generics (`array<K,V>`, `list<T>`,
- * `iterable<T>`), PHPDoc keywords, and class-name passthrough (last
- * namespace segment).
+ * `iterable<T>`), PHPDoc keywords (from the map SHARED with the porting
+ * conventions: harness/skills/php-ts-type-map.ts), and class-name passthrough
+ * (last namespace segment).
  */
 export function phpTypeToTsType(phpType: string): string {
   const t = phpType.trim();
@@ -69,6 +71,8 @@ export function phpTypeToTsType(phpType: string): string {
     return uniqueInOrder(unionParts.map((p) => phpTypeToTsType(p))).join(" | ");
   }
   if (t.endsWith("[]")) return `${phpTypeToTsType(t.slice(0, -2))}[]`;
+  // PHPStan/Psalm array shapes (`array{id: int}`) are not TS syntax.
+  if (/^(?:array|object)\s*\{/i.test(t)) return "Record<string, unknown>";
 
   const genericStart = t.indexOf("<");
   if (genericStart > 0 && t.endsWith(">")) {
@@ -78,44 +82,18 @@ export function phpTypeToTsType(phpType: string): string {
       .filter((a) => a.length > 0);
     if (head === "array" || head === "list" || head === "iterable") {
       const firstArg = args[0];
-      if (args.length === 1 && firstArg !== undefined) return `${phpTypeToTsType(firstArg)}[]`;
-      return "unknown[]";
+      const element = args.length === 1 && firstArg !== undefined ? phpTypeToTsType(firstArg) : null;
+      if (head === "iterable") return element === null ? "Iterable<unknown>" : `Iterable<${element}>`;
+      return element === null ? "unknown[]" : `${element}[]`;
     }
     return t; // unknown generic class: passthrough
   }
 
-  const simple = PHP_TYPE_TO_TS[t.toLowerCase()];
+  const simple = lookupPhpTypeHint(t);
   if (simple !== undefined) return simple;
   const segments = t.split("\\");
   return segments[segments.length - 1] ?? t;
 }
-
-const PHP_TYPE_TO_TS: Readonly<Record<string, string>> = {
-  int: "number",
-  integer: "number",
-  long: "number",
-  float: "number",
-  double: "number",
-  real: "number",
-  number: "number",
-  numeric: "number",
-  string: "string",
-  bool: "boolean",
-  boolean: "boolean",
-  true: "true",
-  false: "false",
-  null: "null",
-  mixed: "unknown",
-  array: "unknown[]",
-  list: "unknown[]",
-  iterable: "unknown[]",
-  callable: "(...args: unknown[]) => unknown",
-  object: "Record<string, unknown>",
-  scalar: "string | number",
-  void: "void",
-  self: "self",
-  static: "static",
-};
 
 /** Classify one PHP literal (source text) into a TS type; null when unrecognizable. */
 export function literalTypeToTs(literal: string): string | null {
@@ -134,8 +112,8 @@ function splitTopLevel(input: string, sep: string): string[] {
   let current = "";
   let depth = 0;
   for (const ch of input) {
-    if (ch === "<" || ch === "(") depth++;
-    else if (ch === ">" || ch === ")") depth = Math.max(0, depth - 1);
+    if (ch === "<" || ch === "(" || ch === "{") depth++;
+    else if (ch === ">" || ch === ")" || ch === "}") depth = Math.max(0, depth - 1);
     if (ch === sep && depth === 0) {
       parts.push(current);
       current = "";
@@ -160,6 +138,47 @@ function uniqueInOrder(values: readonly string[]): string[] {
 }
 
 /**
+ * The type token after each `@param` / `@return` / `@var` in a docblock:
+ * either the `{int}` brace form, or a run that keeps `<...>`, `(...)` and
+ * `{...}` balanced (so `array<int, string>` and `array{id: int}` survive
+ * their inner whitespace) and ends at top-level whitespace or a `$variable`.
+ */
+function docblockTypeTokens(docblock: string): string[] {
+  const tokens: string[] = [];
+  for (const m of docblock.matchAll(/@(?:param|return|var)\s+/g)) {
+    const start = (m.index ?? 0) + m[0].length;
+    if (docblock[start] === "{") {
+      const end = docblock.indexOf("}", start);
+      if (end > start + 1) tokens.push(docblock.slice(start + 1, end));
+      continue;
+    }
+    let depth = 0;
+    let end = start;
+    for (; end < docblock.length; end++) {
+      const ch = docblock[end] ?? "";
+      if (ch === "<" || ch === "(" || ch === "{") depth++;
+      else if (ch === ">" || ch === ")" || ch === "}") depth = Math.max(0, depth - 1);
+      else if (depth === 0 && (ch === "$" || /\s/.test(ch))) break;
+    }
+    if (end > start) tokens.push(docblock.slice(start, end));
+  }
+  return tokens;
+}
+
+/** Declaration modifiers that can sit before `$name` but are not types. */
+const DECLARATION_MODIFIERS: ReadonlySet<string> = new Set([
+  "public",
+  "protected",
+  "private",
+  "static",
+  "readonly",
+  "final",
+  "abstract",
+  "var",
+  "const",
+]);
+
+/**
  * Code recall: candidate TS types for a symbol, deduplicated preserving
  * first-seen order across sources in this order: docblock hints, signature
  * declared types (+ signature default literals), observed literal usages.
@@ -176,15 +195,18 @@ export function recallCandidates(symbol: PhpSymbol): RecallResult {
     candidates.push({ type, origin });
   };
 
-  // 1. docblock hints: @param {int} $x / @param int $x / @return int[] / @var float
-  for (const m of symbol.docblock?.matchAll(/@(?:param|return|var)\s+(?:\{([^}]+)\}|([^\s$]+))/g) ??
-    []) {
-    push(m[1] ?? m[2], "docblock");
+  // 1. docblock hints: @param {int} $x / @param int $x / @return array<int, string> / @var float
+  for (const token of docblockTypeTokens(symbol.docblock ?? "")) {
+    push(token, "docblock");
   }
 
-  // 2. signature declared types: "?Type $name", "Type $name", return after "): Type"
+  // 2. signature declared types: "?Type $name", "Type $name", return after "): Type".
+  // An untyped `private $name;` matches the same shape with the visibility
+  // keyword in the type slot — modifiers are not types.
   for (const m of symbol.signature.matchAll(/(\??[A-Za-z_][\w\\|<>[\]]*)\s+\$[A-Za-z_]\w*/g)) {
-    push(m[1], "signature");
+    const declared = m[1];
+    if (declared !== undefined && DECLARATION_MODIFIERS.has(declared.toLowerCase())) continue;
+    push(declared, "signature");
   }
   const returnType = symbol.signature.match(/\)\s*:\s*(\??[A-Za-z_][\w\\<>[\]|]*)\s*(?:\{|;|$)/);
   if (returnType) push(returnType[1], "signature");

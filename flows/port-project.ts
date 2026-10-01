@@ -97,6 +97,7 @@ import {
   composePrepReviseTurn,
   composeQueueFixTurn,
   harvestPhpSymbols,
+  renderSymbolTable,
 } from "../src/harness/runtime.js";
 import {
   buildTscQueueState,
@@ -141,6 +142,7 @@ import {
   demoteReviewerLane,
   extractCodeFence,
   extractJsonObject,
+  extractSpecMap,
   mapVerdictToMetrics,
   parseUnifiedDiff,
   renderDiffForReview,
@@ -223,6 +225,11 @@ export interface SymbolTableRow {
   selected: string;
   flagged: boolean;
   escalations: number;
+  /**
+   * "live" = judged by the real Jev client; "scripted" = the offline double's
+   * first-candidate pick (UNVERIFIED). Absent on rows persisted before the tag.
+   */
+  judge?: "live" | "scripted";
 }
 
 export interface PrepDraft {
@@ -293,6 +300,13 @@ export interface PrepArtifact {
   sourceMap: Record<string, { outPath: string; notes: string }>;
   /** Phase 3: per-symbol table rows backing the generated spec. */
   symbolTable: SymbolTableRow[];
+  /**
+   * The user's PORTING.md text (the prep seed's stub baseline), kept by value:
+   * the planner rewrites it into `raw`, so implement/fix turns also receive the
+   * original as the authoritative user contract. Absent on artifacts persisted
+   * before this field existed.
+   */
+  userContract?: string;
 }
 
 export interface PortQueueState {
@@ -755,7 +769,7 @@ function requireHarness(): AgentSessionClient {
 }
 
 /** One agent turn: definition prompt + enforced tool policy + turn text. */
-function composeAgentTurn(def: AgentDefinition, turn: string): string {
+export function composeAgentTurn(def: AgentDefinition, turn: string): string {
   return [def.prompt, "", toolPolicyBlock(def), "", turn].join("\n\n");
 }
 
@@ -779,7 +793,7 @@ interface AgentTurnResult {
   usage: TokenUsage | null;
 }
 
-async function runAgentTurn(input: {
+export async function runAgentTurn(input: {
   def: AgentDefinition;
   sessionId: string;
   turn: string;
@@ -1330,7 +1344,7 @@ const PrepStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRunInput
     const symbols: PhpSymbol[] = [];
     for (const file of input.files) {
       const source = await readFile(join(input.sourceRoot, file), "utf8");
-      symbols.push(...harvestPhpSymbols(file, source, 12));
+      symbols.push(...harvestPhpSymbols(file, source));
     }
     ppPrepSeed.set(ctx, "seed", { stubRaw: raw, symbols });
     ppPrepState.set(ctx, "state", { prepIteration: 0 });
@@ -1544,6 +1558,7 @@ const ImplementStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileR
       prepExcerpt: prep.raw,
       outputPath: outPath,
       ...(scopeNote !== null ? { scopeNote } : {}),
+      ...(prep.userContract !== undefined ? { userContract: prep.userContract } : {}),
     });
     const result = await runAgentTurn({
       def: IMPLEMENTER,
@@ -1828,10 +1843,12 @@ const FixerStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRound
       persistedAtUtc: new Date().toISOString(),
     });
 
+    const userContract = ppPrep.get(ctx, "prep")?.userContract;
     const turn = composeFixerTurn({
       currentContent: current,
       findings: kept.findings,
       outputPath: outPath,
+      ...(userContract !== undefined ? { userContract } : {}),
     });
     const result = await runAgentTurn({
       def: FIXER,
@@ -2043,6 +2060,9 @@ const SymbolTableStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     const client = requirePortJudgment();
     const seed = ppPrepSeed.get(ctx, "seed");
     if (seed === undefined) throw new Error("prep seed missing");
+    // Only the real client produces judgments; the offline double's answers
+    // are scripted first-candidate picks and its token counts are synthetic.
+    const scripted = client.kind !== "real";
 
     // Usage accumulator: selectSymbolType consumes the client internally, so
     // wrap it to capture System One usage for the envelope (never zero-null).
@@ -2068,6 +2088,7 @@ const SymbolTableStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
         selected: decision.selected,
         flagged: decision.flagged,
         escalations: decision.escalations.length,
+        judge: scripted ? "scripted" : "live",
       });
     }
 
@@ -2078,7 +2099,10 @@ const SymbolTableStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortR
     }
 
     ppSymtab.set(ctx, "symtab", { rows });
-    return { output: input, tokens: usageTokens > 0 ? usageTokens : 1 };
+    // Real usage only: the scripted double's synthetic counts must not land in
+    // the judgment-role totals, and "no calls were made" is an honest 0, not an
+    // invented 1.
+    return { output: input, tokens: scripted ? 0 : usageTokens };
   },
   route: (_ctx, _input, out) => goTo(PrepStart, out),
 });
@@ -2106,25 +2130,20 @@ const PrepGenerateStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
     if (seed === undefined || symtab === undefined) {
       throw new Error("prep seed/symbol table missing");
     }
-    const symbolTableText = [
-      "| Symbol | Kind | File | Candidates | Selected | Flagged |",
-      "|---|---|---|---|---|---|",
-      ...symtab.rows.map(
-        (r) =>
-          `| ${r.symbol} | ${r.kind} | ${r.file} | ${r.candidates.join(", ") || "—"} | ${r.selected} | ${r.flagged ? "yes" : "no"} |`,
-      ),
-    ].join("\n");
     const sources: Array<{ name: string; source: string }> = [];
     for (const file of input.files) {
       sources.push({ name: file, source: await readFile(join(input.sourceRoot, file), "utf8") });
     }
+    const symbolTableText = renderSymbolTable(symtab.rows, sources);
     const turn = composePrepGenerateTurn({
       phpFiles: sources,
       symbolTableText,
       stubPrepBaseline: seed.stubRaw,
     });
     const result = await runAgentTurn({ def: IMPLEMENTER, sessionId: await prepSessionId(input.epoch), turn, file: PREP_SPEC_FILE, round: 0, ...plannerPromptOpts() });
-    const specText = extractCodeFence(result.text);
+    // Outermost ```markdown block + structural check (a truncated or
+    // table-less spec throws, so dex retries instead of adopting it).
+    const specText = extractSpecMap(result.text, { expectedFiles: input.files });
     ppPrepDraft.set(ctx, "draft", { specText, iteration: 0 });
     return { output: input, tokens: result.usage ?? result.tokens };
   },
@@ -2412,7 +2431,7 @@ const PrepReviseStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<PortRu
       round: 0,
       ...plannerPromptOpts(),
     });
-    const specText = extractCodeFence(result.text);
+    const specText = extractSpecMap(result.text, { expectedFiles: input.files });
     ppPrepDraft.set(ctx, "draft", { specText, iteration: draft.iteration + 1 });
     return { output: input, tokens: result.usage ?? result.tokens };
   },
@@ -2437,6 +2456,7 @@ const PrepFinalizeStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<Port
       raw: draft.specText,
       sourceMap: parsePrepSourceMap(seed.stubRaw),
       symbolTable: symtab.rows,
+      userContract: seed.stubRaw,
     });
     return { output: input, tokens: null };
   },
@@ -3061,6 +3081,7 @@ const QueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<FileRo
       outputPath: outPath,
       errors: errs.map((e) => ({ code: e.code, message: e.message, line: e.line })),
       testFailures: feed.testFailures,
+      ...(prep?.userContract !== undefined ? { userContract: prep.userContract } : {}),
     });
     const result = await runAgentTurn({
       def: FIXER,
@@ -3477,6 +3498,7 @@ const ChildQueueFixStep: EnvelopeStepClass<FileRoundInput> = envelopeStepClass<F
       outputPath: outPath,
       errors: errs.map((e) => ({ code: e.code, message: e.message, line: e.line })),
       testFailures: feed.testFailures,
+      ...(prep?.userContract !== undefined ? { userContract: prep.userContract } : {}),
     });
     const result = await runAgentTurn({
       def: FIXER,

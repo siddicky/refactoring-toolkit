@@ -3,35 +3,17 @@
  *
  * The implementer prompt (harness/agents/implementer.ts) composes this skill
  * in by name; conventions here are the single source both the prompt and the
- * tests read. Kept deliberately small: the conventions that matter for the
- * demo port of the generated PHP fixture to a `tsc --strict`-clean TS output.
+ * tests read. Kept deliberately small: the conventions that matter for a
+ * PHP → `tsc --strict`-clean TypeScript port (the source project is whatever
+ * the run's source root points at; nothing here names a specific fixture).
  */
 
 import type { SkillModule } from "./types.js";
+import { PHP_TO_TS_TYPE_MAP } from "./php-ts-type-map.js";
 
-/**
- * PHP type-hint vocabulary → TS annotation. `array` maps to `unknown[]` on
- * purpose: the per-symbol table (prep artifact) is expected to narrow it;
- * staying `unknown[]` keeps implicit guesses out of `tsc --strict`.
- */
-export const PHP_TO_TS_TYPE_MAP: Readonly<Record<string, string>> = {
-  string: "string",
-  int: "number",
-  integer: "number",
-  float: "number",
-  double: "number",
-  bool: "boolean",
-  boolean: "boolean",
-  array: "unknown[]",
-  iterable: "Iterable<unknown>",
-  callable: "(...args: unknown[]) => unknown",
-  object: "Record<string, unknown>",
-  mixed: "unknown",
-  null: "null",
-  void: "void",
-  self: "this",
-  static: "this",
-};
+// The PHP → TS type map is shared with src/typesafe/symbol-types.ts (audit
+// C23): one module, one mapping. Re-exported here for the existing import path.
+export { PHP_TO_TS_TYPE_MAP };
 
 export const PORTING_CONVENTIONS: SkillModule = {
   name: "porting-conventions",
@@ -58,6 +40,6 @@ export const PORTING_CONVENTIONS: SkillModule = {
     "### Forbidden in ported output",
     "- No direct DB/IO client usage (e.g. `mysqli`, `PDO`) — call through the seam interface named by the prep artifact.",
     "- No `any`, no `@ts-ignore`, no `as unknown as X` casts to silence the compiler.",
-    "- Do not modify the read-only PHP fixture or files outside your lease worktree.",
+    "- Do not modify the read-only PHP source; emit only the one file the prompt asks for.",
   ].join("\n"),
 };

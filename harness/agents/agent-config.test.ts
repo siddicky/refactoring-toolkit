@@ -80,8 +80,15 @@ runTestFile("agent-config", {
       );
     }
     assertTrue(
-      REVIEWER.prompt.includes('"findings"') && REVIEWER.prompt.includes('"citation_check"'),
-      "prompt embeds the verdict contract fields",
+      REVIEWER.prompt.includes('"findings"') &&
+        REVIEWER.prompt.includes('"description"') &&
+        REVIEWER.prompt.includes('"snippet"') &&
+        REVIEWER.prompt.includes("fix | wontfix"),
+      "prompt embeds the verdict contract fields (description, required snippet, closed disposition enum)",
+    );
+    assertTrue(
+      !REVIEWER.prompt.includes('"citation_check"'),
+      "citation_check is recomputed by the toolkit; the prompt no longer asks for it (C14)",
     );
     assertTrue(
       REVIEWER.prompt.includes("EMPTY findings array is a valid"),

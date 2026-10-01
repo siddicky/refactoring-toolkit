@@ -74,7 +74,10 @@ describe("reviewer effective permissions (post config + plugin merge)", () => {
     expect(block).toContain("No git operations of any kind");
     const writerBlock = toolPolicyBlock(IMPLEMENTER);
     expect(writerBlock).toContain("No git operations of any kind");
-    expect(writerBlock).not.toContain("NONE — you have no tools");
+    // Bridge mode (C15): every turn is sent with ALL tools off, and the block is
+    // rendered from the tools map actually sent, so writers read NONE as well.
+    expect(writerBlock).toContain("NONE — you have no tools at all");
+    expect(writerBlock).not.toMatch(/Effective tools this turn: (?!NONE)/);
   });
 });
 
