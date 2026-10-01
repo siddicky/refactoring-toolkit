@@ -138,12 +138,17 @@ export const DEFAULT_PROMPT_CALL_TIMEOUT_MS = 1_200_000;
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
 /**
- * m4: invalid values (NaN, <=0, above 24h) fall back to `fallbackMs`. A valid
- * value is used exactly as given — never scaled.
+ * m4: invalid values fall back to `fallbackMs`: anything that is not whole
+ * digits (a unit suffix such as `20m`, a fraction, an exponent, a sign, hex),
+ * zero, or above 24h. A valid value is used exactly as given, never scaled.
+ * parseInt would read `20m` as 20 and `1e6` as 1 and arm a ceiling of a few
+ * milliseconds on every prompt call, the opposite of "uses the default" (B24).
  */
 export function parseWaitMs(raw: string | undefined, fallbackMs: number): number {
-  const parsed = Number.parseInt(raw ?? "", 10);
-  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 24 * 60 * 60_000) {
+  const text = (raw ?? "").trim();
+  if (!/^\d+$/.test(text)) return fallbackMs;
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > 24 * 60 * 60_000) {
     return fallbackMs;
   }
   return parsed;

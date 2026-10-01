@@ -140,6 +140,17 @@ describe("parseWaitMs", () => {
     }
     expect(parseWaitMs(String(24 * 60 * 60_000), 123)).toBe(24 * 60 * 60_000);
   });
+
+  test("B24: a value that is not whole digits is invalid, not half-read (parseInt turned `20m` into 20 ms and `1e6` into 1 ms)", () => {
+    for (const bad of ["20m", "30s", "1.5", "1e6", "+5", "0x10", "1_000", "12 34", "99999999999999999999"]) {
+      expect([bad, parseWaitMs(bad, 123)]).toEqual([bad, 123]);
+    }
+  });
+
+  test("B24: surrounding whitespace is ignored, the digits are used as written", () => {
+    expect(parseWaitMs(" 600 ", 123)).toBe(600);
+    expect(parseWaitMs("007", 123)).toBe(7);
+  });
 });
 
 describe("env accessors", () => {
