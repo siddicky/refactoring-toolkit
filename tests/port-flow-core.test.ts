@@ -18,7 +18,9 @@ import { join } from "node:path";
 
 import type { StepDecision } from "@superdurable/dex";
 
+import { RESTART_WINDOW_RETRY } from "../flows/port/step-options.js";
 import {
+  BOOTSTRAP_OP_ID,
   LEASE_SLOT_CAP,
   PortProjectFlow,
   ppBootstrap,
@@ -45,6 +47,7 @@ import {
   commitLeaseChanges,
   findCommitByOpId,
   InMemoryLeaseStore,
+  isWorktreeClean,
   operationId,
   WorktreePool,
   type CompletionMarker,
@@ -691,4 +694,27 @@ describe("C92: BootstrapStep", () => {
     expect(record).toMatchObject({ wrote: [], installRan: false, committed: false, sha: null });
     expect(completedEnvelope(stores)?.outcome).toBe("skipped");
   }, 60_000);
+
+  test("B1: a replay that finds the scaffold on disk but never committed commits it and records the sha", async () => {
+    const fx = await makeBootstrappedRepo();
+    // The attempt that died after the install left the runner config uncommitted in the integration worktree.
+    await writeFile(join(fx.integration, "vitest.config.ts"), "export default { test: {} };\n");
+    expect(await isWorktreeClean(fx.integration)).toBe(false);
+
+    const flow = new PortProjectFlow();
+    const stores: AttributeStores = new Map();
+    const next = nextOf(await run(stores, flow.bootstrap, runInput(fx, ["src/A.php"], { dispatchMode: "sequential" })));
+    expect(next.step).toBe(flow.dispatch.constructor);
+    const record = peekAttribute<BootstrapRecord>(stores, ppBootstrap, "bootstrap");
+    expect(record).toMatchObject({ wrote: [], installRan: false, committed: true });
+    expect(record?.sha).toBeString();
+    expect((await findCommitByOpId(fx.repo, BOOTSTRAP_OP_ID))?.sha).toBe(record?.sha as string);
+    expect(await isWorktreeClean(fx.integration)).toBe(true);
+    expect(completedEnvelope(stores)?.outcome).toBe("completed");
+  }, 60_000);
+
+  test("B1: the step carries the restart-window retry budget (bun install is the longest non-model step)", () => {
+    const options = new PortProjectFlow().bootstrap.getStepOptions?.() as { executeRetry?: unknown } | undefined;
+    expect(options?.executeRetry).toEqual(RESTART_WINDOW_RETRY);
+  });
 });

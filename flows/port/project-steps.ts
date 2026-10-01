@@ -481,7 +481,8 @@ export const QueueVerifyStep: EnvelopeStepClass<PortRunInput> = envelopeStepClas
  * run installs — provisioning is this step, so the slow command lives OUTSIDE
  * every agent turn. Idempotent (skip-if-present; commit dedups on
  * BOOTSTRAP_OP_ID), so re-entry after every wave join / sequential integrate
- * is a cheap no-op and kill-replay converges. In parallel mode it sits between
+ * is a cheap no-op and kill-replay converges: a replay that finds the files
+ * written but never committed commits them (B1). In parallel mode it sits between
  * the parent's port-wave join and the next dispatch; in sequential mode
  * between each integrate and the release.
  */
@@ -490,7 +491,10 @@ export const BootstrapStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
   stepId: "pp-bootstrap",
   role: "integration",
   identityOf: () => "bootstrap",
-  stepOptions: { executeRetry: { maximumAttempts: 2 }, executeLoadAttributeMaps: [ppPrep] },
+  // `bun install` (up to 300s) is the longest non-model step, so it is the one
+  // most likely in flight at a kill: it needs the restart-window budget, not
+  // the 2 attempts that ran out before the worker was back.
+  stepOptions: { executeRetry: RESTART_WINDOW_RETRY, executeLoadAttributeMaps: [ppPrep] },
   inner: async (ctx, input) => {
     // C06: the scaffold tsconfig must cover the prep source map's outputs.
     const prep = ppPrep.get(ctx, "prep");
@@ -506,7 +510,7 @@ export const BootstrapStep: EnvelopeStepClass<PortRunInput> = envelopeStepClass<
       committed: outcome.committed,
       sha: outcome.sha,
     });
-    return { output: input, tokens: null, outcome: outcome.changed ? "completed" : "skipped" };
+    return { output: input, tokens: null, outcome: outcome.changed || outcome.committed ? "completed" : "skipped" };
   },
   // Both wiring points converge back on dispatch: parallel mode enters from
   // the port-wave join (before dispatch), sequential mode from Release

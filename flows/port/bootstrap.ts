@@ -12,7 +12,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { execTool } from "../../src/exec.js";
-import { commitLeaseChanges, findCommitByOpId } from "../../src/git/worktree.js";
+import { commitLeaseChanges, findCommitByOpId, isWorktreeClean } from "../../src/git/worktree.js";
 import { pathExists } from "./queue-tools.js";
 import { stripDotSlash } from "../../src/file-keys.js";
 
@@ -164,6 +164,11 @@ export interface BootstrapOutcome {
   /** The sole-committer bootstrap commit landed on THIS invocation. */
   committed: boolean;
   sha: string | null;
+  /**
+   * Every artifact was already on disk: nothing was written and no install
+   * ran. It does NOT mean the scaffold is committed; `committed` says whether
+   * this invocation committed a leftover one.
+   */
   alreadyBootstrapped: boolean;
 }
 
@@ -176,8 +181,11 @@ export interface BootstrapDeps {
  * Provision the integrated checkout: package.json (type: module, test script
  * vitest run, vitest devDep), strict tsconfig.json, vitest.config.ts, a
  * node_modules gitignore, and the dependency install. Idempotent end to end:
- * a satisfied checkout is a no-op, and the commit dedups on BOOTSTRAP_OP_ID,
- * so kill-replay never duplicates the bootstrap commit.
+ * a satisfied, clean checkout is a no-op, and the commit dedups on
+ * BOOTSTRAP_OP_ID, so kill-replay never duplicates the bootstrap commit. The
+ * commit decision does not depend on what this invocation wrote: a replay
+ * after a kill (or a failed commit) between the install and the commit finds
+ * every file already on disk and an uncommitted tree, and still commits it.
  */
 export async function runIntegrationBootstrap(
   input: { repoRoot: string; integrationWorktreePath: string; tsconfigInclude?: readonly string[] },
@@ -208,7 +216,12 @@ export async function runIntegrationBootstrap(
     sha: null,
     alreadyBootstrapped: !plan.needed,
   };
-  if (!plan.needed) return outcome;
+  // A satisfied CLEAN checkout has nothing to write and nothing uncommitted: a
+  // pure skip that costs one `git status`. A satisfied DIRTY one is a replay
+  // whose earlier attempt died (or failed to commit) after writing and
+  // installing: every artifact is on disk, so the plan alone cannot tell, and
+  // the commit below is exactly the work that attempt never finished.
+  if (!plan.needed && (await isWorktreeClean(itg))) return outcome;
 
   const write = async (name: string, content: string): Promise<void> => {
     await writeFile(join(itg, name), content, "utf8");

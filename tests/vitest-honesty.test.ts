@@ -220,6 +220,97 @@ describe("US-010 runIntegrationBootstrap (real temp git checkout)", () => {
   });
 });
 
+describe("B1: bootstrap replay commits a scaffold that a kill or a failed commit left uncommitted", () => {
+  const SCAFFOLD = ["package.json", "tsconfig.json", "vitest.config.ts", ".gitignore"];
+  /** The runner bin the real `bun install` creates; the injected installs below are no-ops. */
+  async function fakeInstalledBin(integrationWorktreePath: string): Promise<void> {
+    await mkdir(join(integrationWorktreePath, "node_modules", ".bin"), { recursive: true });
+    await writeFile(join(integrationWorktreePath, "node_modules", ".bin", "vitest"), "#!/bin/sh\n");
+  }
+  const integrationTree = async (repoRoot: string): Promise<string[]> =>
+    (await git(repoRoot).run(["ls-tree", "-r", "--name-only", "integration"])).split("\n").filter((l) => l !== "");
+
+  test("killed between install and commit: the replay commits the scaffold under the keyed op-ID", async () => {
+    const { repoRoot, integrationWorktreePath } = await makeIntegrationFixture();
+    try {
+      // Attempt 1 wrote the files, the install finished, and the worker died before the commit.
+      await expect(
+        runIntegrationBootstrap({ repoRoot, integrationWorktreePath }, {
+          install: async (cwd) => {
+            await fakeInstalledBin(cwd);
+            throw new Error("worker killed");
+          },
+        }),
+      ).rejects.toThrow("worker killed");
+      expect(await findCommitByOpId(repoRoot, BOOTSTRAP_OP_ID)).toBeUndefined();
+      expect(await integrationTree(repoRoot)).toEqual(["README.md"]);
+
+      // Attempt 2: every file is present and the runner bin exists, so nothing is left to WRITE...
+      const replay = await runIntegrationBootstrap({ repoRoot, integrationWorktreePath }, { install: async () => {} });
+      expect(replay.wrote).toEqual([]);
+      expect(replay.installRan).toBe(false);
+      // ...but the scaffold must still reach the integration branch.
+      expect(replay.committed).toBe(true);
+      expect(replay.sha).not.toBeNull();
+      expect((await findCommitByOpId(repoRoot, BOOTSTRAP_OP_ID))?.sha).toBe(replay.sha!);
+      expect(await integrationTree(repoRoot)).toEqual([".gitignore", "README.md", "package.json", "tsconfig.json", "vitest.config.ts"]);
+      expect(await countOpIdCommits(repoRoot)).toBe(1);
+
+      // Re-entry after every wave join: a clean, committed checkout is a no-op that makes no second commit.
+      const again = await runIntegrationBootstrap({ repoRoot, integrationWorktreePath }, { install: async () => {} });
+      expect(again.committed).toBe(false);
+      expect(again.changed).toBe(false);
+      expect(await countOpIdCommits(repoRoot)).toBe(1);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a commit that fails once (index.lock) is retried by the next attempt instead of reading as bootstrapped", async () => {
+    const { repoRoot, integrationWorktreePath } = await makeIntegrationFixture();
+    try {
+      const gitDir = (await git(integrationWorktreePath).run(["rev-parse", "--absolute-git-dir"])).trim();
+      const lock = join(gitDir, "index.lock");
+      const install = async (cwd: string): Promise<void> => {
+        await fakeInstalledBin(cwd);
+        await writeFile(lock, ""); // another git process holds the index when the commit runs
+      };
+      await expect(runIntegrationBootstrap({ repoRoot, integrationWorktreePath }, { install })).rejects.toThrow();
+      await rm(lock, { force: true });
+      expect(await findCommitByOpId(repoRoot, BOOTSTRAP_OP_ID)).toBeUndefined();
+
+      const retry = await runIntegrationBootstrap({ repoRoot, integrationWorktreePath }, { install: async () => {} });
+      expect(retry.committed).toBe(true);
+      expect(await integrationTree(repoRoot)).toEqual(expect.arrayContaining(SCAFFOLD));
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a checkout that already carries the scaffold in git stays a no-op (no commit, no keyed op-ID)", async () => {
+    const { repoRoot, integrationWorktreePath } = await makeIntegrationFixture();
+    try {
+      for (const f of SCAFFOLD) await writeFile(join(integrationWorktreePath, f), "");
+      await writeFile(
+        join(integrationWorktreePath, "package.json"),
+        `${JSON.stringify({ type: "module", scripts: { test: "vitest run" }, devDependencies: { vitest: "^3.2.4" } })}\n`,
+      );
+      await writeFile(join(integrationWorktreePath, ".gitignore"), "node_modules/\n");
+      await git(integrationWorktreePath).run(["add", "-A"]);
+      await git(integrationWorktreePath).run(["commit", "-m", "scaffold by hand"]);
+      await fakeInstalledBin(integrationWorktreePath);
+
+      const out = await runIntegrationBootstrap({ repoRoot, integrationWorktreePath }, { install: async () => {} });
+      expect(out.alreadyBootstrapped).toBe(true);
+      expect(out.committed).toBe(false);
+      expect(out.sha).toBeNull();
+      expect(await countOpIdCommits(repoRoot)).toBe(0);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 async function countOpIdCommits(repoRoot: string): Promise<number> {
   const out = await git(repoRoot).run(["log", "--all", "--grep", `Operation-ID: ${BOOTSTRAP_OP_ID}$`, "--format=%H"]);
   return out.split("\n").filter((l) => l.trim() !== "").length;
