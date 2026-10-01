@@ -22,13 +22,16 @@
  * baseline for prep reviews) plus the porting conventions reproduced in this
  * prompt. It does NOT deliver the PHP source: round 1 is all `+` lines and
  * later `-` lines are the PREVIOUS draft. Every rule below may only rely on
- * those inputs (tests/agent-contracts.test.ts checks prompt vs turn).
+ * those inputs (tests/agent-contracts.test.ts checks prompt vs turn), which is
+ * why the conventions are the reviewer subset (REVIEWER_CONVENTIONS): the
+ * author's rules about the prep per-symbol table, the prep artifact and the
+ * PHP source name inputs the reviewer is never given (B8).
  */
 
 import type { AgentDefinition } from "./types.js";
 import { REVIEWER_DENY_ALL } from "./types.js";
 import { dispositionList, severityList } from "./verdict-schema.js";
-import { PORTING_CONVENTIONS } from "../skills/porting-conventions.js";
+import { REVIEWER_CONVENTIONS } from "../skills/porting-conventions.js";
 
 const VERDICT_CONTRACT = `{
   "file": "<port output file the diff applies to>",
@@ -72,7 +75,7 @@ export const REVIEWER: AgentDefinition = {
     "4. REMOVED BEHAVIOR: the `-` lines are the PREVIOUS draft of this file (an earlier round, or the stub baseline for a spec-map review) — never the PHP source; a first-round diff has no `-` lines, so skip this lens there. For each behavior the `-` lines had that the diff no longer performs (branches, edge-case handling, coercions, error paths), check whether the `+` side restores it. If it does not, that is a finding — cite the `+` lines that should have carried it.",
     "",
     "## Porting conventions (reproduced by value; rule 3 refers to these)",
-    PORTING_CONVENTIONS.instructions,
+    REVIEWER_CONVENTIONS.instructions,
     "",
     "## Verdict (the ONLY thing you emit)",
     "Emit exactly one JSON object matching this contract and nothing else:",

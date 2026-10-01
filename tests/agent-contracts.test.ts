@@ -15,7 +15,7 @@ import { IMPLEMENTER } from "../harness/agents/implementer.js";
 import { REVIEWER } from "../harness/agents/reviewer.js";
 import { TOOL_CATEGORIES } from "../harness/agents/types.js";
 import { PHP_TO_TS_TYPE_MAP, SELF_TYPE_RULE } from "../harness/skills/php-ts-type-map.js";
-import { PORTING_CONVENTIONS } from "../harness/skills/porting-conventions.js";
+import { PORTING_CONVENTIONS, REVIEWER_CONVENTIONS } from "../harness/skills/porting-conventions.js";
 import { phpTypeToTsType, recallCandidates } from "../src/typesafe/symbol-types.js";
 import {
   composeAgentTurn,
@@ -517,9 +517,49 @@ describe("C16: reviewer prompt vs reviewer turn consistency", () => {
 
   test("the conventions the prompt points at are delivered by value in the same body", () => {
     expect(REVIEWER.prompt).toContain("porting conventions reproduced below");
-    expect(body).toContain(PORTING_CONVENTIONS.instructions);
+    expect(body).toContain(REVIEWER_CONVENTIONS.instructions);
     // and the turn's diff block is delivered intact
     expect(body).toContain(rendered.block);
+  });
+
+  // B8: the author's conventions name inputs only an author has. Reproducing them
+  // for a reviewer who is told "do not speculate about what you cannot see" made
+  // every type outside the table a violation nobody could verify.
+  describe("B8: every convention the reviewer receives is checkable from the diff alone", () => {
+    const uncheckable: ReadonlyArray<[string, RegExp]> = [
+      ["the prep per-symbol table", /per-symbol table/i],
+      ["the prep artifact", /prep artifact/i],
+      ["the seam interface the prep names", /seam interface/i],
+      ["the read-only PHP source", /read-only PHP source|modify the .*PHP/i],
+      ["emitting the one file the prompt asks for", /emit only the one file/i],
+    ];
+
+    test("the reviewer's conventions name none of the inputs the reviewer turn does not deliver", () => {
+      for (const [what, pattern] of uncheckable) {
+        expect([what, pattern.test(REVIEWER_CONVENTIONS.instructions)]).toEqual([what, false]);
+        // while the author's conventions do carry them (they ARE the author's rules)
+        expect([what, pattern.test(PORTING_CONVENTIONS.instructions)]).toEqual([what, true]);
+      }
+      // nor does anything else in the assembled prompt point at them
+      for (const [what, pattern] of uncheckable) expect([what, pattern.test(REVIEWER.prompt)]).toEqual([what, false]);
+    });
+
+    test("a type outside the table is explicitly not a violation by itself", () => {
+      expect(REVIEWER_CONVENTIONS.instructions).toContain("is not a violation by itself");
+      expect(REVIEWER_CONVENTIONS.instructions).not.toContain("never guessed");
+    });
+
+    test("the rules the reviewer CAN check are the author's: same type table, self/static rule, strict-mode rule and constructs", () => {
+      for (const [php, ts] of Object.entries(PHP_TO_TS_TYPE_MAP)) {
+        expect(REVIEWER_CONVENTIONS.instructions).toContain(`\`${php}\` → \`${ts}\``);
+      }
+      expect(REVIEWER_CONVENTIONS.instructions).toContain(SELF_TYPE_RULE);
+      expect(REVIEWER_CONVENTIONS.instructions).toContain("No `any`, no `@ts-ignore`");
+      for (const construct of ["`__construct` → `constructor`", "`foreach ($xs as $x)`", "ES module `import`", "Traits → plain composition"]) {
+        expect(REVIEWER_CONVENTIONS.instructions).toContain(construct);
+        expect(PORTING_CONVENTIONS.instructions).toContain(construct);
+      }
+    });
   });
 
   test("the diff header carries exactly what the prompt says it carries (no conventions)", () => {
