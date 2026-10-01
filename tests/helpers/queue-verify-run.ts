@@ -61,18 +61,29 @@ function ctxOver(stores: Stores, flowId: string): AsyncContext {
   } as unknown as AsyncContext;
 }
 
-/** One done file (`test/PriceTest.php` -> `test/price.test.ts`) whose ported test fails under the fake vitest. */
-export async function runQueueVerifyOverFakeTools(output: {
-  vitestStdout: string;
-  vitestStderr: string;
-}): Promise<Stores> {
+/**
+ * One done file (`test/PriceTest.php` -> `test/price.test.ts`). `tsc` replays
+ * the given output/exit (default: clean). `vitest`, when given, replays a
+ * failing run (exit 1); without it no vitest binary exists in the checkout, so
+ * the vitest queue is skipped.
+ */
+export async function runQueueVerifyOverFakeTools(
+  output: {
+    vitestStdout?: string;
+    vitestStderr?: string;
+    tscStdout?: string;
+    tscExit?: number;
+  } = {},
+): Promise<Stores> {
   const itg = await tempDir("checkout");
   await mkdir(join(itg, "src"), { recursive: true });
   await mkdir(join(itg, "test"), { recursive: true });
   await writeFile(join(itg, "src", "price.ts"), "export const p = 1;\n");
   await writeFile(join(itg, "test", "price.test.ts"), "// ported test\n");
-  await fakeBin(join(itg, "node_modules", ".bin", "vitest"), output.vitestStdout, output.vitestStderr, 1);
-  queueVerifyTools.tscBin = await fakeBin(join(await tempDir("tsc"), "tsc"), "", "", 0);
+  if (output.vitestStdout !== undefined) {
+    await fakeBin(join(itg, "node_modules", ".bin", "vitest"), output.vitestStdout, output.vitestStderr ?? "", 1);
+  }
+  queueVerifyTools.tscBin = await fakeBin(join(await tempDir("tsc"), "tsc"), output.tscStdout ?? "", "", output.tscExit ?? 0);
 
   const queue: PortQueueState = {
     pending: [],

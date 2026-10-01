@@ -47,6 +47,41 @@ function code(path: string): string {
     .replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
 }
 
+const SAMPLE_DIFF = `diff --git a/src/money.ts b/src/money.ts
+new file mode 100644
+--- /dev/null
++++ b/src/money.ts
+@@ -0,0 +1,2 @@
++export class Money {
++}`;
+const DIFF: CapturedDiff = {
+  diffId: "d1",
+  raw: SAMPLE_DIFF,
+  doc: { diff_id: "d1", file: FILE, base_ref: "HEAD", hunks: parseUnifiedDiff(SAMPLE_DIFF).hunks },
+  bodyLineOffset: DIFF_HEADER_LINES,
+};
+
+/** Minimal dex context stub: attribute reads/writes against an in-memory store. */
+function ctxAt(attempt: number): Context {
+  const stores = new Map<unknown, Map<string, unknown>>();
+  return {
+    attempt,
+    flowId: "int6",
+    getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
+    setAttribute: (attr: unknown, value: unknown, instance: string) => {
+      const store = stores.get(attr) ?? new Map<string, unknown>();
+      store.set(instance, value);
+      stores.set(attr, store);
+    },
+  } as unknown as Context;
+}
+
+afterEach(() => {
+  resetInStepVerdictMemo();
+  configureTurnHealthAssessor(null);
+  configurePortHarness(undefined as unknown as AgentSessionClient);
+});
+
 describe("INT-6: one demotion threshold", () => {
   test("the flow and the metrics type use isDemotedAttempt; no inline `attempt >= 2` copies remain", () => {
     for (const path of ["flows/port-project.ts", "src/metrics/types.ts"]) {
@@ -75,34 +110,6 @@ describe("INT-6: one demotion threshold", () => {
     }
   });
 
-  const SAMPLE_DIFF = `diff --git a/src/money.ts b/src/money.ts
-new file mode 100644
---- /dev/null
-+++ b/src/money.ts
-@@ -0,0 +1,2 @@
-+export class Money {
-+}`;
-  const diff: CapturedDiff = {
-    diffId: "d1",
-    raw: SAMPLE_DIFF,
-    doc: { diff_id: "d1", file: FILE, base_ref: "HEAD", hunks: parseUnifiedDiff(SAMPLE_DIFF).hunks },
-    bodyLineOffset: DIFF_HEADER_LINES,
-  };
-
-  function ctxAt(attempt: number): Context {
-    const stores = new Map<unknown, Map<string, unknown>>();
-    return {
-      attempt,
-      flowId: "int6",
-      getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
-      setAttribute: (attr: unknown, value: unknown, instance: string) => {
-        const store = stores.get(attr) ?? new Map<string, unknown>();
-        store.set(instance, value);
-        stores.set(attr, store);
-      },
-    } as unknown as Context;
-  }
-
   function replying(text: string): AgentSessionClient {
     let n = 0;
     return {
@@ -116,12 +123,6 @@ new file mode 100644
       abortSessionsNotTagged: () => Promise.resolve([]),
     };
   }
-
-  afterEach(() => {
-    resetInStepVerdictMemo();
-    configureTurnHealthAssessor(null);
-    configurePortHarness(undefined as unknown as AgentSessionClient);
-  });
 
   test("the diagnosis a failing review turn hands the assessor carries the helper's lane for every attempt", async () => {
     const seen: TurnHealthAssessmentInput[] = [];
@@ -141,7 +142,7 @@ new file mode 100644
           file: FILE,
           round: 1,
           epoch: 1,
-          diff,
+          diff: DIFF,
           attempt,
           maxAttempts: 99,
         }),
@@ -173,11 +174,6 @@ describe("INT-6: PromptResult.aborted is real, end to end", () => {
     return new OpencodeHarness(client, undefined, undefined, { waitMs: 50, pollIntervalMs: 2, callTimeoutMs: 1_000 });
   }
 
-  afterEach(() => {
-    resetInStepVerdictMemo();
-    configurePortHarness(undefined as unknown as AgentSessionClient);
-  });
-
   test("the harness reports the abort as a result, not as an upstream failure", async () => {
     const reply = await abortedHarness().prompt("ses_abort", "hi");
     expect(reply.aborted).toBe(true);
@@ -193,17 +189,12 @@ describe("INT-6: PromptResult.aborted is real, end to end", () => {
   test("a review turn on an aborted session fails with the abort, not a misleading upstream failure", async () => {
     configurePortHarness(abortedHarness());
     const error = await runReviewTurn({
-      ctx: ctxFor(),
+      ctx: ctxAt(1),
       reviewerId: "reviewer-A",
       file: FILE,
       round: 1,
       epoch: 1,
-      diff: {
-        diffId: "d1",
-        raw: "x",
-        doc: { diff_id: "d1", file: FILE, base_ref: "HEAD", hunks: [] },
-        bodyLineOffset: DIFF_HEADER_LINES,
-      },
+      diff: DIFF,
       attempt: 1,
       maxAttempts: 99,
     }).then(
@@ -213,18 +204,4 @@ describe("INT-6: PromptResult.aborted is real, end to end", () => {
     expect(error?.message).toContain("agent session aborted");
     expect(error?.message).not.toContain("upstream failure");
   });
-
-  function ctxFor(): Context {
-    const store = new Map<unknown, Map<string, unknown>>();
-    return {
-      attempt: 1,
-      flowId: "int6-abort",
-      getAttribute: (attr: unknown, instance: string) => store.get(attr)?.get(instance),
-      setAttribute: (attr: unknown, value: unknown, instance: string) => {
-        const m = store.get(attr) ?? new Map<string, unknown>();
-        m.set(instance, value);
-        store.set(attr, m);
-      },
-    } as unknown as Context;
-  }
 });

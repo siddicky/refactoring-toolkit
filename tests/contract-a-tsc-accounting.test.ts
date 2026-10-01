@@ -14,29 +14,15 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { AsyncContext } from "@superdurable/dex";
 
-import {
-  PortProjectFlow,
-  ppBurndown,
-  ppConfig,
-  ppPrep,
-  ppQueue,
-  queueVerifyTools,
-  type PortQueueState,
-  type PortRunInput,
-  type PrepArtifact,
-  type QueueBurnDownSample,
-} from "../flows/port-project.js";
+import { ppBurndown, type QueueBurnDownSample } from "../flows/port-project.js";
 import { burnDownSeries, feedFromState } from "../src/dashboard/state.js";
 import type { TscAccountingSample } from "../src/dashboard/types.js";
 import { collectBurnDown, type StateAttribute } from "../src/metrics/collect.js";
 import { renderReport } from "../src/metrics/render.js";
 import type { QueueBurnDownEvent, TscRunAccounting as ReportTscAccounting } from "../src/metrics/types.js";
 import type { TscRunAccounting as WriterTscAccounting } from "../src/queues/tsc-queue.js";
+import { cleanupQueueVerifyRun, runQueueVerifyOverFakeTools, type Stores } from "./helpers/queue-verify-run.js";
 
 // ---------------------------------------------------------------------------
 // Compile-time: the three declarations of the accounting are one shape. A
@@ -48,88 +34,17 @@ type Mutual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 const writerEqualsReport: Mutual<WriterTscAccounting, ReportTscAccounting> = true;
 const reportEqualsDashboard: Mutual<ReportTscAccounting, TscAccountingSample> = true;
 // The flow's own sample type must be accepted by the renderer's event type.
-const flowSampleIsReportEvent = (row: QueueBurnDownSample): QueueBurnDownEvent => row;
+const flowSampleIsReportEvent: [QueueBurnDownSample] extends [QueueBurnDownEvent] ? true : never = true;
 
 // ---------------------------------------------------------------------------
-// Harness: real QueueVerifyStep, stub ctx, fake tsc binary
+// Harness: the real QueueVerifyStep over a fake `tsc` (tests/helpers)
 // ---------------------------------------------------------------------------
 
-type Stores = Map<unknown, Map<string, unknown>>;
-
-function put(stores: Stores, attr: unknown, key: string, value: unknown): void {
-  let s = stores.get(attr);
-  if (s === undefined) {
-    s = new Map();
-    stores.set(attr, s);
-  }
-  s.set(key, value);
-}
-
-function ctxOver(stores: Stores): AsyncContext {
-  return {
-    attempt: 1,
-    flowId: "contract-a",
-    getAttribute: (attr: unknown, instance: string) => stores.get(attr)?.get(instance),
-    setAttribute: (attr: unknown, value: unknown, instance: string) => put(stores, attr, instance, value),
-  } as unknown as AsyncContext;
-}
-
-const tempDirs: string[] = [];
-const PRODUCTION_TOOLS = { ...queueVerifyTools };
-
-async function tempDir(prefix: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), `contract-a-${prefix}-`));
-  tempDirs.push(dir);
-  return dir;
-}
-
-afterEach(async () => {
-  Object.assign(queueVerifyTools, PRODUCTION_TOOLS);
-  for (const dir of tempDirs.splice(0)) await rm(dir, { recursive: true, force: true });
-});
-
-/** A `tsc` that prints canned output and exits with `exit`. */
-async function fakeTsc(stdout: string, exit: number): Promise<string> {
-  const dir = await tempDir("bin");
-  await writeFile(join(dir, "stdout"), stdout);
-  const path = join(dir, "tsc");
-  await writeFile(path, `#!/bin/sh\ncat "${join(dir, "stdout")}"\nexit ${exit}\n`);
-  await chmod(path, 0o755);
-  return path;
-}
-
-const SOURCE_MAP = { "src/A.php": { outPath: "src/a.ts", notes: "" } };
+afterEach(cleanupQueueVerifyRun);
 
 /** Runs the real QueueVerifyStep once and returns the attribute rows it wrote. */
-async function runQueueVerify(tscStdout: string, tscExit: number): Promise<Stores> {
-  const itg = await tempDir("checkout");
-  await mkdir(join(itg, "src"), { recursive: true });
-  queueVerifyTools.tscBin = await fakeTsc(tscStdout, tscExit);
-  const stores: Stores = new Map();
-  const queue: PortQueueState = {
-    pending: [],
-    current: null,
-    done: [{ file: "src/A.php", round: 1, commitSha: null, treeHash: null }],
-    blocked: [],
-  };
-  const prep: PrepArtifact = { raw: "", sourceMap: SOURCE_MAP, symbolTable: [] };
-  put(stores, ppQueue, "queue", queue);
-  put(stores, ppConfig, "config", { maxRounds: 2, prepMaxRounds: 1 });
-  put(stores, ppPrep, "prep", prep);
-  const input: PortRunInput = {
-    repoRoot: itg,
-    worktreeRoot: join(itg, ".wt"),
-    integrationWorktreePath: itg,
-    epoch: 1,
-    sourceRoot: itg,
-    prepPath: "",
-    files: [],
-    maxRounds: 2,
-    dispatchMode: "parallel",
-  };
-  await new PortProjectFlow().queueVerify.execute(ctxOver(stores), input);
-  return stores;
-}
+const runQueueVerify = (tscStdout: string, tscExit: number): Promise<Stores> =>
+  runQueueVerifyOverFakeTools({ tscStdout, tscExit });
 
 /** The durable attributes as `dexcli flow state` lists them: `<map>/<instance>`. */
 function asStateAttributes(stores: Stores): StateAttribute[] {
@@ -160,8 +75,7 @@ function dashboardPoint(stores: Stores) {
 
 describe("INT-2 Contract A: T1's tsc total row is exactly what T5 and T6 read", () => {
   test("the type declarations agree (compile-time gate; see Mutual<> above)", () => {
-    expect(writerEqualsReport && reportEqualsDashboard).toBe(true);
-    expect(typeof flowSampleIsReportEvent).toBe("function");
+    expect(writerEqualsReport && reportEqualsDashboard && flowSampleIsReportEvent).toBe(true);
   });
 
   test("the written row: file null, accounting under `tsc`, snake_case keys, nothing else on it", async () => {

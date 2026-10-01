@@ -45,8 +45,9 @@ async function freePort(): Promise<number> {
 }
 
 async function runDemo(args: string[], env: Record<string, string>) {
-  scratch = await mkdtemp(join(tmpdir(), "run-demo-int5-"));
-  const proc = Bun.spawn(["bun", RUN_DEMO, ...args.map((a) => (a === "<dir>" ? scratch! : a))], {
+  const dir = await mkdtemp(join(tmpdir(), "run-demo-int5-"));
+  scratch = dir;
+  const proc = Bun.spawn(["bun", RUN_DEMO, ...args.map((a) => (a === "<dir>" ? dir : a))], {
     cwd: ROOT,
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...env },
     stdout: "pipe",
