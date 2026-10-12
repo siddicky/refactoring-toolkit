@@ -139,3 +139,6 @@ To watch a run, `demo --dashboard` (or `STATUS_REPO_ROOT=/absolute/path/to/outpu
 - [Fixtures](fixtures/FIXTURES.md): the generated PHP demo inputs.
 - [Tests](tests/README.md): where tests go and how to run them.
 - [Build notes](BUILD_NOTES.md): historical implementation and live-infrastructure evidence, not a substitute for verifying a new migration. Where it disagrees with the code, the code wins.
+
+
+Rework verification: rework-verify-79be07fe19920821898a
